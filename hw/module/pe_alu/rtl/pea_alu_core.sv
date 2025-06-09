@@ -75,7 +75,7 @@ module pea_alu_core
 
   always_ff @(posedge clk) begin
     s0_mul_op0    <= in_mul_op0;
-    s0_mul_op1    <= in_mul_op1;
+    s0_mul_op1    <= in_mu_op1;
     s0_add_op1    <= in_add_op1;
     s0_dop        <= in_dop;
     s0_side       <= in_side;

@@ -109,21 +109,21 @@ for i in `seq 1 5`; do
     PAYLOAD_BIT=$((4 + $RANDOM % (10-3)))
 
     cmd="${SCRIPT_DIR}/run.sh \
-          -g $GLWE_K \
-          -R $R \
-          -S $S \
-          -W $MOD_Q_W \
-          -q "2**$MOD_Q_W" \
-          -i $REGF_REG_NB \
-          -j $REGF_COEF_NB \
-          -k $REGF_SEQ \
-          -a $ALU_NB \
-          -Q $PAYLOAD_BIT \
-          -D $PADDING_BIT \
-          -- $args \
-          -P PEA_PERIOD int $PEA_PERIOD \
-          -P PEM_PERIOD int $PEM_PERIOD \
-          -P PEP_PERIOD int $PEP_PERIOD"
+  -g $GLWE_K \
+  -R $R \
+  -S $S \
+  -W $MOD_Q_W \
+  -q "2**$MOD_Q_W" \
+  -i $REGF_REG_NB \
+  -j $REGF_COEF_NB \
+  -k $REGF_SEQ \
+  -a $ALU_NB \
+  -Q $PAYLOAD_BIT \
+  -D $PADDING_BIT \
+  -- $args \
+  -P PEA_PERIOD int $PEA_PERIOD \
+  -P PEM_PERIOD int $PEM_PERIOD \
+  -P PEP_PERIOD int $PEP_PERIOD"
 
     echo "==========================================================="
     echo "INFO> Running : $cmd"

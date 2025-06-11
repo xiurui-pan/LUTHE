@@ -430,21 +430,24 @@ assign query_vld = !query_ack_vld;
   // Flop all trace data
   always_ff @(posedge clk)
     if(!s_rst_n) begin
-      trace_wr_en <= 1'b0;
-    end else begin
-      // Write trace for each successful query
+      trace_wr_en            <= 1'b0;
+      trace_data.timestamp   <= '0;
+      trace_data.insn        <= '0;
+      trace_data.cmd         <= NONE; 
+      trace_data.state       <= '0;
+      trace_data.pe_reserved <= '0;
+    end 
+    else begin
       trace_wr_en <= (query_ack.status == SUCCESS) && query_ack_vld;
-    end
 
-  always_ff @(posedge clk) begin
-    trace_data.timestamp <= nxt_timestamp;
-    trace_data.insn <= query_ack.info.insn.raw_insn;
-    trace_data.cmd <= query_ack.cmd;
-    trace_data.state <= query_ack.info.state;
-    trace_data.pe_reserved <=
-      ((query_ack.cmd == RETIRE) && (query_ack.info.insn.kind == PBS)) ?
-        f_pep_ack_pld : '0;
-  end
+      trace_data.timestamp   <= nxt_timestamp;
+      trace_data.insn        <= query_ack.info.insn.raw_insn;
+      trace_data.cmd         <= query_ack.cmd;
+      trace_data.state       <= query_ack.info.state;
+      trace_data.pe_reserved <=
+        ((query_ack.cmd == RETIRE) && (query_ack.info.insn.kind == PBS)) ?
+          f_pep_ack_pld : '0;
+    end
 
   // Consume pep_ack_fifo
   assign f_pep_ack_rdy = trace_wr_en && (query_ack.cmd == RETIRE) && (query_ack.info.insn.kind == PBS);

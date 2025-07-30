@@ -62,7 +62,7 @@ echo -n "" > $TMP_FILE
 # IOP_NAME_L=("ADD" "SUB" "MUL" "BW_AND" "BW_OR" "BW_XOR" "CMP_GT" "CMP_GTE" "CMP_LT" "CMP_LTE" "CMP_EQ" "CMP_NEQ")
 # IOP_WIDTH_L=(4 8 16)
 # PBS_W_MAX=16
-IOP_LIST=("ADD" "SUB" "MUL")
+IOP_LIST=("ADD")
 IOP_WIDTH=20 # 固定操作数位宽为16位，以进行公平比较
 PBS_WIDTH=10  # 固定PBS位宽
 USE_BPIP=1   # 固定BPIP设置

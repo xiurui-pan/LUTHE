@@ -11,6 +11,21 @@
 //
 // ==============================================================================================
 
+/*
+一个标准的PBS指令在pe_pbs中的执行流程如下：
+  pep_sequencer接收并解码一个PBS指令。
+  sequencer命令pep_load_blwe（在pe_pbs_with_ks内）从片上寄存器文件（RegFile）中读取输入的LWE密文。
+  同时，sequencer命令pep_load_glwe（在pe_pbs_with_entry_assembly内）通过m_axi4_glwe接口从HBM中读取查找表（LUT，即测试多项式）。
+  decomposer对输入的LWE密文进行处理。
+  sequencer启动pep_mono_mult_acc模块，开始盲旋转主循环。
+  在循环的每一次迭代中：
+    bsk_manager从HBM中流式读取一个BSK样本。
+    pep_mono_mult_acc将BSK样本和累加器（ACC）送入pe_pbs_with_ntt_core_head进行外部积计算。
+  循环结束后，pe_pbs_with_modsw对累加器结果进行模切换。
+  pe_pbs_with_ks使用ksk_manager提供的密钥，对结果进行密钥交换。
+  最终结果被写回片上寄存器文件。
+*/
+
 module pe_pbs
   import common_definition_pkg::*;
   import param_tfhe_pkg::*;
@@ -343,7 +358,7 @@ module pe_pbs
 // * bsk_if
 // * bsk_manager
 // ============================================================================================== --
-  pe_pbs_with_bsk
+  pe_pbs_with_bsk     // BSK manager
   #(
     .MOD_MULT_TYPE         (MOD_MULT_TYPE),
     .REDUCT_TYPE           (REDUCT_TYPE),
@@ -409,7 +424,7 @@ module pe_pbs
 // * ksk_if
 // * ksk_manager
 // ============================================================================================== --
-  pe_pbs_with_ksk
+  pe_pbs_with_ksk     // KSK manager
   #(
     .MOD_MULT_TYPE         (MOD_MULT_TYPE),
     .REDUCT_TYPE           (REDUCT_TYPE),
@@ -514,7 +529,7 @@ module pe_pbs
     .ksk_vld                (ksk_vld),
     .ksk_rdy                (ksk_rdy),
 
-    .seq_ldb_cmd            (seq_ldb_cmd),
+    .seq_ldb_cmd            (seq_ldb_cmd),    // Sequencer, core status machine, input and decode inst
     .seq_ldb_vld            (seq_ldb_vld),
     .seq_ldb_rdy            (seq_ldb_rdy),
     .ldb_seq_done           (ldb_seq_done),
@@ -548,12 +563,12 @@ module pe_pbs
 // ============================================================================================== --
 // pe_pbs_with_entry
 // contains:
-// * pep_mono_mult_acc
+// * pep_mono_mult_acc  // BR kernel, used for External Product
 // * pep_sequencer
 // * pep_load_glwe
-// * decomposer
+// * decomposer         // Input pre-processing for LWE ciphertexts
 // ============================================================================================== --
-  pe_pbs_with_entry_assembly
+  pe_pbs_with_entry_assembly    // The whole entry of the pipeline
   #(
     .MOD_MULT_TYPE         (MOD_MULT_TYPE),
     .REDUCT_TYPE           (REDUCT_TYPE),

@@ -14,6 +14,11 @@
 
 module tb_wop_pbs_kernel;
 
+  import param_tfhe_pkg::*;
+  import regf_common_param_pkg::*;
+  import common_definition_pkg::*;
+  import pep_if_pkg::*;
+
 // ==============================================================================================
 // Parameters
 // ==============================================================================================
@@ -36,21 +41,40 @@ module tb_wop_pbs_kernel;
   parameter int BSK_PC = 4;
   parameter int KSK_PC = 4;
 
+  // Test control parameters
+  localparam int CLK_HALF_PERIOD = 5;
+  localparam int SAMPLE_NB = 10;
+
 // ==============================================================================================
 // Clock and Reset
 // ==============================================================================================
   logic clk;
-  logic s_rst_n;
+  logic a_rst_n;  // asynchronous reset
+  logic s_rst_n;  // synchronous reset
   
   initial begin
     clk = 0;
-    forever #5 clk = ~clk; // 100MHz clock
+    a_rst_n = 0;
+    #17 a_rst_n = 1;  // release async reset after 17ns
   end
   
+  always begin
+    #CLK_HALF_PERIOD clk = ~clk; // 100MHz clock
+  end
+  
+  always_ff @(posedge clk) begin
+    s_rst_n <= a_rst_n;
+  end
+
+// ==============================================================================================
+// End of test
+// ==============================================================================================
+  logic end_of_test;
+  
   initial begin
-    s_rst_n = 0;
-    #200;
-    s_rst_n = 1;
+    wait (end_of_test);
+    @(posedge clk) $display("%t > SUCCEED !", $time);
+    $finish;
   end
 
 // ==============================================================================================
@@ -392,7 +416,7 @@ module tb_wop_pbs_kernel;
     end
     
     $display("\n=== Testbench Completed ===");
-    $finish;
+    end_of_test = 1'b1;
   end
 
 // ==============================================================================================
@@ -421,7 +445,7 @@ module tb_wop_pbs_kernel;
   initial begin
     #100000000; // 100ms timeout
     $error("Testbench timeout!");
-    $finish;
+    end_of_test = 1'b1;
   end
 
 endmodule

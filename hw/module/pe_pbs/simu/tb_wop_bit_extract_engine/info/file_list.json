@@ -1,0 +1,28 @@
+{
+    "local_root_path": "${PROJECT_DIR}",
+    "dep_root_path": "${PROJECT_DIR}",
+    "rtl_files": [
+        {
+            "name": "hw/module/pe_pbs/rtl/wop_bit_extract_engine.sv",
+            "library": "work",
+            "env": ["simu"],
+            "target": ["all"],
+            "is_include_file": false
+        },
+        {
+            "name": "hw/module/pe_pbs/simu/tb_wop_bit_extract_engine/rtl/tb_wop_bit_extract_engine.sv",
+            "library": "work",
+            "env": ["simu"],
+            "target": ["all"],
+            "is_include_file": false
+        }
+    ],
+    "dependency_dir": [
+        "hw/simu_lib/simu_base",
+        "hw/module/pe_pbs/simu/tb_wop_bit_extract_engine/gen",
+        "hw/simu_lib/stream_lib", 
+        "hw/module/regfile",
+        "hw/module/pe_pbs"
+    ],
+    "include_dir": []
+}

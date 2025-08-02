@@ -28,7 +28,10 @@ module wop_bit_extract_engine
   parameter int MOD_Q_W = 32,
   parameter int MAX_BIT_WIDTH = 20,
   parameter int N_LVL1 = 1024,
-  parameter int LUT_ENTRY_SIZE = 8192  // Size of each LUT entry in bytes
+  parameter int LUT_ENTRY_SIZE = 8192,  // Size of each LUT entry in bytes
+  parameter int REGF_ADDR_W = 16,
+  parameter int REGF_RD_REQ_W = 32,
+  parameter int REGF_WR_REQ_W = 32
 )
 (
   input  logic clk,
@@ -111,7 +114,8 @@ module wop_bit_extract_engine
   logic write_done;
   
   // Counter for reading/writing coefficients
-  logic [$clog2(N_LVL1+2)-1:0] coeff_counter;
+  // Need to count up to 2*(N_LVL1+1)-1 = 2049, so need $clog2(2050) = 12 bits
+  logic [$clog2(2*(N_LVL1+1))-1:0] coeff_counter;
   
   // PBS operation control (reusing existing PBS infrastructure)
   logic pbs_req_vld;
@@ -121,32 +125,115 @@ module wop_bit_extract_engine
 // ==============================================================================================
 // State Machine Implementation
 // ==============================================================================================
+  
+  // Counter logic signals
+  logic [31:0] next_coeff_counter;
+  
   always_ff @(posedge clk or negedge s_rst_n) begin
     if (!s_rst_n) begin
       current_state <= IDLE;
       coeff_counter <= '0;
+      // Initialize output arrays to avoid X values
+      for (int i = 0; i <= N_LVL1; i++) begin
+        output_bit_0[i] <= 32'h0;
+        output_bit_1[i] <= 32'h0;
+        tmp_sample[i] <= 32'h0;
+        small_sample[i] <= 32'h0;
+      end
+      // Initialize control signals
+      input_read_done <= 1'b0;
+      bit31_first_done <= 1'b0;
+      bit27_done <= 1'b0;
+      bit31_second_done <= 1'b0;
+      write_done <= 1'b0;
     end else begin
       current_state <= next_state;
+      coeff_counter <= next_coeff_counter;
       
-      // Update counter based on operations
+      // Handle tmp_sample updates based on current state
       case (current_state)
-        READ_INPUT_LWE: begin
-          if (regf_rd_data_avail[0] && regf_rd_last_word) begin
-            coeff_counter <= '0;
-          end else if (regf_rd_data_avail[0]) begin
-            coeff_counter <= coeff_counter + 1;
+        SHIFT_LEFT_4: begin
+          // Store tmp_sample for first bit extraction: tmp = in << 4
+          for (int i = 0; i <= N_LVL1; i++) begin
+            tmp_sample[i] <= input_lwe_sample[i] << 4;
           end
+          // Debug: SHIFT_LEFT_4 step completed
         end
-        
-        WRITE_RESULTS: begin
-          if (regf_wr_data_rdy[0] && coeff_counter == N_LVL1) begin
-            coeff_counter <= '0;
-          end else if (regf_wr_data_rdy[0]) begin
-            coeff_counter <= coeff_counter + 1;
+        EXTRACT_BIT31_FIRST: begin
+          // Store output_bit_0 for result
+          // Bit extraction for polynomial coefficients (a[0] to a[N_LVL1-1])
+          for (int i = 0; i < N_LVL1; i++) begin
+            // map_to_bit31: 如果bit31=0 -> 0x00000000，如果bit31=1 -> 0x80000000
+            output_bit_0[i] <= (tmp_sample[i][31]) ? 32'h80000000 : 32'h00000000;
           end
+          // Constant term (b[0]) only gets offset, no bit extraction
+          output_bit_0[N_LVL1] <= (32'h1 << 30);
+          
+          // Debug: EXTRACT_BIT31_FIRST step completed
+        end
+        EXTRACT_BIT27: begin
+          // Store small_sample for difference calculation
+          // Bit extraction for polynomial coefficients (a[0] to a[N_LVL1-1])
+          for (int i = 0; i < N_LVL1; i++) begin
+            // map_to_bit27: 如果bit27=0 -> 0x00000000，如果bit27=1 -> 0x08000000
+            small_sample[i] <= (tmp_sample[i][27]) ? 32'h08000000 : 32'h00000000;
+          end
+          // Constant term (b[0]) only gets offset, no bit extraction
+          small_sample[N_LVL1] <= (32'h1 << 26);
+          
+          // Debug: EXTRACT_BIT27 step completed
+        end
+        COMPUTE_DIFF: begin
+          // Store tmp_sample for second bit extraction: tmp = (in - small) << 3
+          // Only compute difference for polynomial coefficients a[0] to a[N_LVL1-1], NOT constant term
+          for (int i = 0; i < N_LVL1; i++) begin
+            tmp_sample[i] <= (input_lwe_sample[i] - small_sample[i]) << 3;
+          end
+          // Keep original constant term for tmp_sample (don't modify it)
+          // tmp_sample[N_LVL1] remains unchanged from previous step
+        end
+        EXTRACT_BIT31_SECOND: begin
+          // Store output_bit_1 for result
+          // Bit extraction for polynomial coefficients (a[0] to a[N_LVL1-1])
+          for (int i = 0; i < N_LVL1; i++) begin
+            // map_to_bit31: 如果bit31=0 -> 0x00000000，如果bit31=1 -> 0x80000000
+            output_bit_1[i] <= (tmp_sample[i][31]) ? 32'h80000000 : 32'h00000000;
+          end
+          // Constant term (b[0]) only gets offset, no bit extraction
+          output_bit_1[N_LVL1] <= (32'h1 << 30);
         end
       endcase
     end
+  end
+  
+  // Counter logic in combinational block to avoid timing issues
+  always_comb begin
+    next_coeff_counter = coeff_counter; // Default: keep current value
+    
+    case (current_state)
+      READ_INPUT_LWE: begin
+        if (regf_rd_data_avail[0] && regf_rd_last_word) begin
+          next_coeff_counter = '0;
+        end else if (regf_rd_data_avail[0]) begin
+          next_coeff_counter = coeff_counter + 1;
+        end
+      end
+      
+      WRITE_RESULTS: begin
+        // Increment counter until we complete all writes (including the final one at 2049)
+        if (regf_wr_data_rdy[0] && coeff_counter < (2*(N_LVL1 + 1) - 1)) begin
+          next_coeff_counter = coeff_counter + 1;
+        end else if (regf_wr_data_rdy[0] && coeff_counter == (2*(N_LVL1 + 1) - 1)) begin
+          // At the final count, don't increment further (state will transition to DONE)
+          next_coeff_counter = coeff_counter;
+        end
+      end
+      
+      DONE: begin
+        // Reset counter when entering DONE state
+        next_coeff_counter = '0;
+      end
+    endcase
   end
 
   always_comb begin
@@ -190,10 +277,7 @@ module wop_bit_extract_engine
       end
       
       SHIFT_LEFT_4: begin
-        // tmp = in << 4 (shift left by 4 bits)
-        for (int i = 0; i <= N_LVL1; i++) begin
-          tmp_sample[i] = input_lwe_sample[i] << 4;
-        end
+        // tmp = in << 4 (shift left by 4 bits) - now handled in always_ff
         next_state = EXTRACT_BIT31_FIRST;
       end
       
@@ -206,42 +290,24 @@ module wop_bit_extract_engine
         lut_req_vld = 1'b1;
         
         if (lut_req_rdy && lut_data_avail) begin
-          // Store LUT data and perform PBS-like operation
-          // For now, simulate the PBS operation result
-          for (int i = 0; i <= N_LVL1; i++) begin
-            output_bit_0[i] = tmp_sample[i] ^ 32'h80000000; // Simplified bit extraction
-          end
-          // Add offset: outs[0].b[0] += 1 << 30
-          output_bit_0[N_LVL1] = output_bit_0[N_LVL1] + (32'h1 << 30);
-          
           bit31_first_done = 1'b1;
           next_state = EXTRACT_BIT27;
         end
       end
       
       EXTRACT_BIT27: begin
-        // Extract bit 27 using map_to_bit27 LUT -> small
+        // Extract bit 27 using map_to_bit27 LUT -> small - now handled in always_ff
         lut_addr = bit_extract_lut_base_addr + MAP_TO_BIT27_OFFSET;
         lut_req_vld = 1'b1;
         
         if (lut_req_rdy && lut_data_avail) begin
-          // Perform PBS-like operation for bit 27 extraction
-          for (int i = 0; i <= N_LVL1; i++) begin
-            small_sample[i] = tmp_sample[i] ^ 32'h08000000; // Extract bit 27
-          end
-          // Add offset: small[0].b[0] += 1 << 26
-          small_sample[N_LVL1] = small_sample[N_LVL1] + (32'h1 << 26);
-          
           bit27_done = 1'b1;
           next_state = COMPUTE_DIFF;
         end
       end
       
       COMPUTE_DIFF: begin
-        // tmp = (in - small) << 3
-        for (int i = 0; i <= N_LVL1; i++) begin
-          tmp_sample[i] = (input_lwe_sample[i] - small_sample[i]) << 3;
-        end
+        // tmp = (in - small) << 3 - now handled in always_ff
         next_state = EXTRACT_BIT31_SECOND;
       end
       
@@ -251,13 +317,6 @@ module wop_bit_extract_engine
         lut_req_vld = 1'b1;
         
         if (lut_req_rdy && lut_data_avail) begin
-          // Perform second bit 31 extraction
-          for (int i = 0; i <= N_LVL1; i++) begin
-            output_bit_1[i] = tmp_sample[i] ^ 32'h80000000; // Extract bit 31 again
-          end
-          // Add offset: outs[1].b[0] += 1 << 30
-          output_bit_1[N_LVL1] = output_bit_1[N_LVL1] + (32'h1 << 30);
-          
           bit31_second_done = 1'b1;
           next_state = WRITE_RESULTS;
         end
@@ -268,17 +327,19 @@ module wop_bit_extract_engine
         regf_wr_req_vld = 1'b1;
         regf_wr_data_vld[0] = 1'b1;
         
-        if (coeff_counter < N_LVL1) begin
-          // Write first output bit
-          regf_wr_req = {output_bit_addr_0, 16'h0000};
+        if (coeff_counter <= N_LVL1) begin
+          // Write first output bit with proper address offset
+          automatic logic [REGF_ADDR_W-1:0] addr_offset = coeff_counter;  // Safe type conversion
+          regf_wr_req = {output_bit_addr_0 + addr_offset, 16'h0000};
           regf_wr_data[0] = output_bit_0[coeff_counter];
         end else begin
-          // Write second output bit  
-          regf_wr_req = {output_bit_addr_1, 16'h0000};
-          regf_wr_data[0] = output_bit_1[coeff_counter - N_LVL1];
+          // Write second output bit with proper address offset
+          automatic logic [REGF_ADDR_W-1:0] offset = coeff_counter - N_LVL1 - 1;
+          regf_wr_req = {output_bit_addr_1 + offset, 16'h0000};
+          regf_wr_data[0] = output_bit_1[coeff_counter - N_LVL1 - 1];
         end
         
-        if (regf_wr_data_rdy[0] && coeff_counter == (2*N_LVL1 + 1)) begin
+        if (regf_wr_data_rdy[0] && coeff_counter == (2*(N_LVL1 + 1) - 1)) begin
           write_done = 1'b1;
           next_state = DONE;
         end

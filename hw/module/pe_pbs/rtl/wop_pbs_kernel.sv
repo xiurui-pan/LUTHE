@@ -348,6 +348,133 @@ module wop_pbs_kernel
     .ksk_mem_addr(ksk_mem_addr)
   );
 
+  // 3. Dedicated PE_PBS Instance for Bit Extraction Operations
+  logic [PE_INST_W-1:0] bit_extract_pbs_inst;
+  logic bit_extract_pbs_inst_vld;
+  logic bit_extract_pbs_inst_rdy;
+  logic bit_extract_pbs_inst_ack;
+  logic [LWE_K_W-1:0] bit_extract_pbs_inst_ack_br_loop;
+  logic bit_extract_pbs_inst_load_blwe_ack;
+  
+  // Dedicated RegFile interface for bit extract PBS operations
+  logic bit_extract_pbs_regf_wr_req_vld;
+  logic [REGF_WR_REQ_W-1:0] bit_extract_pbs_regf_wr_req;
+  logic [REGF_COEF_NB-1:0] bit_extract_pbs_regf_wr_data_vld;
+  logic [REGF_COEF_NB-1:0][MOD_Q_W-1:0] bit_extract_pbs_regf_wr_data;
+  logic bit_extract_pbs_regf_rd_req_vld;
+  logic [REGF_RD_REQ_W-1:0] bit_extract_pbs_regf_rd_req;
+
+  pe_pbs #(
+    .MOD_MULT_TYPE(MOD_MULT_TYPE),
+    .REDUCT_TYPE(REDUCT_TYPE),
+    .MULT_TYPE(MULT_TYPE),
+    .PHI_MULT_TYPE(PHI_MULT_TYPE),
+    .PP_MOD_MULT_TYPE(PP_MOD_MULT_TYPE),
+    .PP_MULT_TYPE(PP_MULT_TYPE),
+    .MODSW_2_PRECISION_W(MODSW_2_PRECISION_W),
+    .MODSW_2_MULT_TYPE(MODSW_2_MULT_TYPE),
+    .MODSW_MULT_TYPE(MODSW_MULT_TYPE),
+    .RAM_LATENCY(RAM_LATENCY),
+    .URAM_LATENCY(URAM_LATENCY),
+    .ROM_LATENCY(ROM_LATENCY),
+    .TWD_IFNL_FILE_PREFIX(TWD_IFNL_FILE_PREFIX),
+    .TWD_PHRU_FILE_PREFIX(TWD_PHRU_FILE_PREFIX),
+    .TWD_GF64_FILE_PREFIX(TWD_GF64_FILE_PREFIX),
+    .INST_FIFO_DEPTH(INST_FIFO_DEPTH),
+    .REGF_RD_LATENCY(REGF_RD_LATENCY),
+    .KS_IF_COEF_NB(KS_IF_COEF_NB),
+    .KS_IF_SUBW_NB(KS_IF_SUBW_NB),
+    .PHYS_RAM_DEPTH(PHYS_RAM_DEPTH)
+  ) i_bit_extract_pe_pbs (
+    .clk(clk),
+    .s_rst_n(s_rst_n),
+    
+    // PE_PBS instruction interface - connected to bit extract engine
+    .inst(bit_extract_pbs_inst),
+    .inst_vld(bit_extract_pbs_inst_vld),
+    .inst_rdy(bit_extract_pbs_inst_rdy),
+    .inst_ack(bit_extract_pbs_inst_ack),
+    .inst_ack_br_loop(bit_extract_pbs_inst_ack_br_loop),
+    .inst_load_blwe_ack(bit_extract_pbs_inst_load_blwe_ack),
+    
+    // RegFile interface - will be arbitrated with other modules
+    .pep_regf_wr_req_vld(bit_extract_pbs_regf_wr_req_vld),
+    .pep_regf_wr_req_rdy(pep_regf_wr_req_rdy),  // Shared
+    .pep_regf_wr_req(bit_extract_pbs_regf_wr_req),
+    .pep_regf_wr_data_vld(bit_extract_pbs_regf_wr_data_vld),
+    .pep_regf_wr_data_rdy(pep_regf_wr_data_rdy),  // Shared
+    .pep_regf_wr_data(bit_extract_pbs_regf_wr_data),
+    .regf_pep_wr_ack(regf_pep_wr_ack),  // Shared
+    
+    .pep_regf_rd_req_vld(bit_extract_pbs_regf_rd_req_vld),
+    .pep_regf_rd_req_rdy(pep_regf_rd_req_rdy),  // Shared
+    .pep_regf_rd_req(bit_extract_pbs_regf_rd_req),
+    .regf_pep_rd_data_avail(regf_pep_rd_data_avail),  // Shared
+    .regf_pep_rd_data(regf_pep_rd_data),  // Shared
+    .regf_pep_rd_last_word(regf_pep_rd_last_word),  // Shared
+    .regf_pep_rd_is_body(regf_pep_rd_is_body),  // Shared
+    .regf_pep_rd_last_mask(regf_pep_rd_last_mask),  // Shared
+    
+    // Configuration - shared with other PBS modules
+    .reset_bsk_cache(reset_bsk_cache),
+    .reset_bsk_cache_done(),  // Don't care for now
+    .bsk_mem_avail(bsk_mem_avail),
+    .bsk_mem_addr(bsk_mem_addr),
+    .reset_ksk_cache(reset_ksk_cache),
+    .reset_ksk_cache_done(),  // Don't care for now  
+    .ksk_mem_avail(ksk_mem_avail),
+    .ksk_mem_addr(ksk_mem_addr),
+    .reset_cache(reset_cache),
+    .gid_offset(gid_offset),
+    .twd_omg_ru_r_pow(twd_omg_ru_r_pow),
+    .use_bpip(use_bpip),
+    .use_bpip_opportunism(use_bpip_opportunism),
+    .bpip_timeout(bpip_timeout),
+    
+    // AXI interfaces - shared with other modules (need arbitration)
+    .m_axi4_bsk_arid(),     // TODO: Add arbitration logic
+    .m_axi4_bsk_araddr(),
+    .m_axi4_bsk_arlen(),
+    .m_axi4_bsk_arsize(),
+    .m_axi4_bsk_arburst(),
+    .m_axi4_bsk_arvalid(),
+    .m_axi4_bsk_arready(m_axi4_bsk_arready),
+    .m_axi4_bsk_rid(m_axi4_bsk_rid),
+    .m_axi4_bsk_rdata(m_axi4_bsk_rdata),
+    .m_axi4_bsk_rresp(m_axi4_bsk_rresp),
+    .m_axi4_bsk_rlast(m_axi4_bsk_rlast),
+    .m_axi4_bsk_rvalid(m_axi4_bsk_rvalid),
+    .m_axi4_bsk_rready(),
+    
+    .m_axi4_ksk_arid(),     // TODO: Add arbitration logic
+    .m_axi4_ksk_araddr(),
+    .m_axi4_ksk_arlen(),
+    .m_axi4_ksk_arsize(),
+    .m_axi4_ksk_arburst(),
+    .m_axi4_ksk_arvalid(),
+    .m_axi4_ksk_arready(m_axi4_ksk_arready),
+    .m_axi4_ksk_rid(m_axi4_ksk_rid),
+    .m_axi4_ksk_rdata(m_axi4_ksk_rdata),
+    .m_axi4_ksk_rresp(m_axi4_ksk_rresp),
+    .m_axi4_ksk_rlast(m_axi4_ksk_rlast),
+    .m_axi4_ksk_rvalid(m_axi4_ksk_rvalid),
+    .m_axi4_ksk_rready(),
+    
+    .m_axi4_glwe_arid(),    // TODO: Add arbitration logic
+    .m_axi4_glwe_araddr(),
+    .m_axi4_glwe_arlen(),
+    .m_axi4_glwe_arsize(),
+    .m_axi4_glwe_arburst(),
+    .m_axi4_glwe_arvalid(),
+    .m_axi4_glwe_arready(m_axi4_glwe_arready),
+    .m_axi4_glwe_rid(m_axi4_glwe_rid),
+    .m_axi4_glwe_rdata(m_axi4_glwe_rdata),
+    .m_axi4_glwe_rresp(m_axi4_glwe_rresp),
+    .m_axi4_glwe_rlast(m_axi4_glwe_rlast),
+    .m_axi4_glwe_rvalid(m_axi4_glwe_rvalid),
+    .m_axi4_glwe_rready()
+  );
+
 // ==============================================================================================
 // WoP-PBS Specific Computation Modules
 // ==============================================================================================
@@ -404,7 +531,15 @@ module wop_pbs_kernel
     .lut_req_vld(bit_extract_lut_req_vld),
     .lut_req_rdy(m_axi4_glwe_arready),
     .lut_data_avail(m_axi4_glwe_rvalid),
-    .lut_data(m_axi4_glwe_rdata)
+    .lut_data(m_axi4_glwe_rdata),
+    
+    // PBS Service Interface - connected to dedicated pe_pbs instance
+    .pbs_inst(bit_extract_pbs_inst),
+    .pbs_inst_vld(bit_extract_pbs_inst_vld),
+    .pbs_inst_rdy(bit_extract_pbs_inst_rdy),
+    .pbs_inst_ack(bit_extract_pbs_inst_ack),
+    .pbs_inst_ack_br_loop(bit_extract_pbs_inst_ack_br_loop),
+    .pbs_inst_load_blwe_ack(bit_extract_pbs_inst_load_blwe_ack)
   );
 
   // 2. Circuit Bootstrap WoKS Engine (core of circuit bootstrapping)

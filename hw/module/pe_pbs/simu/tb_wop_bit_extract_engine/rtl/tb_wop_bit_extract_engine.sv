@@ -109,6 +109,13 @@ module tb_wop_bit_extract_engine;
   logic pbs_inst_ack;
   logic [LWE_K_W-1:0] pbs_inst_ack_br_loop;
   logic pbs_inst_load_blwe_ack;
+  
+  // LUT access interface (legacy - for LUT model)
+  logic [AXI4_ADD_W-1:0] lut_addr;
+  logic lut_req_vld;
+  logic lut_req_rdy;
+  logic lut_data_avail;
+  logic [AXI4_DATA_W-1:0] lut_data;
 
 // ==============================================================================================
 // PBS Operation Simulation Functions
@@ -277,13 +284,17 @@ module tb_wop_bit_extract_engine;
         regf_rd_data_avail[0] <= 1'b1;
         regf_rd_data[0] <= regfile_memory[current_read_addr][read_counter + 1];
         
-        // Check if this is the last coefficient
-        if (read_counter >= N_LVL1) begin
+        // Check if this is the last coefficient (N_LVL1+1 coefficients total, 0 to N_LVL1)
+        if (read_counter == N_LVL1) begin
           regf_rd_last_word <= 1'b1;
-          reading_in_progress <= 1'b0;
-          // RegFile read completed
         end else begin
           regf_rd_last_word <= 1'b0;
+        end
+        
+        // Check if read is complete (read N_LVL1+1 coefficients)
+        if (read_counter >= N_LVL1) begin
+          reading_in_progress <= 1'b0;
+          // RegFile read completed
         end
         
         // Continue reading coefficients
@@ -378,7 +389,7 @@ module tb_wop_bit_extract_engine;
           pbs_src_data = regfile_memory[pbs_src_addr];
           
           // Determine which LUT operation to simulate based on GID
-          if (pbs_lut_gid[12:0] == 0) begin
+          if (pbs_lut_gid == 0) begin
             // map_to_bit31 LUT
             simulate_pbs_extract_bit31(pbs_src_data, pbs_dst_data);
           end else begin
@@ -518,8 +529,8 @@ module tb_wop_bit_extract_engine;
     start = 1'b0;
     bit_pos = '0;
     input_lwe_addr = 16'h0100;
-    output_bit_addr_0 = 16'h0200;  // 0x0200 ~ 0x0600 (1025 addresses)
-    output_bit_addr_1 = 16'h0700;  // 0x0700 ~ 0x0B00 (1025 addresses) - no overlap
+    output_bit_addr_0 = 16'h0010;  // 0x0010 ~ 0x001F (compatible with RID_W=7)
+    output_bit_addr_1 = 16'h0020;  // 0x0020 ~ 0x002F (compatible with RID_W=7)
     bit_extract_lut_base_addr = 64'h1000_0000;
     
     $display("[INIT] output_bit_addr_0=0x%04x, output_bit_addr_1=0x%04x", output_bit_addr_0, output_bit_addr_1);
@@ -571,7 +582,7 @@ module tb_wop_bit_extract_engine;
   logic done_printed = 1'b0;
   
   // Debug variables for state monitoring
-  logic [3:0] prev_state = 4'h0;
+  logic [4:0] prev_state = 5'h0;  // Use same bit width as DUT state enum
   int debug_cycle = 0;
   logic was_in_write_state = 1'b0;
   int prev_counter = 0;

@@ -18,6 +18,8 @@ module tb_wop_bit_extract_engine;
   import regf_common_param_pkg::*;
   import common_definition_pkg::*;
   import pep_if_pkg::*;
+  import hpu_common_instruction_pkg::*;
+  import axi_if_glwe_axi_pkg::*;
 
 // ==============================================================================================
 // Parameters
@@ -99,11 +101,62 @@ module tb_wop_bit_extract_engine;
   
   // LUT access interface
   logic [AXI4_ADD_W-1:0] bit_extract_lut_base_addr;
-  logic [AXI4_ADD_W-1:0] lut_addr;
-  logic lut_req_vld;
-  logic lut_req_rdy;
-  logic lut_data_avail;
-  logic [AXI4_DATA_W-1:0] lut_data;
+  
+  // PBS Service Interface (for complete PBS operations)
+  logic [PE_INST_W-1:0] pbs_inst;
+  logic pbs_inst_vld;
+  logic pbs_inst_rdy;
+  logic pbs_inst_ack;
+  logic [LWE_K_W-1:0] pbs_inst_ack_br_loop;
+  logic pbs_inst_load_blwe_ack;
+
+// ==============================================================================================
+// PBS Operation Simulation Functions
+// ==============================================================================================
+  
+  // Simulate PBS extract bit 31 operation based on map_to_bit31 LUT
+  // This mimics TLwe32_Keyswitch_Bootstrapping_Extract_lvl1 with map_to_bit31
+  function automatic void simulate_pbs_extract_bit31(
+    input logic [N_LVL1:0][MOD_Q_W-1:0] input_sample,
+    output logic [N_LVL1:0][MOD_Q_W-1:0] output_sample
+  );
+    // Based on Context initialization in context.cpp:
+    // map_to_bit31->b->coefs[i] = -(1 << 30);
+    // This LUT maps: 
+    //   - negative half of torus -> 0x80000000 (bit 31 = 1)
+    //   - positive half of torus -> 0x00000000 (bit 31 = 0)
+    
+    for (int i = 0; i < N_LVL1; i++) begin
+      // Simulate the PBS operation: extract the "bit" from the torus position
+      // In real PBS, this involves complex blind rotation and polynomial operations
+      // For simulation, we extract the bit that would result from the LUT lookup
+      output_sample[i] = (input_sample[i][31]) ? 32'h80000000 : 32'h00000000;
+    end
+    
+    // The constant term (b coefficient) starts as -(1 << 30) from LUT
+    output_sample[N_LVL1] = ~(32'h1 << 30) + 1;  // Two's complement of -(1 << 30)
+  endfunction
+  
+  // Simulate PBS extract bit 27 operation based on map_to_bit27 LUT  
+  // This mimics TLwe32_Keyswitch_Bootstrapping_Extract_lvl1 with map_to_bit27
+  function automatic void simulate_pbs_extract_bit27(
+    input logic [N_LVL1:0][MOD_Q_W-1:0] input_sample,
+    output logic [N_LVL1:0][MOD_Q_W-1:0] output_sample
+  );
+    // Based on Context initialization in context.cpp:
+    // map_to_bit27->b->coefs[i] = -(1 << 26);
+    // This LUT maps:
+    //   - negative half of torus -> 0x08000000 (bit 27 = 1)  
+    //   - positive half of torus -> 0x00000000 (bit 27 = 0)
+    
+    for (int i = 0; i < N_LVL1; i++) begin
+      // Extract bit 27 from the shifted input (which moved original bit 27 to bit 31)
+      output_sample[i] = (input_sample[i][31]) ? 32'h08000000 : 32'h00000000;
+    end
+    
+    // The constant term (b coefficient) starts as -(1 << 26) from LUT
+    output_sample[N_LVL1] = ~(32'h1 << 26) + 1;  // Two's complement of -(1 << 26)
+  endfunction
 
 // ==============================================================================================
 // Test Data Storage
@@ -177,11 +230,14 @@ module tb_wop_bit_extract_engine;
     
     // LUT access interface
     .bit_extract_lut_base_addr(bit_extract_lut_base_addr),
-    .lut_addr(lut_addr),
-    .lut_req_vld(lut_req_vld),
-    .lut_req_rdy(lut_req_rdy),
-    .lut_data_avail(lut_data_avail),
-    .lut_data(lut_data)
+    
+    // PBS Service Interface
+    .pbs_inst(pbs_inst),
+    .pbs_inst_vld(pbs_inst_vld),
+    .pbs_inst_rdy(pbs_inst_rdy),
+    .pbs_inst_ack(pbs_inst_ack),
+    .pbs_inst_ack_br_loop(pbs_inst_ack_br_loop),
+    .pbs_inst_load_blwe_ack(pbs_inst_load_blwe_ack)
   );
 
 // ==============================================================================================
@@ -274,6 +330,75 @@ module tb_wop_bit_extract_engine;
   end
 
 // ==============================================================================================
+// PBS Service Simulator
+// ==============================================================================================
+  
+  // PBS service simulator that responds to DUT's PBS instructions
+  // This simulates the pe_pbs module behavior for testing purposes
+  
+  logic pbs_operation_active;
+  logic [7:0] pbs_delay_counter;
+  logic [N_LVL1:0][MOD_Q_W-1:0] pbs_src_data, pbs_dst_data;
+  logic [REGF_ADDR_W-1:0] pbs_src_addr, pbs_dst_addr;
+  logic [GID_W-1:0] pbs_lut_gid;
+  
+  always_ff @(posedge clk) begin
+    if (!s_rst_n) begin
+      pbs_inst_rdy <= 1'b1;
+      pbs_inst_ack <= 1'b0;
+      pbs_inst_ack_br_loop <= '0;
+      pbs_inst_load_blwe_ack <= 1'b0;
+      pbs_operation_active <= 1'b0;
+      pbs_delay_counter <= '0;
+    end else begin
+      if (pbs_inst_vld && pbs_inst_rdy && !pbs_operation_active) begin
+        // Start PBS operation
+        pbs_operation_active <= 1'b1;
+        pbs_inst_rdy <= 1'b0;
+        pbs_delay_counter <= 8'd50; // Simulate PBS operation delay
+        
+        // Extract instruction fields
+        pbs_lut_gid <= pbs_inst[PE_INST_W-1:PE_INST_W-GID_W];
+        pbs_src_addr <= pbs_inst[RID_W+RID_W-1:RID_W];
+        pbs_dst_addr <= pbs_inst[RID_W-1:0];
+        
+        $display("[PBS_SERVICE t=%0t] Starting PBS operation: lut_gid=0x%x, src=0x%x, dst=0x%x", 
+                 $time, pbs_inst[PE_INST_W-1:PE_INST_W-GID_W], 
+                 pbs_inst[RID_W+RID_W-1:RID_W], pbs_inst[RID_W-1:0]);
+      end else if (pbs_operation_active) begin
+        if (pbs_delay_counter > 0) begin
+          pbs_delay_counter <= pbs_delay_counter - 1;
+        end else begin
+          // Complete PBS operation
+          pbs_operation_active <= 1'b0;
+          pbs_inst_rdy <= 1'b1;
+          pbs_inst_ack <= 1'b1;
+          
+          // Read source data and perform simulated PBS
+          pbs_src_data = regfile_memory[pbs_src_addr];
+          
+          // Determine which LUT operation to simulate based on GID
+          if (pbs_lut_gid[12:0] == 0) begin
+            // map_to_bit31 LUT
+            simulate_pbs_extract_bit31(pbs_src_data, pbs_dst_data);
+          end else begin
+            // map_to_bit27 LUT  
+            simulate_pbs_extract_bit27(pbs_src_data, pbs_dst_data);
+          end
+          
+          // Write result data to destination
+          regfile_memory[pbs_dst_addr] = pbs_dst_data;
+          
+          $display("[PBS_SERVICE t=%0t] Completed PBS operation: wrote result to addr=0x%x", 
+                   $time, pbs_dst_addr);
+        end
+      end else begin
+        pbs_inst_ack <= 1'b0;
+      end
+    end
+  end
+
+// ==============================================================================================
 // DPI-C Interface to C++ Golden Reference
 // ==============================================================================================
   
@@ -285,59 +410,63 @@ module tb_wop_bit_extract_engine;
   
   // Generate test vectors using original C++ bitExtract function
   task automatic generate_test_vectors();
-    // Input LWE sample - simulate encrypted data with fixed seed
-    // Use same seed as C++ reference for comparison
+    // Input LWE sample - create structured test data with known bit patterns
+    // This ensures we can verify bit 27 and bit 28 extraction correctly
+    
     for (int i = 0; i <= N_LVL1; i++) begin
-      input_lwe_sample[i] = $random();
+      // Create test pattern with controlled bits 27 and 28
+      logic bit27, bit28;
+      bit27 = (i % 4 >= 2);  // Bit 27: pattern 0,0,1,1,0,0,1,1...
+      bit28 = (i % 2 == 1);  // Bit 28: pattern 0,1,0,1,0,1...
+      
+      // Base random value with cleared bits 27,28
+      input_lwe_sample[i] = $random() & ~(32'h18000000);  // Clear bits 27,28
+      
+      // Set controlled bit patterns
+      if (bit27) input_lwe_sample[i] |= 32'h08000000;  // Set bit 27
+      if (bit28) input_lwe_sample[i] |= 32'h10000000;  // Set bit 28
+      
+      if (i < 5) begin
+        $display("[TEST_GEN] sample[%0d]: bit27=%b, bit28=%b, value=0x%08x", 
+                 i, bit27, bit28, input_lwe_sample[i]);
+      end
     end
     
     // Store input in RegFile memory
     regfile_memory[input_lwe_addr] = input_lwe_sample;
     
-    // Generate expected outputs simulating the same simplified algorithm as DUT
-    // This follows the C++ bitExtract flow but with simplified PBS operations
+      // Golden reference based on bit_extract.cpp implementation
+  // This implements the exact C++ algorithm using simulated PBS operations
+  
+  // Step 1: tmp = in << 4 (move bit 27 to bit 31)
+  for (int i = 0; i <= N_LVL1; i++) begin
+    golden_tmp_sample[i] = input_lwe_sample[i] << 4;
+  end
+  
+  // Step 2: TLwe32_Keyswitch_Bootstrapping_Extract_lvl1(&outs[0], map_to_bit31, tmp, 2, ctx)
+  //         outs[0].b[0] += 1 << 30
+  // Simulate PBS operation 1: extract bit 31 from shifted input using map_to_bit31 LUT
+  simulate_pbs_extract_bit31(golden_tmp_sample, expected_output_0);
+  expected_output_0[N_LVL1] = expected_output_0[N_LVL1] + (32'h1 << 30);  // Add offset
+  
+  // Step 3: TLwe32_Keyswitch_Bootstrapping_Extract_lvl1(small, map_to_bit27, tmp, 2, ctx)
+  //         small[0].b[0] += 1 << 26
+  // Simulate PBS operation 2: extract bit 27 from shifted input using map_to_bit27 LUT
+  simulate_pbs_extract_bit27(golden_tmp_sample, golden_small_sample);
+  golden_small_sample[N_LVL1] = golden_small_sample[N_LVL1] + (32'h1 << 26);  // Add offset
+  
+  // Step 4: tmp = (in - small) << 3 (remove bit 27, move bit 28 to bit 31)
+  for (int i = 0; i <= N_LVL1; i++) begin
+    golden_tmp_sample[i] = (input_lwe_sample[i] - golden_small_sample[i]) << 3;
+  end
+  
+  // Step 5: TLwe32_Keyswitch_Bootstrapping_Extract_lvl1(&outs[1], map_to_bit31, tmp, 2, ctx)
+  //         outs[1].b[0] += 1 << 30
+  // Simulate PBS operation 3: extract bit 31 from difference using map_to_bit31 LUT
+  simulate_pbs_extract_bit31(golden_tmp_sample, expected_output_1);
+  expected_output_1[N_LVL1] = expected_output_1[N_LVL1] + (32'h1 << 30);  // Add offset
     
-    // Step 1: tmp = in << 4 (move bit 27 to bit 31)
-    for (int i = 0; i <= N_LVL1; i++) begin
-      golden_tmp_sample[i] = input_lwe_sample[i] << 4;
-    end
-    
-    // Step 2: Extract bit 31 using simplified PBS -> outs[0] (original bit 27)  
-    // map_to_bit31: 把环的正负两边映射到0<<31和1<<31
-    // Bit extraction for polynomial coefficients (a[0] to a[N_LVL1-1])
-    for (int i = 0; i < N_LVL1; i++) begin
-      // 如果bit31=0 -> 映射到0x00000000，如果bit31=1 -> 映射到0x80000000
-      expected_output_0[i] = (golden_tmp_sample[i][31]) ? 32'h80000000 : 32'h00000000;
-    end
-    // Constant term (b[0]) only gets offset, no bit extraction
-    expected_output_0[N_LVL1] = (32'h1 << 30);
-    
-    // Step 3: Extract bit 27 from tmp using simplified PBS -> small
-    // map_to_bit27: 把环的正负两边映射到0<<27和1<<27
-    // Bit extraction for polynomial coefficients (a[0] to a[N_LVL1-1])
-    for (int i = 0; i < N_LVL1; i++) begin
-      // 如果bit27=0 -> 映射到0x00000000，如果bit27=1 -> 映射到0x08000000
-      golden_small_sample[i] = (golden_tmp_sample[i][27]) ? 32'h08000000 : 32'h00000000;
-    end
-    // Constant term (b[0]) only gets offset, no bit extraction
-    golden_small_sample[N_LVL1] = (32'h1 << 26);
-    
-    // Step 4: tmp = (in - small) << 3 (remove bit 27, move bit 28 to bit 31)
-    for (int i = 0; i <= N_LVL1; i++) begin
-      golden_tmp_sample[i] = (input_lwe_sample[i] - golden_small_sample[i]) << 3;
-    end
-    
-    // Step 5: Extract bit 31 using simplified PBS -> outs[1] (original bit 28)
-    // map_to_bit31: 把环的正负两边映射到0<<31和1<<31  
-    // Bit extraction for polynomial coefficients (a[0] to a[N_LVL1-1])
-    for (int i = 0; i < N_LVL1; i++) begin
-      // 如果bit31=0 -> 映射到0x00000000，如果bit31=1 -> 映射到0x80000000
-      expected_output_1[i] = (golden_tmp_sample[i][31]) ? 32'h80000000 : 32'h00000000;
-    end
-    // Constant term (b[0]) only gets offset, no bit extraction
-    expected_output_1[N_LVL1] = (32'h1 << 30);
-    
-    $display("Generated test vectors using simple bit extraction logic");
+    $display("Generated test vectors using PBS-based bit extraction golden reference");
   endtask
 
   // Compare results with golden reference

@@ -117,7 +117,7 @@ module tb_wop_circuit_bootstrap_woks_engine;
   );
 
 // ==============================================================================================
-// DUT Instantiation
+// DUT Instantiation - Using standalone circuit bootstrap engine with integrated BSK/NTT
 // ==============================================================================================
   wop_circuit_bootstrap_woks_engine #(
     .MOD_Q_W(MOD_Q_W),
@@ -158,7 +158,7 @@ module tb_wop_circuit_bootstrap_woks_engine;
   );
 
 // ==============================================================================================
-// BSK Model
+// BSK Model (Testbench)
 // ==============================================================================================
   always_ff @(posedge clk) begin
     if (!s_rst_n) begin
@@ -179,7 +179,7 @@ module tb_wop_circuit_bootstrap_woks_engine;
   end
 
 // ==============================================================================================
-// NTT Model
+// NTT Model (Testbench)
 // ==============================================================================================
   always_ff @(posedge clk) begin
     if (!s_rst_n) begin
@@ -392,7 +392,8 @@ module tb_wop_circuit_bootstrap_woks_engine;
       $display("Circuit bootstrap completed at time %0t", $time);
     end
     
-    if (bsk_req_vld && bsk_req_rdy) begin
+    // Only log first few BSK requests to avoid log spam
+    if (bsk_req_vld && bsk_req_rdy && bsk_batch_id < 5) begin
       $display("BSK request: batch_id=0x%02x", bsk_batch_id);
     end
   end

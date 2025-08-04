@@ -341,76 +341,104 @@ module tb_wop_bit_extract_engine;
   end
 
 // ==============================================================================================
-// PBS Service Simulator
+// Enhanced PBS Service Simulator
 // ==============================================================================================
   
-  // PBS service simulator that responds to DUT's PBS instructions
-  // This simulates the pe_pbs module behavior for testing purposes
+  // Enhanced PBS service simulator that closely mimics pe_pbs behavior
+  // This validates bit extract PBS interface design while avoiding pe_pbs complexity
   
-  logic pbs_operation_active;
-  logic [7:0] pbs_delay_counter;
+  typedef enum logic [2:0] {
+    PBS_IDLE,
+    PBS_READ_LWE,
+    PBS_PROCESSING,
+    PBS_WRITE_RESULT,
+    PBS_COMPLETE
+  } pbs_state_e;
+  
+  pbs_state_e pbs_state;
+  logic [7:0] pbs_cycle_counter;
   logic [N_LVL1:0][MOD_Q_W-1:0] pbs_src_data, pbs_dst_data;
   logic [REGF_ADDR_W-1:0] pbs_src_addr, pbs_dst_addr;
   logic [GID_W-1:0] pbs_lut_gid;
-  
+
+  // Enhanced PBS state machine with realistic timing and RegFile interactions
   always_ff @(posedge clk) begin
     if (!s_rst_n) begin
       pbs_inst_rdy <= 1'b1;
       pbs_inst_ack <= 1'b0;
       pbs_inst_ack_br_loop <= '0;
       pbs_inst_load_blwe_ack <= 1'b0;
-      pbs_operation_active <= 1'b0;
-      pbs_delay_counter <= '0;
+      pbs_state <= PBS_IDLE;
+      pbs_cycle_counter <= '0;
     end else begin
-      if (pbs_inst_vld && pbs_inst_rdy && !pbs_operation_active) begin
-        // Start PBS operation
-        pbs_operation_active <= 1'b1;
-        pbs_inst_rdy <= 1'b0;
-        pbs_delay_counter <= 8'd50; // Simulate PBS operation delay
-        
-        // Extract instruction fields
-        // Extract GID from correct bit position [25:14]
-        pbs_lut_gid <= pbs_inst[GID_W+RID_W+RID_W-1:RID_W+RID_W];
-        pbs_src_addr <= pbs_inst[RID_W+RID_W-1:RID_W];
-        pbs_dst_addr <= pbs_inst[RID_W-1:0];
-        
-        $display("[PBS_SERVICE t=%0t] Starting PBS operation: extracted_gid=0x%x, src=0x%x, dst=0x%x", 
-                 $time, pbs_inst[GID_W+RID_W+RID_W-1:RID_W+RID_W], 
-                 pbs_inst[RID_W+RID_W-1:RID_W], pbs_inst[RID_W-1:0]);
-      end else if (pbs_operation_active) begin
-        if (pbs_delay_counter > 0) begin
-          pbs_delay_counter <= pbs_delay_counter - 1;
-        end else begin
-          // Complete PBS operation
-          pbs_operation_active <= 1'b0;
-          pbs_inst_rdy <= 1'b1;
-          pbs_inst_ack <= 1'b1;
-          
-          // Read source data array and perform simulated PBS
-          for (int i = 0; i <= N_LVL1; i++) begin
-            pbs_src_data[i] = regfile_memory[pbs_src_addr + i];
+      pbs_inst_ack <= 1'b0;
+      pbs_inst_load_blwe_ack <= 1'b0;
+      
+      case (pbs_state)
+        PBS_IDLE: begin
+          if (pbs_inst_vld && pbs_inst_rdy) begin
+            // Accept PBS instruction and extract parameters
+            pbs_inst_rdy <= 1'b0;
+            pbs_lut_gid <= pbs_inst[GID_W+RID_W+RID_W-1:RID_W+RID_W];
+            pbs_src_addr <= pbs_inst[RID_W+RID_W-1:RID_W];
+            pbs_dst_addr <= pbs_inst[RID_W-1:0];
+            pbs_state <= PBS_READ_LWE;
+            pbs_cycle_counter <= 8'd5; // Simulated read latency
+            
+            $display("[ENHANCED_PBS t=%0t] Starting PBS: gid=0x%x, src=0x%x, dst=0x%x", 
+                     $time, pbs_inst[GID_W+RID_W+RID_W-1:RID_W+RID_W], 
+                     pbs_inst[RID_W+RID_W-1:RID_W], pbs_inst[RID_W-1:0]);
           end
-          
-          // Determine which LUT operation to simulate based on GID
-          if (pbs_lut_gid == 0) begin
-            // map_to_bit31 LUT
-            simulate_pbs_extract_bit31(pbs_src_data, pbs_dst_data);
+        end
+        
+        PBS_READ_LWE: begin
+          if (pbs_cycle_counter > 0) begin
+            pbs_cycle_counter <= pbs_cycle_counter - 1;
           end else begin
-            // map_to_bit27 LUT  
-            simulate_pbs_extract_bit27(pbs_src_data, pbs_dst_data);
+            // Read source LWE data
+            for (int i = 0; i <= N_LVL1; i++) begin
+              pbs_src_data[i] = regfile_memory[pbs_src_addr + i];
+            end
+            pbs_state <= PBS_PROCESSING;
+            pbs_cycle_counter <= 8'd45; // Realistic PBS processing time
           end
-          
-          // Write result data array to destination  
-          for (int i = 0; i <= N_LVL1; i++) begin
-            regfile_memory[pbs_dst_addr + i] = pbs_dst_data[i];
+        end
+        
+        PBS_PROCESSING: begin
+          if (pbs_cycle_counter > 0) begin
+            pbs_cycle_counter <= pbs_cycle_counter - 1;
+          end else begin
+            // Perform PBS operation based on GID 
+            if (pbs_lut_gid == 0) begin
+              simulate_pbs_extract_bit31(pbs_src_data, pbs_dst_data);
+            end else begin
+              simulate_pbs_extract_bit27(pbs_src_data, pbs_dst_data);
+            end
+            pbs_state <= PBS_WRITE_RESULT;
+            pbs_cycle_counter <= 8'd3; // Write latency
           end
-          
-          $display("[PBS_SERVICE t=%0t] Completed PBS operation: wrote result to addr=0x%x", 
+        end
+        
+        PBS_WRITE_RESULT: begin
+          if (pbs_cycle_counter > 0) begin
+            pbs_cycle_counter <= pbs_cycle_counter - 1;
+          end else begin
+            // Write result to destination
+            for (int i = 0; i <= N_LVL1; i++) begin
+              regfile_memory[pbs_dst_addr + i] = pbs_dst_data[i];
+            end
+            pbs_state <= PBS_COMPLETE;
+          end
+        end
+        
+        PBS_COMPLETE: begin
+          pbs_inst_ack <= 1'b1;
+          pbs_inst_rdy <= 1'b1;
+          pbs_state <= PBS_IDLE;
+          $display("[ENHANCED_PBS t=%0t] Completed PBS: wrote result to addr=0x%x", 
                    $time, pbs_dst_addr);
         end
-      end else begin
-        pbs_inst_ack <= 1'b0;
-      end
+      endcase
     end
   end
 

@@ -1017,22 +1017,93 @@ module wop_pbs_kernel
   );
 
 // ==============================================================================================
-// NTT Interface Arbitration
+// NTT Engine for Circuit Bootstrap
 // ==============================================================================================
   
-  // Since only circuit bootstrap stage uses NTT in WoP-PBS, arbitration is simple
-  // In a full system, this would need to arbitrate between WoP-PBS and standard PBS
+  // NTT Interface signals for pe_pbs_with_ntt_core_head
+  logic [PSI-1:0][R-1:0][NTT_OP_W-1:0] ntt_next_data;
+  logic [PSI-1:0][R-1:0] ntt_next_data_avail;
+  logic [PSI-1:0][R-1:0] ntt_next_data_rdy;
+  logic ntt_next_ctrl_avail;
+  logic ntt_next_ctrl_rdy;
   
-  // For now, directly connect circuit bootstrap NTT signals to shared NTT
-  // In a real implementation, these would connect to a shared NTT arbiter
+  pe_pbs_with_ntt_core_head #(
+    .MOD_MULT_TYPE(MOD_MULT_TYPE),
+    .REDUCT_TYPE(REDUCT_TYPE),
+    .PHI_MULT_TYPE(PHI_MULT_TYPE),
+    .PP_MOD_MULT_TYPE(PP_MOD_MULT_TYPE),
+    .PP_MULT_TYPE(PP_MULT_TYPE),
+    .MODSW_2_PRECISION_W(MODSW_2_PRECISION_W),
+    .MODSW_2_MULT_TYPE(MODSW_2_MULT_TYPE),
+    .MODSW_MULT_TYPE(MODSW_MULT_TYPE),
+    .RAM_LATENCY(RAM_LATENCY),
+    .URAM_LATENCY(URAM_LATENCY),
+    .ROM_LATENCY(ROM_LATENCY),
+    .TWD_IFNL_FILE_PREFIX(TWD_IFNL_FILE_PREFIX),
+    .TWD_PHRU_FILE_PREFIX(TWD_PHRU_FILE_PREFIX),
+    .TWD_GF64_FILE_PREFIX(TWD_GF64_FILE_PREFIX),
+    .INST_FIFO_DEPTH(INST_FIFO_DEPTH),
+    .REGF_RD_LATENCY(REGF_RD_LATENCY),
+    .KS_IF_COEF_NB(KS_IF_COEF_NB),
+    .KS_IF_SUBW_NB(KS_IF_SUBW_NB),
+    .PHYS_RAM_DEPTH(PHYS_RAM_DEPTH)
+  ) i_ntt_core_head (
+    .clk(clk),
+    .s_rst_n(s_rst_n),
+    
+    // Configuration
+    .twd_omg_ru_r_pow(twd_omg_ru_r_pow),
+    
+    // Broadcast batch cmd
+    .br_batch_cmd(br_batch_cmd),
+    .br_batch_cmd_avail(br_batch_cmd_avail),
+    
+    // BSK coefficients
+    .bsk(bsk),
+    .bsk_vld(bsk_vld),
+    .bsk_rdy(bsk_rdy),
+    
+    // Decomposer -> NTT (from circuit bootstrap)
+    .decomp_ntt_data_avail(circuit_bs_ntt_data_avail),
+    .decomp_ntt_data(circuit_bs_ntt_data),
+    .decomp_ntt_sob(circuit_bs_ntt_sob),
+    .decomp_ntt_eob(circuit_bs_ntt_eob),
+    .decomp_ntt_sog(circuit_bs_ntt_sog),
+    .decomp_ntt_eog(circuit_bs_ntt_eog),
+    .decomp_ntt_sol(circuit_bs_ntt_sol),
+    .decomp_ntt_eol(circuit_bs_ntt_eol),
+    .decomp_ntt_pbs_id('0),  // Circuit bootstrap doesn't use PBS ID
+    .decomp_ntt_last_pbs(1'b1),  // Always last for circuit bootstrap
+    .decomp_ntt_full_throughput(1'b1),  // Full throughput
+    .decomp_ntt_ctrl_avail(circuit_bs_ntt_sob),  // Control available with start of block
+    .decomp_ntt_data_rdy(circuit_bs_ntt_data_rdy),
+    .decomp_ntt_ctrl_rdy(/* open */),
+    
+    // Output data to circuit bootstrap
+    .next_data(ntt_next_data),
+    .next_data_avail(ntt_next_data_avail),
+    .next_data_rdy(ntt_next_data_rdy),
+    .next_ctrl_avail(ntt_next_ctrl_avail),
+    .next_ctrl_rdy(ntt_next_ctrl_rdy),
+    
+    // Other signals (not used by circuit bootstrap)
+    .accumulator_add_mode(1'b0),
+    .accumulator_add_en('0),
+    .accumulator_result('0),
+    .accumulator_result_avail('0),
+    .accumulator_result_rdy('1),
+    .accumulator_ctrl_avail(1'b0),
+    .accumulator_ctrl_rdy(/* open */)
+  );
   
-  // Placeholder NTT connections (would connect to shared NTT engine in full system)
-  assign circuit_bs_ntt_data_rdy = '1; // Always ready for now
-  assign circuit_bs_ntt_result_data = '0; // Placeholder data
-  assign circuit_bs_ntt_result_sob = 1'b0;
-  assign circuit_bs_ntt_result_eob = 1'b0;
-  assign circuit_bs_ntt_result_sol = 1'b0;
-  assign circuit_bs_ntt_result_eol = 1'b0;
+  // Convert NTT output to circuit bootstrap result format
+  assign circuit_bs_ntt_result_data = ntt_next_data;
+  assign circuit_bs_ntt_result_sob = ntt_next_ctrl_avail && (ntt_next_data[0][0] != '0);
+  assign circuit_bs_ntt_result_eob = ntt_next_ctrl_avail && (ntt_next_data[PSI-1][R-1] != '0);
+  assign circuit_bs_ntt_result_sol = circuit_bs_ntt_result_sob;
+  assign circuit_bs_ntt_result_eol = ntt_next_ctrl_avail && ntt_next_data_avail[PSI-1][R-1];
+  assign ntt_next_data_rdy = '1;  // Always ready to accept results
+  assign ntt_next_ctrl_rdy = 1'b1;
 
 // Note: Enhanced state machine logic is integrated into the main state machine above
 

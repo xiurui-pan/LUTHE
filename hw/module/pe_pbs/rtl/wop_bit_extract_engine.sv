@@ -84,7 +84,7 @@ module wop_bit_extract_engine
 // ==============================================================================================
   // LUT offsets based on C++ code
   localparam logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] MAP_TO_BIT31_OFFSET = 0;
-  localparam logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] MAP_TO_BIT27_OFFSET = LUT_ENTRY_SIZE;
+  localparam logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] MAP_TO_BIT27_OFFSET = 1; // Simplified offset within GID range
   
   // Temporary RegFile addresses for intermediate results (use RID_W-compatible range)
   localparam logic [REGF_ADDR_W-1:0] TEMP_ADDR_BASE = 16'h0040; // Low address space compatible with RID_W=7
@@ -134,6 +134,14 @@ module wop_bit_extract_engine
   logic pbs3_complete;
   logic offset3_complete;
   
+  // Read-modify-write state tracking
+  typedef enum logic [1:0] {
+    RMW_IDLE, RMW_READ, RMW_WRITE, RMW_DONE
+  } rmw_state_e;
+  
+  rmw_state_e rmw_state;
+  logic [MOD_Q_W-1:0] rmw_read_data;
+  
   // Data storage for intermediate values
   logic [N_LVL1:0][MOD_Q_W-1:0] input_lwe_sample;
   logic [N_LVL1:0][MOD_Q_W-1:0] small_sample;  // Result from PBS2
@@ -144,6 +152,7 @@ module wop_bit_extract_engine
   logic writing_shifted_data, reading_small_data;
   logic pbs1_sent, pbs2_sent, pbs3_sent;
   logic offset_operation_active;
+  logic diff_write_active;
 
 // ==============================================================================================
 // Helper Functions
@@ -197,6 +206,9 @@ module wop_bit_extract_engine
       writing_shifted_data <= 1'b0;
       reading_small_data <= 1'b0;
       offset_operation_active <= 1'b0;
+      diff_write_active <= 1'b0;
+      rmw_state <= RMW_IDLE;
+      rmw_read_data <= '0;
     end else begin
       current_state <= next_state;
       coeff_counter <= next_coeff_counter;
@@ -204,34 +216,63 @@ module wop_bit_extract_engine
       // Track PBS completion based on ack signals
       if (pbs_inst_ack) begin
         case (current_state)
-          PBS1_EXTRACT_BIT31: pbs1_complete <= 1'b1;
-          PBS2_EXTRACT_BIT27: pbs2_complete <= 1'b1;
-          PBS3_EXTRACT_BIT31: pbs3_complete <= 1'b1;
+          PBS1_EXTRACT_BIT31: begin
+            pbs1_complete <= 1'b1;
+            // Don't reset pbs1_sent here - wait for state transition
+          end
+          PBS2_EXTRACT_BIT27: begin
+            pbs2_complete <= 1'b1;
+            // Don't reset pbs2_sent here - wait for state transition
+          end
+          PBS3_EXTRACT_BIT31: begin
+            pbs3_complete <= 1'b1;
+            // Don't reset pbs3_sent here - wait for state transition
+          end
         endcase
       end
       
-      // Reset completion flags when starting new operation
-      if (start && current_state == IDLE) begin
-        input_read_complete <= 1'b0;
-        shift_write_complete <= 1'b0;
-        pbs1_complete <= 1'b0;
-        offset1_complete <= 1'b0;
-        pbs2_complete <= 1'b0;
-        offset2_complete <= 1'b0;
-        diff_compute_complete <= 1'b0;
-        pbs3_complete <= 1'b0;
-        offset3_complete <= 1'b0;
-        
-        // Reset RegFile operation flags
-        writing_shifted_data <= 1'b0;
-        reading_small_data <= 1'b0;
-        offset_operation_active <= 1'b0;
-        
-        // Reset PBS instruction sent flags
-        pbs1_sent <= 1'b0;
-        pbs2_sent <= 1'b0;
-        pbs3_sent <= 1'b0;
+      // Reset PBS send flags when transitioning away from PBS states
+      if (current_state != next_state) begin
+        case (current_state)
+          PBS1_EXTRACT_BIT31: pbs1_sent <= 1'b0;
+          PBS2_EXTRACT_BIT27: pbs2_sent <= 1'b0;
+          PBS3_EXTRACT_BIT31: pbs3_sent <= 1'b0;
+        endcase
       end
+      
+      // Set PBS send flags when sending instructions
+      if (pbs_inst_vld && pbs_inst_rdy) begin
+        case (current_state)
+          PBS1_EXTRACT_BIT31: pbs1_sent <= 1'b1;
+          PBS2_EXTRACT_BIT27: pbs2_sent <= 1'b1;
+          PBS3_EXTRACT_BIT31: pbs3_sent <= 1'b1;
+        endcase
+      end
+      
+              // Reset completion flags when starting new operation
+        if (start && current_state == IDLE) begin
+          input_read_complete <= 1'b0;
+          shift_write_complete <= 1'b0;
+          pbs1_complete <= 1'b0;
+          offset1_complete <= 1'b0;
+          pbs2_complete <= 1'b0;
+          offset2_complete <= 1'b0;
+          diff_compute_complete <= 1'b0;
+          pbs3_complete <= 1'b0;
+          offset3_complete <= 1'b0;
+          
+          // Reset RegFile operation flags
+          writing_shifted_data <= 1'b0;
+          reading_small_data <= 1'b0;
+          offset_operation_active <= 1'b0;
+          diff_write_active <= 1'b0;
+          rmw_state <= RMW_IDLE;
+          
+          // Reset PBS instruction sent flags
+          pbs1_sent <= 1'b0;
+          pbs2_sent <= 1'b0;
+          pbs3_sent <= 1'b0;
+        end
       
       // Handle data operations for each state
       case (current_state)
@@ -262,22 +303,57 @@ module wop_bit_extract_engine
         
         ADD_OFFSET_1: begin
           // Add OFFSET_30 to outs[0].b[0] (element N_LVL1)
-          // This is done via RegFile read-modify-write operation
+          // Use state machine for read-modify-write operation
           if (!offset_operation_active) begin
             offset_operation_active <= 1'b1;
-          end else if (regf_wr_data_rdy[0]) begin
-            offset1_complete <= 1'b1;
-            offset_operation_active <= 1'b0;
+            rmw_state <= RMW_READ;
+          end else begin
+            case (rmw_state)
+              RMW_READ: begin
+                if (regf_rd_data_avail[0]) begin
+                  rmw_read_data <= regf_rd_data[0];
+                  rmw_state <= RMW_WRITE;
+                end
+              end
+              RMW_WRITE: begin
+                if (regf_wr_data_rdy[0]) begin
+                  rmw_state <= RMW_DONE;
+                end
+              end
+              RMW_DONE: begin
+                offset1_complete <= 1'b1;
+                offset_operation_active <= 1'b0;
+                rmw_state <= RMW_IDLE;
+              end
+            endcase
           end
         end
         
         ADD_OFFSET_2: begin
           // Add OFFSET_26 to small[0].b[0] (element N_LVL1)
+          // Use state machine for read-modify-write operation
           if (!offset_operation_active) begin
             offset_operation_active <= 1'b1;
-          end else if (regf_wr_data_rdy[0]) begin
-            offset2_complete <= 1'b1;
-            offset_operation_active <= 1'b0;
+            rmw_state <= RMW_READ;
+          end else begin
+            case (rmw_state)
+              RMW_READ: begin
+                if (regf_rd_data_avail[0]) begin
+                  rmw_read_data <= regf_rd_data[0];
+                  rmw_state <= RMW_WRITE;
+                end
+              end
+              RMW_WRITE: begin
+                if (regf_wr_data_rdy[0]) begin
+                  rmw_state <= RMW_DONE;
+                end
+              end
+              RMW_DONE: begin
+                offset2_complete <= 1'b1;
+                offset_operation_active <= 1'b0;
+                rmw_state <= RMW_IDLE;
+              end
+            endcase
           end
         end
         
@@ -295,23 +371,45 @@ module wop_bit_extract_engine
                 diff_data[i] <= (input_lwe_sample[i] - small_sample[i]) << 3;
               end
               reading_small_data <= 1'b0;
-              write_coeff_counter <= '0;  // Reset write counter for diff data phase
+              write_coeff_counter <= '0;  // Reset write counter for diff data write phase
+              diff_write_active <= 1'b1;  // Start writing diff data
             end
-          end else if (regf_wr_data_rdy[0] && write_coeff_counter > N_LVL1) begin
-            // Finished writing difference data (wrote N_LVL1+1 elements)
-            diff_compute_complete <= 1'b1;
+          end else if (diff_write_active && regf_wr_data_rdy[0]) begin
+            // Write diff data to RegFile sequentially
+            write_coeff_counter <= write_coeff_counter + 1;
+            if (write_coeff_counter >= N_LVL1) begin
+              // Finished writing all difference data
+              diff_compute_complete <= 1'b1;
+              diff_write_active <= 1'b0;
+            end
           end
         end
         
-
-        
         ADD_OFFSET_3: begin
           // Add OFFSET_30 to outs[1].b[0] (element N_LVL1)
+          // Use state machine for read-modify-write operation
           if (!offset_operation_active) begin
             offset_operation_active <= 1'b1;
-          end else if (regf_wr_data_rdy[0]) begin
-            offset3_complete <= 1'b1;
-            offset_operation_active <= 1'b0;
+            rmw_state <= RMW_READ;
+          end else begin
+            case (rmw_state)
+              RMW_READ: begin
+                if (regf_rd_data_avail[0]) begin
+                  rmw_read_data <= regf_rd_data[0];
+                  rmw_state <= RMW_WRITE;
+                end
+              end
+              RMW_WRITE: begin
+                if (regf_wr_data_rdy[0]) begin
+                  rmw_state <= RMW_DONE;
+                end
+              end
+              RMW_DONE: begin
+                offset3_complete <= 1'b1;
+                offset_operation_active <= 1'b0;
+                rmw_state <= RMW_IDLE;
+              end
+            endcase
           end
         end
       endcase
@@ -389,28 +487,28 @@ module wop_bit_extract_engine
             output_bit_addr_0[RID_W-1:0]   // Destination: output bit 0
           );
           pbs_inst_vld = 1'b1;
-          pbs1_sent <= 1'b1;
         end
         
         if (pbs1_complete) begin
           next_state = ADD_OFFSET_1;
-          pbs1_sent <= 1'b0;  // Reset for next time
         end
       end
       
       ADD_OFFSET_1: begin
         // Read-modify-write: add OFFSET_30 to outs[0].b[0] (element N_LVL1)
         if (offset_operation_active) begin
-          regf_rd_req_vld = 1'b1;
-          regf_rd_req = {output_bit_addr_0 + N_LVL1[REGF_ADDR_W-1:0], 16'h0000};
-          
-          if (regf_rd_data_avail[0]) begin
-            // Perform read-modify-write: add offset to the b coefficient
-            regf_wr_req_vld = 1'b1;
-            regf_wr_data_vld[0] = 1'b1;
-            regf_wr_req = {output_bit_addr_0 + N_LVL1[REGF_ADDR_W-1:0], 16'h0000};
-            regf_wr_data[0] = regf_rd_data[0] + OFFSET_30;
-          end
+          case (rmw_state)
+            RMW_READ: begin
+              regf_rd_req_vld = 1'b1;
+              regf_rd_req = {output_bit_addr_0 + N_LVL1[REGF_ADDR_W-1:0], 16'h0000};
+            end
+            RMW_WRITE: begin
+              regf_wr_req_vld = 1'b1;
+              regf_wr_data_vld[0] = 1'b1;
+              regf_wr_req = {output_bit_addr_0 + N_LVL1[REGF_ADDR_W-1:0], 16'h0000};
+              regf_wr_data[0] = rmw_read_data + OFFSET_30;
+            end
+          endcase
         end
         
         if (offset1_complete) begin
@@ -427,27 +525,28 @@ module wop_bit_extract_engine
             TEMP_SMALL_ADDR[RID_W-1:0]     // Destination: temp small result
           );
           pbs_inst_vld = 1'b1;
-          pbs2_sent <= 1'b1;
         end
         
         if (pbs2_complete) begin
           next_state = ADD_OFFSET_2;
-          pbs2_sent <= 1'b0;  // Reset for next time
         end
       end
       
       ADD_OFFSET_2: begin
         // Read-modify-write: add OFFSET_26 to small[0].b[0] (element N_LVL1)
         if (offset_operation_active) begin
-          regf_rd_req_vld = 1'b1;
-          regf_rd_req = {TEMP_SMALL_ADDR + N_LVL1[REGF_ADDR_W-1:0], 16'h0000};
-          
-          if (regf_rd_data_avail[0]) begin
-            regf_wr_req_vld = 1'b1;
-            regf_wr_data_vld[0] = 1'b1;
-            regf_wr_req = {TEMP_SMALL_ADDR + N_LVL1[REGF_ADDR_W-1:0], 16'h0000};
-            regf_wr_data[0] = regf_rd_data[0] + OFFSET_26;
-          end
+          case (rmw_state)
+            RMW_READ: begin
+              regf_rd_req_vld = 1'b1;
+              regf_rd_req = {TEMP_SMALL_ADDR + N_LVL1[REGF_ADDR_W-1:0], 16'h0000};
+            end
+            RMW_WRITE: begin
+              regf_wr_req_vld = 1'b1;
+              regf_wr_data_vld[0] = 1'b1;
+              regf_wr_req = {TEMP_SMALL_ADDR + N_LVL1[REGF_ADDR_W-1:0], 16'h0000};
+              regf_wr_data[0] = rmw_read_data + OFFSET_26;
+            end
+          endcase
         end
         
         if (offset2_complete) begin
@@ -457,9 +556,12 @@ module wop_bit_extract_engine
       end
       
       COMPUTE_DIFF: begin
-        // Simplified: directly set completion for testing
-        if (!diff_compute_complete) begin
-          diff_compute_complete <= 1'b1;
+        // Write diff data to RegFile
+        if (diff_write_active && (write_coeff_counter <= N_LVL1)) begin
+          regf_wr_req_vld = 1'b1;
+          regf_wr_data_vld[0] = 1'b1;
+          regf_wr_req = {(TEMP_DIFF_ADDR + {{(REGF_ADDR_W-$clog2(N_LVL1+2)){1'b0}}, write_coeff_counter}), 16'h0000};
+          regf_wr_data[0] = diff_data[write_coeff_counter];
         end
         
         if (diff_compute_complete) begin
@@ -476,27 +578,28 @@ module wop_bit_extract_engine
             output_bit_addr_1[RID_W-1:0]   // Destination: output bit 1
           );
           pbs_inst_vld = 1'b1;
-          pbs3_sent <= 1'b1;
         end
         
         if (pbs3_complete) begin
           next_state = ADD_OFFSET_3;
-          pbs3_sent <= 1'b0;  // Reset for next time
         end
       end
       
       ADD_OFFSET_3: begin
         // Read-modify-write: add OFFSET_30 to outs[1].b[0] (element N_LVL1)
         if (offset_operation_active) begin
-          regf_rd_req_vld = 1'b1;
-          regf_rd_req = {output_bit_addr_1 + N_LVL1[REGF_ADDR_W-1:0], 16'h0000};
-          
-          if (regf_rd_data_avail[0]) begin
-            regf_wr_req_vld = 1'b1;
-            regf_wr_data_vld[0] = 1'b1;
-            regf_wr_req = {output_bit_addr_1 + N_LVL1[REGF_ADDR_W-1:0], 16'h0000};
-            regf_wr_data[0] = regf_rd_data[0] + OFFSET_30;
-          end
+          case (rmw_state)
+            RMW_READ: begin
+              regf_rd_req_vld = 1'b1;
+              regf_rd_req = {output_bit_addr_1 + N_LVL1[REGF_ADDR_W-1:0], 16'h0000};
+            end
+            RMW_WRITE: begin
+              regf_wr_req_vld = 1'b1;
+              regf_wr_data_vld[0] = 1'b1;
+              regf_wr_req = {output_bit_addr_1 + N_LVL1[REGF_ADDR_W-1:0], 16'h0000};
+              regf_wr_data[0] = rmw_read_data + OFFSET_30;
+            end
+          endcase
         end
         
         if (offset3_complete) begin

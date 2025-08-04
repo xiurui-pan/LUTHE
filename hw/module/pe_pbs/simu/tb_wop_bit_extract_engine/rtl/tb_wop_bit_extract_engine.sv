@@ -369,12 +369,13 @@ module tb_wop_bit_extract_engine;
         pbs_delay_counter <= 8'd50; // Simulate PBS operation delay
         
         // Extract instruction fields
-        pbs_lut_gid <= pbs_inst[PE_INST_W-1:PE_INST_W-GID_W];
+        // Extract GID from correct bit position [25:14]
+        pbs_lut_gid <= pbs_inst[GID_W+RID_W+RID_W-1:RID_W+RID_W];
         pbs_src_addr <= pbs_inst[RID_W+RID_W-1:RID_W];
         pbs_dst_addr <= pbs_inst[RID_W-1:0];
         
-        $display("[PBS_SERVICE t=%0t] Starting PBS operation: lut_gid=0x%x, src=0x%x, dst=0x%x", 
-                 $time, pbs_inst[PE_INST_W-1:PE_INST_W-GID_W], 
+        $display("[PBS_SERVICE t=%0t] Starting PBS operation: extracted_gid=0x%x, src=0x%x, dst=0x%x", 
+                 $time, pbs_inst[GID_W+RID_W+RID_W-1:RID_W+RID_W], 
                  pbs_inst[RID_W+RID_W-1:RID_W], pbs_inst[RID_W-1:0]);
       end else if (pbs_operation_active) begin
         if (pbs_delay_counter > 0) begin
@@ -385,8 +386,10 @@ module tb_wop_bit_extract_engine;
           pbs_inst_rdy <= 1'b1;
           pbs_inst_ack <= 1'b1;
           
-          // Read source data and perform simulated PBS
-          pbs_src_data = regfile_memory[pbs_src_addr];
+          // Read source data array and perform simulated PBS
+          for (int i = 0; i <= N_LVL1; i++) begin
+            pbs_src_data[i] = regfile_memory[pbs_src_addr + i];
+          end
           
           // Determine which LUT operation to simulate based on GID
           if (pbs_lut_gid == 0) begin
@@ -397,8 +400,10 @@ module tb_wop_bit_extract_engine;
             simulate_pbs_extract_bit27(pbs_src_data, pbs_dst_data);
           end
           
-          // Write result data to destination
-          regfile_memory[pbs_dst_addr] = pbs_dst_data;
+          // Write result data array to destination  
+          for (int i = 0; i <= N_LVL1; i++) begin
+            regfile_memory[pbs_dst_addr + i] = pbs_dst_data[i];
+          end
           
           $display("[PBS_SERVICE t=%0t] Completed PBS operation: wrote result to addr=0x%x", 
                    $time, pbs_dst_addr);

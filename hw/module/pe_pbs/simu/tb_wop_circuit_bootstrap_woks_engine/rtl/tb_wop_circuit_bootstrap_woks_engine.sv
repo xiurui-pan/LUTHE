@@ -105,6 +105,16 @@ module tb_wop_circuit_bootstrap_woks_engine;
   logic [N_LVL2-1:0][MOD_Q_W-1:0] test_vector;
   logic [N_LVL0:0][31:0] test_abar;
   logic [31:0] test_mu;
+  
+  // DPI-C interface for golden reference
+  import "DPI-C" function void circuit_bootstrap_woks_golden_ref(
+    input longint unsigned mu,
+    input int abar[],
+    output longint unsigned result_a[],
+    output longint unsigned result_b,
+    input int n_lvl0,
+    input int n_lvl2
+  );
 
 // ==============================================================================================
 // DUT Instantiation

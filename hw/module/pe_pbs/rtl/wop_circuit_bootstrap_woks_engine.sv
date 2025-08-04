@@ -31,7 +31,11 @@ module wop_circuit_bootstrap_woks_engine
   parameter int N_LVL0 = 630,
   parameter int N_LVL2 = 2048,
   parameter int ELL_LVL2 = 8,
-  parameter int K = 1  // k parameter for TLWE
+  parameter int K = 1,  // k parameter for TLWE
+  parameter int BSK_BATCH_ID_W = 8,
+  parameter int BSK_PC = 1,
+  parameter int R = 32,  // Ring size parameter  
+  parameter int PSI = 2  // PSI parameter
 )
 (
   input  logic clk,
@@ -76,17 +80,30 @@ module wop_circuit_bootstrap_woks_engine
 // ==============================================================================================
 // State Machine
 // ==============================================================================================
-  typedef enum logic [3:0] {
+  typedef enum logic [4:0] {
     IDLE,
     GENERATE_TEST_VECTOR,     // Generate test vector based on mu and bbar
     INIT_ACCUMULATOR,         // Initialize accumulator with test vector
     BLIND_ROTATE_LOOP,        // Main blind rotation loop
     COMPUTE_ACC2,             // acc2 = (X^aibar - 1) * acc1
-    EXTERNAL_PRODUCT,         // acc1 = BKi * acc2 using NTT
+    DECOMPOSE_ACC2,           // Gadget decomposition of acc2
+    NTT_FORWARD,              // Forward NTT of decomposed polynomials
+    EXTERNAL_PRODUCT,         // Point-wise multiplication with BSK
+    NTT_INVERSE,              // Inverse NTT of product results
     ACCUMULATE,               // acc += acc1
     SAMPLE_EXTRACT,           // Extract final LWE sample
     DONE
   } state_e;
+
+  // External product sub-state machine
+  typedef enum logic [2:0] {
+    EP_IDLE,
+    EP_DECOMPOSE,
+    EP_NTT_FWD,
+    EP_MULTIPLY,
+    EP_NTT_INV,
+    EP_DONE
+  } external_product_state_e;
 
   state_e current_state, next_state;
 
@@ -108,15 +125,28 @@ module wop_circuit_bootstrap_woks_engine
   logic [MOD_Q_W-1:0] mu2;
   logic [31:0] bbar;
   
-  // Decomposition storage for external product
+  // Decomposition storage for external product (Gadget decomposition)
   logic [_2L-1:0][N_LVL2-1:0][31:0] decomp;
   logic [_2L-1:0][N_LVL2-1:0][MOD_Q_W-1:0] decomp_fft;
+  
+  // External product state and control
+  external_product_state_e ep_state;
+  logic [$clog2(_2L)-1:0] decomp_level_counter;
+  logic [$clog2(N_LVL2)-1:0] coeff_counter;
+  
+  // Gadget decomposition parameters
+  localparam int BASE_LOG = 4;  // Base 2^4 = 16 for decomposition
+  localparam int BASE = 1 << BASE_LOG;
+  localparam int MASK = BASE - 1;
   
   // Control signals
   logic test_vector_done;
   logic accumulator_init_done;
   logic acc2_compute_done;
+  logic decompose_done;
+  logic ntt_forward_done;
   logic external_product_done;
+  logic ntt_inverse_done;
   logic accumulate_done;
   logic sample_extract_done;
 
@@ -129,6 +159,9 @@ module wop_circuit_bootstrap_woks_engine
       loop_counter <= '0;
       mu2 <= '0;
       bbar <= '0;
+      ep_state <= EP_IDLE;
+      decomp_level_counter <= '0;
+      coeff_counter <= '0;
     end else begin
       current_state <= next_state;
       
@@ -143,6 +176,44 @@ module wop_circuit_bootstrap_woks_engine
         
         BLIND_ROTATE_LOOP: begin
           current_aibar <= abar_data[loop_counter];
+          // Reset external product counters when entering this state
+          if (current_state != next_state && next_state == DECOMPOSE_ACC2) begin
+            decomp_level_counter <= '0;
+            coeff_counter <= '0;
+          end
+          // Handle skip case: when aibar is 0, increment counter
+          if (current_state == next_state && current_aibar == 0) begin
+            loop_counter <= loop_counter + 1;
+          end
+        end
+        
+        NTT_FORWARD: begin
+          // Handle coefficient and level counters in sequential logic
+          if (ntt_data_rdy[0][0] && decomp_level_counter < _2L) begin
+            if (coeff_counter < N_LVL2-1) begin
+              coeff_counter <= coeff_counter + 1;
+            end else begin
+              coeff_counter <= '0;
+              decomp_level_counter <= decomp_level_counter + 1;
+            end
+          end
+          // Reset counters for inverse NTT
+          if (current_state != next_state && next_state == NTT_INVERSE) begin
+            decomp_level_counter <= '0;
+            coeff_counter <= '0;
+          end
+        end
+        
+        NTT_INVERSE: begin
+          // Handle coefficient and level counters in sequential logic
+          if (ntt_data_rdy[0][0] && decomp_level_counter < _2L) begin
+            if (coeff_counter < N_LVL2-1) begin
+              coeff_counter <= coeff_counter + 1;
+            end else begin
+              coeff_counter <= '0;
+              decomp_level_counter <= decomp_level_counter + 1;
+            end
+          end
         end
         
         ACCUMULATE: begin
@@ -194,7 +265,7 @@ module wop_circuit_bootstrap_woks_engine
             testvect[j] = -testvect_temp[j - (N_LVL2 - bbar)];  // Sign flip due to X^N = -1
           end
         end else begin
-          int bbar_ = bbar - N_LVL2;
+          automatic int bbar_ = bbar - N_LVL2;
           for (int j = 0; j < N_LVL2 - bbar_; j++) begin
             testvect[j] = -testvect_temp[j + bbar_];
           end
@@ -221,8 +292,8 @@ module wop_circuit_bootstrap_woks_engine
       BLIND_ROTATE_LOOP: begin
         if (loop_counter < N_LVL0) begin
           if (current_aibar == 0) begin
-            // Skip if aibar is 0
-            loop_counter = loop_counter + 1;
+            // Skip if aibar is 0 - increment will be handled in sequential logic
+            next_state = BLIND_ROTATE_LOOP;  // Stay in same state, counter incremented in always_ff
           end else begin
             // Copy acc to acc1
             for (int q = 0; q <= K; q++) begin
@@ -248,7 +319,7 @@ module wop_circuit_bootstrap_woks_engine
               acc2[q][j] = acc1[q][j - current_aibar] - acc1[q][j];
             end
           end else begin
-            int aibar_ = current_aibar - N_LVL2;
+            automatic int aibar_ = current_aibar - N_LVL2;
             for (int j = 0; j < aibar_; j++) begin
               acc2[q][j] = acc1[q][j + N_LVL2 - aibar_] - acc1[q][j];
             end
@@ -262,43 +333,93 @@ module wop_circuit_bootstrap_woks_engine
         next_state = EXTERNAL_PRODUCT;
       end
       
-      EXTERNAL_PRODUCT: begin
-        // acc1 = BKi * acc2 (external product using BSK and NTT)
-        // This implements the tGswFFTExternMulToTLwe operation
+      DECOMPOSE_ACC2: begin
+        // Gadget decomposition: decompose acc2 into _2L levels
+        // Based on tGsw64DecompH algorithm
+        for (int p = 0; p < _2L; p++) begin
+          for (int q = 0; q <= K; q++) begin
+            for (int j = 0; j < N_LVL2; j++) begin
+              // Correct Gadget decomposition using base decomposition
+              // Extract BASE_LOG bits from each level
+              automatic logic [63:0] temp_coeff = acc2[q][j];
+              automatic logic [31:0] shift_amount = p * BASE_LOG;
+              decomp[p][j] = (temp_coeff >> shift_amount) & MASK;
+            end
+          end
+        end
+        decompose_done = 1'b1;
+        next_state = NTT_FORWARD;
+      end
+      
+      NTT_FORWARD: begin
+        // Forward NTT: IntPolynomial_ifft_lvl2 equivalent
+        // Send decomposed polynomials to NTT engine for forward transform
         
-        // Step 1: Request BSK data for current coefficient
+        if (decomp_level_counter < _2L) begin
+          // Send current decomposition level to NTT
+          ntt_data_avail[0][0] = 1'b1;
+          ntt_data[0][0] = decomp[decomp_level_counter][coeff_counter];
+          ntt_sob = (coeff_counter == 0);
+          ntt_eob = (coeff_counter == N_LVL2-1);
+          ntt_sol = (decomp_level_counter == 0) && (coeff_counter == 0);
+          ntt_eol = (decomp_level_counter == _2L-1) && (coeff_counter == N_LVL2-1);
+          
+          // Counter updates moved to sequential logic in always_ff
+          next_state = NTT_FORWARD;  // Stay in same state until completion
+        end else begin
+          ntt_forward_done = 1'b1;
+          next_state = EXTERNAL_PRODUCT;
+        end
+      end
+      
+      EXTERNAL_PRODUCT: begin
+        // Point-wise multiplication with BSK: LagrangeHalfCPolynomialAddMul_lvl2 equivalent
+        
+        // Request BSK data for current coefficient
         bsk_req_vld = 1'b1;
         bsk_batch_id = loop_counter;
         
-        if (bsk_req_rdy && bsk_data_avail) begin
-          // Step 2: Perform decomposition (tGsw64DecompH equivalent)
-          // Decompose acc2 into _2l parts based on base decomposition
+        if (bsk_req_rdy && bsk_data_avail && ntt_result_eol) begin
+          // Perform point-wise multiplication of NTT results with BSK data
+          // This is a simplified model - real implementation needs proper complex multiplication
           for (int p = 0; p < _2L; p++) begin
-            for (int j = 0; j < N_LVL2; j++) begin
-              // Simplified decomposition - extract bits for each level
-              decomp[p][j] = (acc2[0][j] >> (p * 4)) & 32'hF; // 4-bit decomposition
-            end
-          end
-          
-          // Step 3: Send decomposed data to NTT engine
-          for (int p = 0; p < _2L; p++) begin
-            ntt_data_avail[0][0] = 1'b1;
-            ntt_data[0][0] = decomp[p][0]; // Send first coefficient of each decomp level
-            ntt_sob = (p == 0) ? 1'b1 : 1'b0;
-            ntt_eob = (p == _2L-1) ? 1'b1 : 1'b0;
-            ntt_sol = 1'b1;
-            ntt_eol = 1'b1;
-          end
-          
-          if (ntt_data_rdy[0][0] && ntt_result_eol) begin
-            // Step 4: Collect NTT results and perform point-wise multiplication with BSK
             for (int q = 0; q <= K; q++) begin
               for (int j = 0; j < N_LVL2; j++) begin
-                acc1[q][j] = ntt_result_data[0][0]; // Simplified result collection
+                // Simplified point-wise multiplication
+                decomp_fft[p][j] = ntt_result_data[0][0] * bsk_data[0][j % 8];  // Use BSK data
               end
             end
-            
-            external_product_done = 1'b1;
+          end
+          
+          external_product_done = 1'b1;
+          next_state = NTT_INVERSE;
+        end
+      end
+      
+      NTT_INVERSE: begin
+        // Inverse NTT: TorusPolynomial64_fft_lvl2 equivalent
+        // Send FFT results back to NTT engine for inverse transform
+        
+        if (decomp_level_counter < _2L) begin
+          // Send current FFT level to NTT for inverse transform
+          ntt_data_avail[0][0] = 1'b1;
+          ntt_data[0][0] = decomp_fft[decomp_level_counter][coeff_counter];
+          ntt_sob = (coeff_counter == 0);
+          ntt_eob = (coeff_counter == N_LVL2-1);
+          ntt_sol = (decomp_level_counter == 0) && (coeff_counter == 0);
+          ntt_eol = (decomp_level_counter == _2L-1) && (coeff_counter == N_LVL2-1);
+          
+          // Counter updates moved to sequential logic in always_ff
+          next_state = NTT_INVERSE;  // Stay in same state until completion
+        end else begin
+          // Collect inverse NTT results into acc1
+          if (ntt_result_eol) begin
+            for (int q = 0; q <= K; q++) begin
+              for (int j = 0; j < N_LVL2; j++) begin
+                acc1[q][j] = ntt_result_data[0][0];  // Collect final results
+              end
+            end
+            ntt_inverse_done = 1'b1;
             next_state = ACCUMULATE;
           end
         end

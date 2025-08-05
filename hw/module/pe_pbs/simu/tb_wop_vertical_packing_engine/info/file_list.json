@@ -1,0 +1,35 @@
+{
+    "local_root_path": "${PROJECT_DIR}",
+    "dep_root_path": "${PROJECT_DIR}",
+    "rtl_files": [
+        {
+            "name": "hw/module/pe_pbs/rtl/wop_vertical_packing_engine.sv",
+            "library": "work",
+            "env": ["simu"],
+            "target": ["all"],
+            "is_include_file": false
+        },
+        {
+            "name": "hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/rtl/tb_wop_vertical_packing_engine.sv",
+            "library": "work",
+            "env": ["simu"],
+            "target": ["all"],
+            "is_include_file": false
+        }
+    ],
+    "c_files": [
+        {
+            "name": "hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/scripts/vertical_packing_golden.cpp",
+            "env": ["simu"],
+            "target": ["all"]
+        }
+    ],
+    "dependency_dir": [
+        "hw/simu_lib/simu_base",
+        "hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/gen",
+        "hw/simu_lib/stream_lib", 
+        "hw/module/regfile",
+        "hw/module/pe_pbs"
+    ],
+    "include_dir": []
+}

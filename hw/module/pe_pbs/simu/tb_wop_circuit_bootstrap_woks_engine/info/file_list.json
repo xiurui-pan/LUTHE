@@ -25,6 +25,7 @@
         }
     ],
     "dependency_dir": [
+        "hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/gen",
         "hw/module/pe_pbs",
         "hw/module/param", 
         "hw/module/regfile",

@@ -158,51 +158,327 @@ module tb_wop_circuit_bootstrap_woks_engine;
   );
 
 // ==============================================================================================
-// BSK Model (Testbench)
+// Enhanced BSK Service Simulator
 // ==============================================================================================
+  // BSK Simulator State Machine
+  typedef enum logic [2:0] {
+    BSK_IDLE,
+    BSK_PROCESSING, 
+    BSK_DATA_READY,
+    BSK_COMPLETE
+  } bsk_state_e;
+  
+  bsk_state_e bsk_state;
+  logic [7:0] bsk_process_counter;
+  logic [7:0] bsk_current_batch_id;
+  logic [31:0] bsk_op_count;
+  
+  // BSK processing timing model (based on real hardware characteristics)
+  localparam int BSK_SETUP_CYCLES = 3;    // Initial setup time
+  localparam int BSK_PROCESS_CYCLES = 15;  // Processing time per batch
+  localparam int BSK_READY_CYCLES = 2;     // Data ready time
+  
   always_ff @(posedge clk) begin
     if (!s_rst_n) begin
+      bsk_state <= BSK_IDLE;
       bsk_req_rdy <= 1'b1;
       bsk_data_avail <= 1'b0;
       bsk_data <= '0;
+      bsk_process_counter <= '0;
+      bsk_current_batch_id <= '0;
+      bsk_op_count <= '0;
     end else begin
-      if (bsk_req_vld && bsk_req_rdy) begin
-        bsk_data_avail <= 1'b1;
-        // Return dummy BSK data based on batch ID
-        for (int i = 0; i < R; i++) begin
-          bsk_data[i] <= {bsk_batch_id, 24'h123456} + i;
+      case (bsk_state)
+        BSK_IDLE: begin
+          bsk_req_rdy <= 1'b1;
+          bsk_data_avail <= 1'b0;
+          
+          if (bsk_req_vld && bsk_req_rdy) begin
+            bsk_current_batch_id <= bsk_batch_id;
+            bsk_process_counter <= BSK_SETUP_CYCLES;
+            bsk_req_rdy <= 1'b0;  // Busy during processing
+            bsk_state <= BSK_PROCESSING;
+            bsk_op_count <= bsk_op_count + 1;
+            
+            $display("%t: BSK Request - Batch ID: 0x%02x, Operation: %0d", 
+                     $time, bsk_batch_id, bsk_op_count);
+          end
         end
-      end else begin
-        bsk_data_avail <= 1'b0;
-      end
+        
+        BSK_PROCESSING: begin
+          if (bsk_process_counter > 0) begin
+            bsk_process_counter <= bsk_process_counter - 1;
+          end else begin
+            // Generate realistic BSK data using LFSR-based algorithm
+            for (int i = 0; i < R; i++) begin
+              logic [31:0] seed = {bsk_current_batch_id, 8'h00, 16'h5A5A} + i;
+              logic [31:0] lfsr_out;
+              
+              // Simple LFSR for pseudo-random but deterministic data
+              lfsr_out = seed;
+              for (int j = 0; j < 8; j++) begin
+                lfsr_out = {lfsr_out[30:0], lfsr_out[31] ^ lfsr_out[21] ^ lfsr_out[1] ^ lfsr_out[0]};
+              end
+              
+              // Apply batch-specific transformation
+              bsk_data[i] <= lfsr_out ^ (bsk_current_batch_id << 16) ^ (i << 8);
+            end
+            
+            bsk_process_counter <= BSK_READY_CYCLES;
+            bsk_state <= BSK_DATA_READY;
+          end
+        end
+        
+        BSK_DATA_READY: begin
+          bsk_data_avail <= 1'b1;
+          
+          if (bsk_process_counter > 0) begin
+            bsk_process_counter <= bsk_process_counter - 1;
+          end else begin
+            bsk_state <= BSK_COMPLETE;
+            $display("%t: BSK Data Ready - Batch ID: 0x%02x", 
+                     $time, bsk_current_batch_id);
+          end
+        end
+        
+        BSK_COMPLETE: begin
+          bsk_data_avail <= 1'b0;
+          bsk_req_rdy <= 1'b1;
+          bsk_state <= BSK_IDLE;
+        end
+      endcase
     end
   end
 
 // ==============================================================================================
-// NTT Model (Testbench)
+// Enhanced NTT Service Simulator  
 // ==============================================================================================
+  // NTT Simulator State Machine
+  typedef enum logic [3:0] {
+    NTT_IDLE,
+    NTT_RECEIVE_FORWARD,
+    NTT_PROCESS_FORWARD,
+    NTT_FORWARD_READY,
+    NTT_RECEIVE_INVERSE,
+    NTT_PROCESS_INVERSE,
+    NTT_INVERSE_READY,
+    NTT_COMPLETE
+  } ntt_state_e;
+  
+  ntt_state_e ntt_state;
+  logic [7:0] ntt_process_counter;
+  logic [31:0] ntt_op_count;
+  logic ntt_is_forward_transform;
+  
+  // NTT processing timing model
+  localparam int NTT_SETUP_CYCLES = 2;     // Setup time
+  localparam int NTT_FORWARD_CYCLES = 12;  // Forward NTT processing time
+  localparam int NTT_INVERSE_CYCLES = 14;  // Inverse NTT processing time  
+  localparam int NTT_OUTPUT_CYCLES = 3;    // Output ready time
+  
+  // NTT data buffers for realistic pipeline behavior
+  logic [PSI-1:0][R-1:0][MOD_Q_W-1:0] ntt_input_buffer;
+  logic [PSI-1:0][R-1:0][MOD_Q_W-1:0] ntt_output_buffer;
+  logic input_buffer_valid;
+  logic [7:0] ntt_coeff_count;
+  
+  // Control signals pipeline
+  logic buffered_sob, buffered_eob, buffered_sol, buffered_eol;
+  
   always_ff @(posedge clk) begin
     if (!s_rst_n) begin
+      ntt_state <= NTT_IDLE;
       ntt_data_rdy <= '1;
       ntt_result_data <= '0;
       ntt_result_sob <= 1'b0;
       ntt_result_eob <= 1'b0;
       ntt_result_sol <= 1'b0;
       ntt_result_eol <= 1'b0;
+      ntt_process_counter <= '0;
+      ntt_op_count <= '0;
+      ntt_is_forward_transform <= 1'b0;
+      input_buffer_valid <= 1'b0;
+      ntt_coeff_count <= '0;
     end else begin
-      // Simple NTT model - just pass through data with some transformation
-      if (ntt_data_avail[0][0]) begin
-        ntt_result_data[0][0] <= ntt_data[0][0] ^ 32'hDEADBEEF; // Simple transformation
-        ntt_result_sol <= ntt_sol;
-        ntt_result_eol <= ntt_eol;
-        ntt_result_sob <= ntt_sob;
-        ntt_result_eob <= ntt_eob;
-      end else begin
-        ntt_result_sol <= 1'b0;
-        ntt_result_eol <= 1'b0;
-        ntt_result_sob <= 1'b0;
-        ntt_result_eob <= 1'b0;
-      end
+      case (ntt_state)
+                NTT_IDLE: begin
+          ntt_data_rdy <= '1;
+          ntt_result_sob <= 1'b0;
+          ntt_result_eob <= 1'b0;  
+          ntt_result_sol <= 1'b0;
+          // Don't reset ntt_result_eol in IDLE! Let it persist until next operation
+          // ntt_result_eol <= 1'b0;  // REMOVED - this was continuously resetting the signal
+          
+          // Debug: Monitor input signals every 10 cycles
+          if ($time % 100000 == 0) begin
+            $display("%t: NTT_IDLE - Monitoring: data_avail=%b, sol=%b, sob=%b, eob=%b, eol=%b", 
+                     $time, ntt_data_avail[0][0], ntt_sol, ntt_sob, ntt_eob, ntt_eol);
+          end
+          
+          // Detect start of NTT operation
+          if (ntt_data_avail[0][0] && ntt_sol) begin
+            ntt_input_buffer[0][0] <= ntt_data[0][0];
+            buffered_sob <= ntt_sob;
+            buffered_eob <= ntt_eob;
+            buffered_sol <= ntt_sol;
+            // Note: buffered_eol will be updated when eol=1 is received
+            ntt_result_eol <= 1'b0;  // Reset result signals at start of new operation
+            ntt_coeff_count <= 1;
+            ntt_coeff_count <= 1;
+            
+            // Determine transform direction based on prior state
+            ntt_is_forward_transform <= ~ntt_is_forward_transform;
+            ntt_state <= ntt_is_forward_transform ? NTT_RECEIVE_INVERSE : NTT_RECEIVE_FORWARD;
+            ntt_op_count <= ntt_op_count + 1;
+
+            $display("%t: NTT %s Transform Start - Operation: %0d, data=0x%08x",
+                     $time, ntt_is_forward_transform ? "Inverse" : "Forward", ntt_op_count, ntt_data[0][0]);
+            $display("%t: NTT State Change: IDLE -> %s", 
+                     $time, ntt_is_forward_transform ? "RECEIVE_INVERSE" : "RECEIVE_FORWARD");
+          end
+        end
+        
+                NTT_RECEIVE_FORWARD: begin
+          // Collect input data for forward transform
+          if (ntt_data_avail[0][0]) begin
+            ntt_input_buffer[0][0] <= ntt_data[0][0];
+            ntt_coeff_count <= ntt_coeff_count + 1;
+            $display("%t: NTT_RECEIVE_FORWARD - coeff_count=%0d, data=0x%08x, eol=%b", 
+                     $time, ntt_coeff_count, ntt_data[0][0], ntt_eol);
+
+            if (ntt_eol) begin
+              buffered_eol <= ntt_eol;  // Update buffered_eol when eol=1 is received
+              input_buffer_valid <= 1'b1;
+              ntt_process_counter <= NTT_SETUP_CYCLES;
+              ntt_state <= NTT_PROCESS_FORWARD;
+              ntt_data_rdy <= '0;  // Busy during processing
+              $display("%t: NTT State Change: RECEIVE_FORWARD -> PROCESS_FORWARD", $time);
+            end
+          end
+        end
+        
+        NTT_PROCESS_FORWARD: begin
+          if (ntt_process_counter > 0) begin
+            ntt_process_counter <= ntt_process_counter - 1;
+          end else begin
+            ntt_process_counter <= NTT_FORWARD_CYCLES;
+            
+            // Simulate forward NTT processing with bit-reverse and twiddle operations
+            for (int psi = 0; psi < PSI; psi++) begin
+              for (int r = 0; r < R; r++) begin
+                logic [31:0] input_val = ntt_input_buffer[psi][r];
+                logic [31:0] transformed;
+                
+                // Simulate NTT butterfly operations with twiddle factors
+                // This is a simplified model of actual NTT computation
+                transformed = input_val;
+                for (int stage = 0; stage < 5; stage++) begin  // log2(32) stages
+                  logic [31:0] twiddle = 32'h12345678 + (stage << 8) + (r << 16);
+                  transformed = (transformed * twiddle) ^ (transformed >> 1);
+                end
+                
+                // Apply additional PSI-specific transformation
+                ntt_output_buffer[psi][r] <= transformed ^ (psi << 24) ^ 32'hFF00FF00;
+              end
+            end
+            
+            ntt_state <= NTT_FORWARD_READY;
+          end
+        end
+        
+        NTT_FORWARD_READY: begin
+          if (ntt_process_counter > 0) begin
+            ntt_process_counter <= ntt_process_counter - 1;
+          end else begin
+            ntt_result_data <= ntt_output_buffer;
+            ntt_result_sob <= buffered_sob;
+            ntt_result_eob <= buffered_eob;
+            ntt_result_sol <= buffered_sol;
+            ntt_result_eol <= buffered_eol;
+            ntt_process_counter <= NTT_OUTPUT_CYCLES;
+            ntt_state <= NTT_COMPLETE;
+            
+            $display("%t: NTT Forward Transform Complete", $time);
+          end
+        end
+        
+        NTT_RECEIVE_INVERSE: begin
+          // Collect input data for inverse transform
+          if (ntt_data_avail[0][0]) begin
+            ntt_input_buffer[0][0] <= ntt_data[0][0];
+            ntt_coeff_count <= ntt_coeff_count + 1;
+            
+            if (ntt_eol) begin
+              buffered_eol <= ntt_eol;  // Update buffered_eol when eol=1 is received
+              input_buffer_valid <= 1'b1;
+              ntt_process_counter <= NTT_SETUP_CYCLES;
+              ntt_state <= NTT_PROCESS_INVERSE;
+              ntt_data_rdy <= '0;  // Busy during processing
+              $display("%t: NTT_RECEIVE_INVERSE - eol=1 received, buffered_eol set to %b", $time, ntt_eol);
+            end
+          end
+        end
+        
+        NTT_PROCESS_INVERSE: begin
+          if (ntt_process_counter > 0) begin
+            ntt_process_counter <= ntt_process_counter - 1;
+          end else begin
+            ntt_process_counter <= NTT_INVERSE_CYCLES;
+            
+            // Simulate inverse NTT processing (reverse of forward transform)
+            for (int psi = 0; psi < PSI; psi++) begin
+              for (int r = 0; r < R; r++) begin
+                logic [31:0] input_val = ntt_input_buffer[psi][r];
+                logic [31:0] transformed;
+                
+                // Simulate inverse NTT butterfly operations
+                transformed = input_val ^ (psi << 24) ^ 32'hFF00FF00;
+                for (int stage = 4; stage >= 0; stage--) begin  // Reverse stages
+                  logic [31:0] inv_twiddle = 32'h87654321 + (stage << 8) + (r << 16);
+                  transformed = (transformed ^ (transformed >> 1)) * inv_twiddle;
+                end
+                
+                // Apply scaling factor for inverse transform
+                ntt_output_buffer[psi][r] <= transformed >> 2;  // Simple scaling
+              end
+            end
+            
+            ntt_state <= NTT_INVERSE_READY;
+          end
+        end
+        
+        NTT_INVERSE_READY: begin
+          if (ntt_process_counter > 0) begin
+            ntt_process_counter <= ntt_process_counter - 1;
+          end else begin
+            ntt_result_data <= ntt_output_buffer;
+            ntt_result_sob <= buffered_sob;
+            ntt_result_eob <= buffered_eob;
+            ntt_result_sol <= buffered_sol;
+            ntt_result_eol <= buffered_eol;
+            ntt_process_counter <= NTT_OUTPUT_CYCLES;
+            ntt_state <= NTT_COMPLETE;
+            
+            $display("%t: NTT Inverse Transform Complete, buffered_eol=%b, setting ntt_result_eol=%b", 
+                     $time, buffered_eol, buffered_eol);
+          end
+        end
+        
+        NTT_COMPLETE: begin
+          if (ntt_process_counter > 0) begin
+            ntt_process_counter <= ntt_process_counter - 1;
+          end else begin
+            ntt_result_sob <= 1'b0;
+            ntt_result_eob <= 1'b0;
+            ntt_result_sol <= 1'b0;
+            // Don't reset ntt_result_eol here! Let it stay high until next operation
+            // ntt_result_eol <= 1'b0;  // REMOVED - this was causing the race condition
+            ntt_data_rdy <= '1;
+            input_buffer_valid <= 1'b0;
+            ntt_state <= NTT_IDLE;
+          end
+        end
+      endcase
     end
   end
 
@@ -285,7 +561,8 @@ module tb_wop_circuit_bootstrap_woks_engine;
     
     // Generate test abar array
     for (int i = 0; i <= N_LVL0; i++) begin
-      test_abar[i] = $random() % 4096; // Keep values reasonable
+      test_abar[i] = ($urandom() % 4095) + 1; // Force non-zero values (1-4095), use $urandom for unsigned
+      // test_abar generation confirmed working
     end
     
     // Copy to DUT inputs

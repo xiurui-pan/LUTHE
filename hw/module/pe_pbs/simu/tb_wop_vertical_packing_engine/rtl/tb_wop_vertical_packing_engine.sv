@@ -162,7 +162,7 @@ module tb_wop_vertical_packing_engine
   // Variables for LUT driver
   logic [31:0] entry_idx;
   
-  // Simple LUT data driver (replace complex simulator)
+  // Simple LUT data driver with proper handshake protocol
   always @(posedge clk or negedge s_rst_n) begin
     if (!s_rst_n) begin
       lut_req_rdy <= 1'b1;
@@ -170,7 +170,8 @@ module tb_wop_vertical_packing_engine
       lut_data <= '0;
     end else begin
       if (lut_req_vld && lut_req_rdy) begin
-        // Simple immediate response
+        // Step 1: Request received, provide data and deassert ready
+        lut_req_rdy <= 1'b0;
         lut_data_avail <= 1'b1;
         // Calculate which LUT entry based on address
         entry_idx = (lut_addr - lut_base_addr) >> 7;
@@ -181,8 +182,11 @@ module tb_wop_vertical_packing_engine
         end else begin
           lut_data <= '0;
         end
-      end else if (!lut_req_vld) begin
+      end else if (!lut_req_vld && !lut_req_rdy) begin
+        // Step 2: Request deasserted, reset for next transaction
+        lut_req_rdy <= 1'b1;
         lut_data_avail <= 1'b0;
+        $display("[LUT_DRIVER] Transaction completed, ready for next request at time %0t", $time);
       end
     end
   end

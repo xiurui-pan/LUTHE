@@ -167,10 +167,16 @@ module wop_vertical_packing_engine
     end else begin
       current_state <= next_state;
       
-      // Debug printing for state transitions
+      // Debug printing for state transitions and reset counters
       if (current_state != next_state) begin
         $display("[VP_ENGINE] State transition: %s -> %s at time %0t", 
                  current_state.name(), next_state.name(), $time);
+        
+        // Reset operation_cycle_counter when entering processing states
+        if (next_state == SAMPLE_EXTRACT || next_state == POST_PROCESS) begin
+          operation_cycle_counter <= 0;
+          $display("[VP_ENGINE] Resetting operation_cycle_counter for new state");
+        end
       end
       
       case (current_state)
@@ -242,22 +248,29 @@ module wop_vertical_packing_engine
         
         CMUX_TREE_PROCESS: begin
           if (cmux_operation_done) begin
-            bit_counter <= bit_counter - 1;  // Decrement from high bit to low bit
             pool_select <= ~pool_select;  // Ping-pong between pools
             cmux_operation_done <= 1'b0;  // Reset flag after processing
             operation_cycle_counter <= 0;  // Reset counter for next bit
-            $display("[VP_ENGINE] CMux bit %0d completed, pool_select=%0b, next_bit=%0d", 
-                     bit_counter, ~pool_select, bit_counter - 1);
-            if (bit_counter <= 1) begin  // When we reach bit 0
+            $display("[VP_ENGINE] CMux bit %0d completed, pool_select=%0b", 
+                     bit_counter, ~pool_select);
+            
+            if (bit_counter <= 1) begin  // Check BEFORE decrementing to prevent underflow
               cmux_tree_done <= 1'b1;
               $display("[VP_ENGINE] *** CMUX TREE FULLY COMPLETED ***");
+            end else begin
+              bit_counter <= bit_counter - 1;  // Only decrement if safe
+              $display("[VP_ENGINE] Decrementing bit_counter from %0d to %0d", bit_counter, bit_counter - 1);
             end
           end
         end
         
         BLIND_ROTATION_INIT: begin
           bit_counter <= 0;  // Start from bit 0
-          $display("[VP_ENGINE] Blind rotation initialized");
+          operation_cycle_counter <= 0;  // Reset counter for blind rotation
+          blind_rot_operation_done <= 1'b0;  // Reset flag
+          cmux_operation_done <= 1'b0;  // CRITICAL: Reset CMUX flag to stop CMUX processing
+          cmux_tree_done <= 1'b0;  // Reset CMUX tree completion flag
+          $display("[VP_ENGINE] Blind rotation initialized, CMUX flags reset");
         end
         
         BLIND_ROTATION_PROCESS: begin
@@ -274,13 +287,29 @@ module wop_vertical_packing_engine
         end
         
         SAMPLE_EXTRACT: begin
-          sample_extract_done <= 1'b1;
-          $display("[VP_ENGINE] Sample extraction completed");
+          // Use a simpler approach: complete immediately with some delay
+          operation_cycle_counter <= operation_cycle_counter + 1;
+          
+          if (operation_cycle_counter == 0) begin
+            sample_extract_done <= 1'b0;  // Reset flag
+            $display("[VP_ENGINE] Starting sample extraction processing");
+          end else if (operation_cycle_counter >= 3) begin  // 3 cycles for sample extraction
+            sample_extract_done <= 1'b1;
+            $display("[VP_ENGINE] Sample extraction completed after %0d cycles", operation_cycle_counter);
+          end
         end
         
         POST_PROCESS: begin
-          post_process_done <= 1'b1;
-          $display("[VP_ENGINE] Post-processing completed");
+          // Use a simpler approach: complete immediately with some delay  
+          operation_cycle_counter <= operation_cycle_counter + 1;
+          
+          if (operation_cycle_counter == 0) begin
+            post_process_done <= 1'b0;  // Reset flag
+            $display("[VP_ENGINE] Starting post-processing");
+          end else if (operation_cycle_counter >= 5) begin  // 5 cycles for post-processing
+            post_process_done <= 1'b1;
+            $display("[VP_ENGINE] Post-processing completed after %0d cycles", operation_cycle_counter);
+          end
         end
         
         WRITE_RESULT: begin
@@ -309,6 +338,11 @@ module wop_vertical_packing_engine
     regf_wr_data_vld = '0;
     regf_wr_data = '0;
     
+    // Debug: Show current state periodically
+    if ($time % 500000 == 0 && $time > 500000) begin  // Every 500000 time units after startup
+      $display("[VP_ENGINE] *** STATE CHECK *** current_state=%s at time %0t", current_state.name(), $time);
+    end
+    
     case (current_state)
       IDLE: begin
         if (start && ggsw_samples_ready) begin
@@ -319,21 +353,30 @@ module wop_vertical_packing_engine
       LOAD_LUT_ENTRIES: begin
         // Load initial LUT entries into pools[0]
         if (!lut_load_done) begin
-          lut_req_vld = 1'b1;
-          // Simple address calculation: base address + entry_index * 128 bytes  
-          lut_addr = lut_base_addr + (lut_load_counter << 7);  // << 7 = * 128
+          // Only assert request if handshake is not in progress
+          if (!(lut_req_rdy && lut_data_avail)) begin
+            lut_req_vld = 1'b1;
+            // Simple address calculation: base address + entry_index * 128 bytes  
+            lut_addr = lut_base_addr + (lut_load_counter << 7);  // << 7 = * 128
+          end else begin
+            // Handshake in progress, deassert request
+            lut_req_vld = 1'b0;
+          end
         end
         
         if (lut_load_done) begin
           next_state = LOAD_GGSW_SAMPLES;
+          $display("[VP_ENGINE] *** STATE TRANSITION *** LOAD_LUT_ENTRIES -> LOAD_GGSW_SAMPLES at time %0t", $time);
         end
       end
       
       LOAD_GGSW_SAMPLES: begin
+        $display("[VP_ENGINE] *** ENTERED GGSW LOADING STATE *** ggsw_load_done=%0b at time %0t", ggsw_load_done, $time);
         // Load GGSW samples from RegFile
         if (!ggsw_load_done) begin
           regf_rd_req_vld = 1'b1;
           regf_rd_req = {ggsw_samples_base_addr + bit_counter, 16'h0000};
+          $display("[VP_ENGINE] GGSW loading: bit_counter=%0d, addr=0x%0h", bit_counter, ggsw_samples_base_addr + bit_counter);
           
           // Complete handshake when both ready and data_avail are asserted
           if (regf_rd_req_rdy && regf_rd_data_avail[0]) begin
@@ -345,11 +388,13 @@ module wop_vertical_packing_engine
         
         if (ggsw_load_done) begin
           next_state = CMUX_TREE_INIT;
+          $display("[VP_ENGINE] *** STATE TRANSITION *** LOAD_GGSW_SAMPLES -> CMUX_TREE_INIT at time %0t", $time);
         end
       end
       
       CMUX_TREE_INIT: begin
         next_state = CMUX_TREE_PROCESS;
+        $display("[VP_ENGINE] *** STATE TRANSITION *** CMUX_TREE_INIT -> CMUX_TREE_PROCESS at time %0t", $time);
       end
       
       CMUX_TREE_PROCESS: begin
@@ -360,15 +405,18 @@ module wop_vertical_packing_engine
             $display("[VP_ENGINE] *** TRANSITIONING TO BLIND ROTATION *** at time %0t", $time);
           end
         end else begin
-          // Debug: Why are we stuck in CMUX processing?
-          $display("[VP_ENGINE] CMUX_TREE_PROCESS: waiting for cmux_operation_done (current=%0b) at time %0t", 
-                   cmux_operation_done, $time);
+          // Reduce debug frequency
+          if ($time % 100000 == 0) begin
+            $display("[VP_ENGINE] CMUX_TREE_PROCESS: waiting cmux_done=%0b, cycle=%0d at time %0t", 
+                     cmux_operation_done, operation_cycle_counter, $time);
+          end
         end
       end
       
       BLIND_ROTATION_INIT: begin
         // The rotate_lut initialization will be done in always_ff
         next_state = BLIND_ROTATION_PROCESS;
+        $display("[VP_ENGINE] *** STATE TRANSITION *** BLIND_ROTATION_INIT -> BLIND_ROTATION_PROCESS at time %0t", $time);
       end
       
       BLIND_ROTATION_PROCESS: begin
@@ -376,6 +424,7 @@ module wop_vertical_packing_engine
         if (blind_rot_operation_done) begin
           if (blind_rotation_done) begin
             next_state = SAMPLE_EXTRACT;
+            $display("[VP_ENGINE] *** STATE TRANSITION *** BLIND_ROTATION_PROCESS -> SAMPLE_EXTRACT at time %0t", $time);
           end
         end
       end
@@ -387,6 +436,7 @@ module wop_vertical_packing_engine
         
         if (sample_extract_done) begin
           next_state = POST_PROCESS;
+          $display("[VP_ENGINE] *** STATE TRANSITION *** SAMPLE_EXTRACT -> POST_PROCESS at time %0t", $time);
         end
       end
       
@@ -396,6 +446,7 @@ module wop_vertical_packing_engine
         
         if (post_process_done) begin
           next_state = WRITE_RESULT;
+          $display("[VP_ENGINE] *** STATE TRANSITION *** POST_PROCESS -> WRITE_RESULT at time %0t", $time);
         end
       end
       
@@ -508,21 +559,18 @@ module wop_vertical_packing_engine
     end else begin
       case (current_state)
         CMUX_TREE_PROCESS: begin
-          operation_cycle_counter <= operation_cycle_counter + 1;
           $display("[VP_ENGINE] CMUX cycle_counter=%0d->%0d, cmux_done=%0b at time %0t", 
                    operation_cycle_counter, operation_cycle_counter + 1, cmux_operation_done, $time);
           
-          // Debug: Check if condition will be met
-          if (operation_cycle_counter == 0) begin
+          // Real CMux operation: select between pool entries based on TGSW bit (use current value before increment)
+          if (operation_cycle_counter == 0) begin  // Check condition BEFORE incrementing
             $display("[VP_ENGINE] *** CONDITION MET *** cycle_counter=0, triggering data processing");
-          end
-          
-          // Real CMux operation: select between pool entries based on TGSW bit
-          if (operation_cycle_counter == 0) begin  // Use cycle 0 instead of 1 since counter is incremented above
             // Extract control bit from current TGSW sample (direct read)
             control_bit = tgsw_radixs[bit_counter][0][0][0][31];  // Use MSB as control bit
             num_entries = (1 << (bit_width - 1 - bit_counter));
             $display("[VP_ENGINE] *** ENTERING CMUX DATA PROCESSING *** bit_counter=%0d, cycle=0", bit_counter);
+            
+            // Do the actual CMux processing here (combine both conditions into one)
             for (int j = 0; j < num_entries; j++) begin
               if (control_bit == 1'b0) begin
                 // Select left child: pool[next][j] = pool[current][j*2]
@@ -543,6 +591,9 @@ module wop_vertical_packing_engine
             $display("[VP_ENGINE] *** CMux bit %0d *** control=%0b, processing %0d entries, tgsw_sample=0x%0h", 
                      bit_counter, control_bit, num_entries, tgsw_radixs[bit_counter][0][0][0]);
           end
+          
+          // INCREMENT AFTER all processing
+          operation_cycle_counter <= operation_cycle_counter + 1;
           
           // Complete CMux operation after data processing
           if (operation_cycle_counter >= 5) begin  // 5 cycles for CMux operation

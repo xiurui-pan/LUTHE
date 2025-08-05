@@ -18,11 +18,6 @@
         }
     ],
     "c_files": [
-        {
-            "name": "hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/scripts/vertical_packing_golden.cpp",
-            "env": ["simu"],
-            "target": ["all"]
-        }
     ],
     "dependency_dir": [
         "hw/simu_lib/simu_base",

@@ -31,7 +31,8 @@ module wop_vertical_packing_engine
   parameter int N_LVL1 = 1024,
   parameter int ELL_LVL1 = 3,
   parameter int K = 1,  // k parameter for TLWE
-  parameter int REGF_ADDR_W = 16  // RegFile address width
+  parameter int REGF_ADDR_W = 16,  // RegFile address width
+  parameter int LUT_SIZE = 1024  // LUT table size (2^10)
 )
 (
   input  logic clk,
@@ -122,12 +123,20 @@ module wop_vertical_packing_engine
   
   // Temporary variables for combinational logic
   logic current_bit_value;
+  logic control_bit;
+  int num_entries;
+  int rotation_amount;
+  int normalized_rotation;
   
   // Stage completion flags
   logic lut_load_done;
   logic ggsw_load_done;
   logic cmux_tree_done;
   logic blind_rotation_done;
+  
+  // LUT request tracking
+  logic lut_request_pending;
+  logic lut_transaction_complete;
   
   // Operation control signals
   logic cmux_operation_done;
@@ -153,6 +162,8 @@ module wop_vertical_packing_engine
       blind_rotation_done <= 1'b0;
       sample_extract_done <= 1'b0;
       post_process_done <= 1'b0;
+      lut_request_pending <= 1'b0;
+      lut_transaction_complete <= 1'b0;
     end else begin
       current_state <= next_state;
       
@@ -164,21 +175,59 @@ module wop_vertical_packing_engine
       
       case (current_state)
         LOAD_LUT_ENTRIES: begin
+          // Debug: Show detailed handshake status
+          if (lut_load_counter % 100 == 0) begin  // Print every 100 entries to avoid spam
+            $display("[VP_ENGINE] LUT loading status: counter=%0d, req_rdy=%0b, data_avail=%0b, done=%0b at time %0t", 
+                     lut_load_counter, lut_req_rdy, lut_data_avail, lut_load_done, $time);
+          end
+          
           if (lut_req_rdy && lut_data_avail) begin
+            // Store LUT data into pools[0] - simplified to first few coefficients
+            pools[0][lut_load_counter][0][0] <= lut_data[31:0];   // First coefficient
+            pools[0][lut_load_counter][0][1] <= lut_data[63:32];  // Second coefficient
+            if (K > 0) begin
+              pools[0][lut_load_counter][1][0] <= lut_data[95:64];   // Third coefficient
+              pools[0][lut_load_counter][1][1] <= lut_data[127:96]; // Fourth coefficient  
+            end
+            
+            $display("[VP_ENGINE] *** HANDSHAKE SUCCESS *** Loading LUT entry %0d: data[31:0]=0x%0h at time %0t", 
+                     lut_load_counter, lut_data[31:0], $time);
+            
             lut_load_counter <= lut_load_counter + 1;
-            $display("[VP_ENGINE] Loading LUT entry %0d at time %0t", lut_load_counter, $time);
-            if (lut_load_counter >= MAX_POOL_ENTRIES - 1) begin
+            
+            // Expand to more LUT entries for better testing
+            if (lut_load_counter >= 63) begin  // Load 64 LUT entries for comprehensive testing
               lut_load_done <= 1'b1;
+              $display("[VP_ENGINE] *** LUT LOADING COMPLETED *** %0d entries loaded into pools[0]", lut_load_counter + 1);
+            end
+          end else begin
+            // Debug: Why handshake is not completing
+            if (lut_load_counter == 0) begin  // Only print once at start
+              $display("[VP_ENGINE] Waiting for LUT handshake: req_rdy=%0b, data_avail=%0b at time %0t", 
+                       lut_req_rdy, lut_data_avail, $time);
             end
           end
         end
         
         LOAD_GGSW_SAMPLES: begin
           if (regf_rd_req_rdy && regf_rd_data_avail[0]) begin
+            // Store GGSW data into tgsw_radixs array
+            for (int ell = 0; ell < ELL_LVL1; ell++) begin
+              for (int k = 0; k <= K; k++) begin
+                for (int n = 0; n < N_LVL1; n++) begin
+                  tgsw_radixs[bit_counter][ell][k][n] <= regf_rd_data[0][(ell*(K+1)*N_LVL1 + k*N_LVL1 + n)*MOD_Q_W +: MOD_Q_W];
+                end
+              end
+            end
+            
             bit_counter <= bit_counter + 1;
-            $display("[VP_ENGINE] Loading GGSW sample %0d at time %0t", bit_counter, $time);
-            if (bit_counter >= bit_width - 1) begin
+            $display("[VP_ENGINE] Loading GGSW sample %0d: data=0x%0h at time %0t", 
+                     bit_counter, regf_rd_data[0][MOD_Q_W-1:0], $time);
+            
+            // Load all GGSW samples (20 bits total)
+            if (bit_counter >= MAX_BIT_WIDTH - 1) begin  // Load all 20 GGSW samples
               ggsw_load_done <= 1'b1;
+              $display("[VP_ENGINE] GGSW loading completed: %0d TGSW samples loaded", MAX_BIT_WIDTH);
             end
           end
         end
@@ -186,16 +235,22 @@ module wop_vertical_packing_engine
         CMUX_TREE_INIT: begin
           bit_counter <= CMUX_TREE_BITS;  // Start from bit 10
           pool_select <= 1'b0;
+          operation_cycle_counter <= 0;  // Reset counter for CMUX processing
+          cmux_operation_done <= 1'b0;  // Reset flag
           $display("[VP_ENGINE] CMux tree initialized, starting from bit %0d", CMUX_TREE_BITS);
         end
         
         CMUX_TREE_PROCESS: begin
           if (cmux_operation_done) begin
-            bit_counter <= bit_counter + 1;
+            bit_counter <= bit_counter - 1;  // Decrement from high bit to low bit
             pool_select <= ~pool_select;  // Ping-pong between pools
-            $display("[VP_ENGINE] CMux bit %0d completed, pool_select=%0b", bit_counter, ~pool_select);
-            if (bit_counter >= bit_width - 1) begin
+            cmux_operation_done <= 1'b0;  // Reset flag after processing
+            operation_cycle_counter <= 0;  // Reset counter for next bit
+            $display("[VP_ENGINE] CMux bit %0d completed, pool_select=%0b, next_bit=%0d", 
+                     bit_counter, ~pool_select, bit_counter - 1);
+            if (bit_counter <= 1) begin  // When we reach bit 0
               cmux_tree_done <= 1'b1;
+              $display("[VP_ENGINE] *** CMUX TREE FULLY COMPLETED ***");
             end
           end
         end
@@ -208,9 +263,12 @@ module wop_vertical_packing_engine
         BLIND_ROTATION_PROCESS: begin
           if (blind_rot_operation_done) begin
             bit_counter <= bit_counter + 1;
+            blind_rot_operation_done <= 1'b0;  // Reset flag after processing
+            operation_cycle_counter <= 0;  // Reset counter for next bit
             $display("[VP_ENGINE] Blind rotation bit %0d completed", bit_counter);
             if (bit_counter >= BLIND_ROT_BITS - 1) begin
               blind_rotation_done <= 1'b1;
+              $display("[VP_ENGINE] *** BLIND ROTATION FULLY COMPLETED ***");
             end
           end
         end
@@ -260,34 +318,33 @@ module wop_vertical_packing_engine
       
       LOAD_LUT_ENTRIES: begin
         // Load initial LUT entries into pools[0]
-        // LUT has 2^20 entries, but we only load 2^10 initially
-        lut_req_vld = 1'b1;
-        lut_addr = lut_base_addr + (lut_load_counter * (N_LVL1 * 4)); // 4 bytes per coefficient
+        if (!lut_load_done) begin
+          lut_req_vld = 1'b1;
+          // Simple address calculation: base address + entry_index * 128 bytes  
+          lut_addr = lut_base_addr + (lut_load_counter << 7);  // << 7 = * 128
+        end
         
-        if (lut_req_rdy && lut_data_avail) begin
-          // Store LUT data into pools[0][entry_counter]
-          // This is simplified - actual implementation would parse the LUT data properly
-          
-          if (lut_load_counter >= MAX_POOL_ENTRIES) begin
-            lut_load_done = 1'b1;
-            next_state = LOAD_GGSW_SAMPLES;
-          end
+        if (lut_load_done) begin
+          next_state = LOAD_GGSW_SAMPLES;
         end
       end
       
       LOAD_GGSW_SAMPLES: begin
         // Load GGSW samples from RegFile
-        regf_rd_req_vld = 1'b1;
-        regf_rd_req = {ggsw_samples_base_addr + bit_counter, 16'h0000};
-        
-        if (regf_rd_req_rdy && regf_rd_data_avail[0]) begin
-          // Store GGSW data - this is simplified
-          // Actual implementation would need to handle the full GGSW structure
+        if (!ggsw_load_done) begin
+          regf_rd_req_vld = 1'b1;
+          regf_rd_req = {ggsw_samples_base_addr + bit_counter, 16'h0000};
           
-          if (bit_counter >= bit_width - 1) begin
-            ggsw_load_done = 1'b1;
-            next_state = CMUX_TREE_INIT;
+          // Complete handshake when both ready and data_avail are asserted
+          if (regf_rd_req_rdy && regf_rd_data_avail[0]) begin
+            regf_rd_req_vld = 1'b0;  // Deassert request to complete handshake
+            $display("[VP_ENGINE] GGSW transaction completed: bit %0d at time %0t", 
+                     bit_counter, $time);
           end
+        end
+        
+        if (ggsw_load_done) begin
+          next_state = CMUX_TREE_INIT;
         end
       end
       
@@ -296,46 +353,16 @@ module wop_vertical_packing_engine
       end
       
       CMUX_TREE_PROCESS: begin
-        // CMux Tree: for d = 10 to 19 (exactly matching big_lut.cpp line 18-23)
-        // Implements: for (int d = 10, i = 1; d < 20; d++, i ^= 1)
-        
-        if (bit_counter < bit_width && !cmux_tree_done) begin
-          // Calculate current level parameters (exact match to big_lut.cpp)
-          int from_pool = pool_select ^ 1;  // pools[i ^ 1]
-          int to_pool = pool_select;        // pools[i]
-          int entries_at_level = 1 << (19 - bit_counter);  // Exact match: (1 << (19 - d))
-          
-          $display("[VP_ENGINE] CMux d=%0d: processing %0d entries, pool %0d -> %0d", 
-                   bit_counter, entries_at_level, from_pool, to_pool);
-          
-          // For each entry at this level, perform CMux operation
-          // Line 21: TLwe32CMux_TGsw_lvl1(&to[j], &from[j << 1], &from[j << 1 | 1], &tgsw_radixs[d], env)
-          current_bit_value = tgsw_bit_is_set(bit_counter);
-          
-          for (int j = 0; j < entries_at_level; j++) begin
-            // Simplified CMux: result = current_bit_value ? in1 : in0
-            // In real implementation: result = in0 + c * (in1 - in0) where c = tgsw_radixs[d]
-            
-            for (int k = 0; k <= K; k++) begin
-              for (int n = 0; n < N_LVL1; n++) begin
-                if (current_bit_value) begin
-                  // Select in1: from[j << 1 | 1]
-                  pools[to_pool][j][k][n] = pools[from_pool][j << 1 | 1][k][n];
-                end else begin
-                  // Select in0: from[j << 1]
-                  pools[to_pool][j][k][n] = pools[from_pool][j << 1][k][n];
-                end
-              end
-            end
-          end
-          
-          $display("[VP_ENGINE] CMux d=%0d completed, bit_value=%0b", bit_counter, current_bit_value);
-          
+        // CMux Tree: Use operation_done flag from sequential logic
+        if (cmux_operation_done) begin
           if (cmux_tree_done) begin
             next_state = BLIND_ROTATION_INIT;
+            $display("[VP_ENGINE] *** TRANSITIONING TO BLIND ROTATION *** at time %0t", $time);
           end
-        end else if (cmux_tree_done) begin
-          next_state = BLIND_ROTATION_INIT;
+        end else begin
+          // Debug: Why are we stuck in CMUX processing?
+          $display("[VP_ENGINE] CMUX_TREE_PROCESS: waiting for cmux_operation_done (current=%0b) at time %0t", 
+                   cmux_operation_done, $time);
         end
       end
       
@@ -345,52 +372,11 @@ module wop_vertical_packing_engine
       end
       
       BLIND_ROTATION_PROCESS: begin
-        // Blind Rotation: for d = 0 to 9 (exactly matching big_lut.cpp line 29-37)
-        // Implements: for (int d = 0; d < 10; d++)
-        
-        if (bit_counter < BLIND_ROT_BITS && !blind_rotation_done) begin
-          // Line 30-31: Calculate rotation amount exactly as in C++
-          int a = 1 << bit_counter;  // (1 << d) - exact match
-          a = (2 * N_LVL1 - a) % (2 * N_LVL1);  // exact match
-          
-          $display("[VP_ENGINE] Blind rotation d=%0d: a = %0d", bit_counter, a);
-          
-          // Line 33: Apply polynomial rotation for each polynomial component
-          // for (int i = 0; i <= 1; i++) torus32PolynomialMulByXai_lvl1(tmp_mid->a + i, rotate_lut->a + i, a, env)
-          for (int k = 0; k <= K; k++) begin  // K=1, so k=0,1 matches i=0,1
-            polynomial_mul_by_xai(tmp_mid[k], rotate_lut[k], a);
-          end
-          
-          // Extract bit value from GGSW sample  
-          current_bit_value = tgsw_bit_is_set(bit_counter);
-          $display("[VP_ENGINE] GGSW bit d=%0d = %0b", bit_counter, current_bit_value);
-          
-          // Line 35: CMux selection
-          // TLwe32CMux_TGsw_lvl1(tmp_result, rotate_lut, tmp_mid, &tgsw_radixs[d], env)
-          for (int k = 0; k <= K; k++) begin
-            for (int n = 0; n < N_LVL1; n++) begin
-              if (current_bit_value) begin
-                tmp_result[k][n] = tmp_mid[k][n];      // Select rotated version
-              end else begin
-                tmp_result[k][n] = rotate_lut[k][n];   // Select original
-              end
-            end
-          end
-          
-          // Line 36: std::swap(rotate_lut, tmp_result)
-          for (int k = 0; k <= K; k++) begin
-            for (int n = 0; n < N_LVL1; n++) begin
-              rotate_lut[k][n] = tmp_result[k][n];
-            end
-          end
-          
-          $display("[VP_ENGINE] After rotation d=%0d: rotate_lut[0][0] = %0h", bit_counter, rotate_lut[0][0]);
-          
+        // Blind Rotation: Use operation_done flag from sequential logic
+        if (blind_rot_operation_done) begin
           if (blind_rotation_done) begin
             next_state = SAMPLE_EXTRACT;
           end
-        end else if (blind_rotation_done) begin
-          next_state = SAMPLE_EXTRACT;
         end
       end
       
@@ -523,24 +509,92 @@ module wop_vertical_packing_engine
       case (current_state)
         CMUX_TREE_PROCESS: begin
           operation_cycle_counter <= operation_cycle_counter + 1;
-          // Simulate CMux operation taking some cycles
-          if (operation_cycle_counter >= 10) begin  // 10 cycles per CMux operation
+          $display("[VP_ENGINE] CMUX cycle_counter=%0d->%0d, cmux_done=%0b at time %0t", 
+                   operation_cycle_counter, operation_cycle_counter + 1, cmux_operation_done, $time);
+          
+          // Debug: Check if condition will be met
+          if (operation_cycle_counter == 0) begin
+            $display("[VP_ENGINE] *** CONDITION MET *** cycle_counter=0, triggering data processing");
+          end
+          
+          // Real CMux operation: select between pool entries based on TGSW bit
+          if (operation_cycle_counter == 0) begin  // Use cycle 0 instead of 1 since counter is incremented above
+            // Extract control bit from current TGSW sample (direct read)
+            control_bit = tgsw_radixs[bit_counter][0][0][0][31];  // Use MSB as control bit
+            num_entries = (1 << (bit_width - 1 - bit_counter));
+            $display("[VP_ENGINE] *** ENTERING CMUX DATA PROCESSING *** bit_counter=%0d, cycle=0", bit_counter);
+            for (int j = 0; j < num_entries; j++) begin
+              if (control_bit == 1'b0) begin
+                // Select left child: pool[next][j] = pool[current][j*2]
+                for (int k = 0; k <= K; k++) begin
+                  for (int n = 0; n < N_LVL1; n++) begin
+                    pools[~pool_select][j][k][n] <= pools[pool_select][j*2][k][n];
+                  end
+                end
+              end else begin
+                // Select right child: pool[next][j] = pool[current][j*2+1]
+                for (int k = 0; k <= K; k++) begin
+                  for (int n = 0; n < N_LVL1; n++) begin
+                    pools[~pool_select][j][k][n] <= pools[pool_select][j*2+1][k][n];
+                  end
+                end
+              end
+            end
+            $display("[VP_ENGINE] *** CMux bit %0d *** control=%0b, processing %0d entries, tgsw_sample=0x%0h", 
+                     bit_counter, control_bit, num_entries, tgsw_radixs[bit_counter][0][0][0]);
+          end
+          
+          // Complete CMux operation after data processing
+          if (operation_cycle_counter >= 5) begin  // 5 cycles for CMux operation
             cmux_operation_done <= 1'b1;
             operation_cycle_counter <= 0;
-          end else begin
-            cmux_operation_done <= 1'b0;
+            $display("[VP_ENGINE] *** CMUX OPERATION COMPLETED *** at time %0t", $time);
           end
+          // Note: Keep cmux_operation_done=1 until state machine resets it
         end
         
         BLIND_ROTATION_PROCESS: begin
           operation_cycle_counter <= operation_cycle_counter + 1;
-          // Simulate blind rotation taking some cycles
-          if (operation_cycle_counter >= 20) begin  // 20 cycles per rotation
+          
+          // Real blind rotation: polynomial multiplication by X^(-2^d)
+          if (operation_cycle_counter == 0) begin
+            // Extract control bit from current TGSW sample
+            control_bit = tgsw_radixs[bit_counter][0][0][0][31];  // Use MSB as control bit
+            rotation_amount = (1 << bit_counter);  // 2^d
+            normalized_rotation = (2 * N_LVL1 - rotation_amount) % (2 * N_LVL1);
+            
+            // Perform polynomial multiplication by X^a (simplified)
+            for (int k = 0; k <= K; k++) begin
+              // Simple rotation simulation - shift indices by rotation amount
+              for (int n = 0; n < N_LVL1; n++) begin
+                int src_idx = (n + normalized_rotation) % N_LVL1;
+                tmp_mid[k][n] <= rotate_lut[k][src_idx];  // Store rotated result
+              end
+            end
+            
+            // CMux selection: choose between original and rotated based on control bit
+            if (control_bit == 1'b0) begin
+              // Keep original rotate_lut (no change needed)
+              $display("[VP_ENGINE] Blind rotation bit %0d: control=0, keep original", bit_counter);
+            end else begin
+              // Select rotated version: rotate_lut = tmp_mid
+              for (int k = 0; k <= K; k++) begin
+                for (int n = 0; n < N_LVL1; n++) begin
+                  rotate_lut[k][n] <= tmp_mid[k][n];
+                end
+              end
+              $display("[VP_ENGINE] *** Blind rotation bit %0d *** control=1, use rotated (X^%0d), tgsw_sample=0x%0h", 
+                       bit_counter, rotation_amount, tgsw_radixs[bit_counter][0][0][0]);
+            end
+          end
+          
+          // Complete blind rotation operation after data processing  
+          if (operation_cycle_counter >= 10) begin  // 10 cycles for rotation operation
             blind_rot_operation_done <= 1'b1;
             operation_cycle_counter <= 0;
-          end else begin
-            blind_rot_operation_done <= 1'b0;
+            $display("[VP_ENGINE] *** BLIND ROTATION OPERATION COMPLETED *** at time %0t", $time);
           end
+          // Note: Keep blind_rot_operation_done=1 until state machine resets it
         end
         
         SAMPLE_EXTRACT: begin

@@ -176,9 +176,11 @@ module tb_wop_vertical_packing_engine
         // Calculate which LUT entry based on address
         entry_idx = (lut_addr - lut_base_addr) >> 7;
         if (entry_idx < LUT_SIZE) begin
-          lut_data <= {32'h0, 32'h0, 32'h1 + entry_idx, 32'h100 + entry_idx}; // Simple test pattern
-          $display("[LUT_DRIVER] Providing LUT[%0d] = 0x%0h at time %0t", 
-                   entry_idx, {32'h0, 32'h0, 32'h1 + entry_idx, 32'h100 + entry_idx}, $time);
+          lut_data <= {test_lut_table[entry_idx][0][3], test_lut_table[entry_idx][0][2],
+                      test_lut_table[entry_idx][0][1], test_lut_table[entry_idx][0][0]};
+          $display("[LUT_DRIVER] Providing LUT[%0d] = 0x%0h at time %0t",
+                   entry_idx, {test_lut_table[entry_idx][0][3], test_lut_table[entry_idx][0][2],
+                              test_lut_table[entry_idx][0][1], test_lut_table[entry_idx][0][0]}, $time);
         end else begin
           lut_data <= '0;
         end

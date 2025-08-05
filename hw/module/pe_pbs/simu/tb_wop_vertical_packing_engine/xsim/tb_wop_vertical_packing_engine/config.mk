@@ -7,7 +7,7 @@ VLOG_INCLUDES = -i /home/pxr/workspace/hpu_fpga/hw/module/top_common/rtl/inc -i 
 GEN_PARAMS    = 
 
 XELAB_OPTIONS =	-debug typical
-XSIM_OPTIONS  = -sv_seed 215508037140480 -ignore_coverage
+XSIM_OPTIONS  = -sv_seed 182148757716992 -ignore_coverage
 
 XSIM_WAVE_TCL = /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/xsim/tb_wop_vertical_packing_engine/dump_wave.tcl
 XSIM_WDB      = /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/xsim/tb_wop_vertical_packing_engine/wave.wdb

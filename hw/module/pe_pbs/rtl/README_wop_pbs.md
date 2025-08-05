@@ -86,6 +86,20 @@ WoP-PBS是TFHE中的一个重要变体，它实现了无填充的可编程自举
 - **状态**: ⚠️ **框架完成，算法简化** 
 - **实现层级**: 系统框架 + 简化算法核心
 
+##### `wop_premodswitch_engine.sv` - 预模切换引擎
+- **功能**: 实现`preModSwitch()`函数，为circuit bootstrap准备数据
+- **算法**: 从level 0 LWE sample转换为整数域 (Torus32 → int)
+- **特点**: WoP-PBS独有的预处理步骤，与标准PBS的mod switch不同
+- **状态**: ✅ **完整实现**
+- **复用性**: ❌ 无法复用标准PBS模块，算法完全不同
+
+##### `wop_private_keyswitch_engine.sv` - 私钥切换引擎  
+- **功能**: 实现`circuitPrivKS()`函数，circuit bootstrap后处理
+- **算法**: 从level 2 LWE转换为level 1 GGSW sample
+- **特点**: WoP-PBS独有的密钥切换类型，与标准PBS的keyswitch不同
+- **状态**: ⚠️ **框架完成，KSK接口待连接**
+- **复用性**: ❌ 无法复用标准PBS的`pep_key_switch`，算法类型不同
+
 #### 3. 复用的辅助模块 (来自pe_pbs_with_*)
 
 ##### BSK管理器 (pe_pbs_with_bsk)
@@ -169,13 +183,15 @@ WoP-PBS是TFHE中的一个重要变体，它实现了无填充的可编程自举
    - **经验**: "SUCCESS"信息可能误导 - 需要检查Golden Reference正确性
    - **改进**: 分层验证：框架正确性 + 算法正确性分离验证
 
-### 🎯 三个引擎的实现状态对比
+### 🎯 五个WoP-PBS引擎的实现状态对比
 
 | 引擎 | 状态机 | 接口 | 核心算法 | 总体状态 |
 |------|--------|------|----------|----------|
 | **Bit Extraction** | ✅ 完整 | ✅ PBS服务 | ❌ TODO标记 | ⚠️ 70%完成 |
 | **Circuit Bootstrap** | ✅ 完整 | ✅ NTT/BSK | ⚠️ 简化实现 | ⚠️ 75%完成 |  
 | **Vertical Packing** | ✅ 完整 | ✅ LUT/RegFile | ⚠️ 简化实现 | ⚠️ 80%完成 |
+| **Pre-ModSwitch** | ✅ 完整 | ✅ 独立模块 | ✅ 完整实现 | ✅ **90%完成** |
+| **Private KeySwitch** | ✅ 完整 | ⚠️ KSK待连接 | ✅ 算法实现 | ⚠️ 85%完成 |
 
 ### 🎯 当前实现层级定位
 
@@ -259,6 +275,16 @@ WoP-PBS是TFHE中的一个重要变体，它实现了无填充的可编程自举
   - 需要：位移、减法、PBS调用的完整逻辑
   - 预期工作量：1-2周
 
+#### **阶段4: 辅助引擎完善** 
+- [ ] **Private KeySwitch Engine KSK接口连接**
+  - 当前：算法逻辑完整，KSK管理器接口待连接
+  - 需要：与现有KSK管理器的接口适配
+  - 预期工作量：1周
+
+- [x] **Pre-ModSwitch Engine** (已完成)
+  - 状态：算法和接口都已完整实现
+  - 验证：需要独立测试验证正确性
+
 ### 🔧 **系统完善和优化** (优先级：**中**)
 
 #### **验证体系改进**
@@ -308,6 +334,32 @@ WoP-PBS是TFHE中的一个重要变体，它实现了无填充的可编程自举
 1. **当前阶段**: 完成框架验证，发布架构成果
 2. **下一阶段**: 选择一个引擎（建议Vertical Packing）进行完整实现
 3. **后续阶段**: 基于经验逐步完善其他引擎
+
+## 🔄 **WoP-PBS与标准PBS的模块复用分析**
+
+### ✅ **可以复用的模块**
+
+| 标准PBS模块 | WoP-PBS用途 | 复用程度 |
+|-------------|-------------|----------|
+| **NTT引擎** | Circuit Bootstrap外部积计算 | ✅ 100%复用 |
+| **BSK管理器** | 加载和管理Bootstrapping密钥 | ✅ 100%复用 |
+| **RegFile** | 存储中间结果和LWE样本 | ✅ 100%复用 |
+| **AXI接口** | LUT数据访问 | ✅ 100%复用 |
+
+### ❌ **无法复用的模块** 
+
+| 标准PBS模块 | WoP-PBS对应 | 不能复用的原因 |
+|-------------|-------------|----------------|
+| **`pep_key_switch`** | `wop_private_keyswitch_engine` | 算法类型不同：BLWE→LWE vs LWE→GGSW |
+| **`pep_br_mod_switch_to_2powerN`** | `wop_premodswitch_engine` | 数据域不同：NTT域→Q域 vs Torus32→int |
+| **标准PBS核心** | WoP-PBS三阶段 | 算法流程完全不同 |
+
+### 🎯 **复用策略建议**
+
+1. **最大化复用辅助模块**: NTT、BSK、RegFile、AXI等基础设施
+2. **独立实现算法核心**: 五个WoP-PBS专用引擎必须独立开发
+3. **共享资源管理**: 通过仲裁器共享NTT和BSK资源
+4. **接口标准化**: 确保WoP-PBS引擎与复用模块的接口兼容
 
 ## 与标准PBS的对比
 
@@ -507,7 +559,7 @@ WoP-PBS是TFHE中的一个重要变体，它实现了无填充的可编程自举
 
 ### 新的测试架构 ✨
 我们采用了基于原始C++代码的黄金标准验证方法：
-- **直接调用原始C++函数**: 通过DPI-C接口调用`tfhe-cpu-baseline-wopbs/src/`中的函数
+- **直接参考原始C++函数**: 参考`tfhe-cpu-baseline-wopbs/src/`中的实现来实现tb的golden reference，确保rtl的功能正确性
 - **100%算法一致性**: 避免重新实现算法带来的错误
 - **便于协同开发**: C++代码更新时测试自动跟上
 

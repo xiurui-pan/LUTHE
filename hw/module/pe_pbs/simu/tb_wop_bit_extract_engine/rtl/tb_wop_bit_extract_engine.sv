@@ -20,6 +20,8 @@ module tb_wop_bit_extract_engine;
   import pep_if_pkg::*;
   import hpu_common_instruction_pkg::*;
   import axi_if_glwe_axi_pkg::*;
+  import axi_if_bsk_axi_pkg::*;
+  import axi_if_ksk_axi_pkg::*;
 
 // ==============================================================================================
 // Parameters
@@ -118,10 +120,14 @@ module tb_wop_bit_extract_engine;
   logic [AXI4_DATA_W-1:0] lut_data;
 
 // ==============================================================================================
-// PBS Operation Simulation Functions
+// PBS Operation Simulation Functions (PRESERVED FOR REFERENCE)
 // ==============================================================================================
   
-  // Simulate PBS extract bit 31 operation based on map_to_bit31 LUT
+  // NOTE: These functions were the original PBS simulators before pe_pbs integration
+  // They are preserved as comments for reference and potential fallback testing
+  
+  /*
+  // Original PBS extract bit 31 operation based on map_to_bit31 LUT
   // This mimics TLwe32_Keyswitch_Bootstrapping_Extract_lvl1 with map_to_bit31
   function automatic void simulate_pbs_extract_bit31(
     input logic [N_LVL1:0][MOD_Q_W-1:0] input_sample,
@@ -144,7 +150,7 @@ module tb_wop_bit_extract_engine;
     output_sample[N_LVL1] = ~(32'h1 << 30) + 1;  // Two's complement of -(1 << 30)
   endfunction
   
-  // Simulate PBS extract bit 27 operation based on map_to_bit27 LUT  
+  // Original PBS extract bit 27 operation based on map_to_bit27 LUT  
   // This mimics TLwe32_Keyswitch_Bootstrapping_Extract_lvl1 with map_to_bit27
   function automatic void simulate_pbs_extract_bit27(
     input logic [N_LVL1:0][MOD_Q_W-1:0] input_sample,
@@ -164,6 +170,10 @@ module tb_wop_bit_extract_engine;
     // The constant term (b coefficient) starts as -(1 << 26) from LUT
     output_sample[N_LVL1] = ~(32'h1 << 26) + 1;  // Two's complement of -(1 << 26)
   endfunction
+  */
+  
+  // Current implementation uses PBS Interface Validator (see below)
+  // This provides interface correctness validation while awaiting full pe_pbs integration
 
 // ==============================================================================================
 // Test Data Storage
@@ -341,102 +351,154 @@ module tb_wop_bit_extract_engine;
   end
 
 // ==============================================================================================
-// Enhanced PBS Service Simulator
+// PBS Interface Validator for Bit Extraction Engine Testing
 // ==============================================================================================
   
-  // Enhanced PBS service simulator that closely mimics pe_pbs behavior
-  // This validates bit extract PBS interface design while avoiding pe_pbs complexity
+  // IMPORTANT: This is a TEMPORARY PBS interface validator for development testing
+  // 
+  // PURPOSE:
+  // - Validates that bit extraction engine correctly calls PBS operations
+  // - Checks PBS instruction format and protocol compliance  
+  // - Provides functionally equivalent results for algorithm verification
+  //
+  // LIMITATIONS:
+  // - Does NOT perform real cryptographic PBS operations
+  // - Simplified bit extraction instead of full key switching + bootstrapping
+  // - Missing blind rotation, polynomial operations, etc.
+  //
+  // NEXT STEPS:
+  // - Replace with real pe_pbs module integration once compilation issues resolved
+  // - Or develop step-by-step PBS implementation with proper crypto algorithms
+  //
+  // EVOLUTION PATH:
+  // 1. Enhanced PBS Service Simulator (original, now removed)
+  // 2. PBS Interface Validator (current implementation)  
+  // 3. Full pe_pbs Integration (target implementation)
+  
+  // PBS interface validator that checks if bit extraction engine correctly calls PBS operations
+  // This validates interface correctness and PBS instruction format while providing functional results
   
   typedef enum logic [2:0] {
     PBS_IDLE,
-    PBS_READ_LWE,
-    PBS_PROCESSING,
-    PBS_WRITE_RESULT,
+    PBS_DECODE_INST,
+    PBS_READ_SRC,
+    PBS_EXECUTE,
+    PBS_WRITE_DST,
     PBS_COMPLETE
-  } pbs_state_e;
+  } pbs_validator_state_e;
   
-  pbs_state_e pbs_state;
-  logic [7:0] pbs_cycle_counter;
-  logic [N_LVL1:0][MOD_Q_W-1:0] pbs_src_data, pbs_dst_data;
-  logic [REGF_ADDR_W-1:0] pbs_src_addr, pbs_dst_addr;
-  logic [GID_W-1:0] pbs_lut_gid;
-
-  // Enhanced PBS state machine with realistic timing and RegFile interactions
+  pbs_validator_state_e pbs_validator_state;
+  logic [7:0] pbs_operation_cycles;
+  
+  // Decoded PBS instruction fields
+  logic [GID_W-1:0] decoded_gid;
+  logic [RID_W-1:0] decoded_src_rid, decoded_dst_rid;
+  logic is_map_to_bit31, is_map_to_bit27;
+  
+  // Source and destination data
+  logic [N_LVL1:0][MOD_Q_W-1:0] pbs_src_data, pbs_result_data;
+  
+  // PBS validator state machine - validates interface and provides correct PBS behavior
   always_ff @(posedge clk) begin
     if (!s_rst_n) begin
       pbs_inst_rdy <= 1'b1;
       pbs_inst_ack <= 1'b0;
       pbs_inst_ack_br_loop <= '0;
       pbs_inst_load_blwe_ack <= 1'b0;
-      pbs_state <= PBS_IDLE;
-      pbs_cycle_counter <= '0;
+      pbs_validator_state <= PBS_IDLE;
+      pbs_operation_cycles <= '0;
     end else begin
       pbs_inst_ack <= 1'b0;
       pbs_inst_load_blwe_ack <= 1'b0;
       
-      case (pbs_state)
+      case (pbs_validator_state)
         PBS_IDLE: begin
           if (pbs_inst_vld && pbs_inst_rdy) begin
-            // Accept PBS instruction and extract parameters
-            pbs_inst_rdy <= 1'b0;
-            pbs_lut_gid <= pbs_inst[GID_W+RID_W+RID_W-1:RID_W+RID_W];
-            pbs_src_addr <= pbs_inst[RID_W+RID_W-1:RID_W];
-            pbs_dst_addr <= pbs_inst[RID_W-1:0];
-            pbs_state <= PBS_READ_LWE;
-            pbs_cycle_counter <= 8'd5; // Simulated read latency
+            // Decode PBS instruction and validate format
+            decoded_gid = pbs_inst[GID_W+RID_W+RID_W-1:RID_W+RID_W];
+            decoded_src_rid = pbs_inst[RID_W+RID_W-1:RID_W];
+            decoded_dst_rid = pbs_inst[RID_W-1:0];
             
-            $display("[ENHANCED_PBS t=%0t] Starting PBS: gid=0x%x, src=0x%x, dst=0x%x", 
-                     $time, pbs_inst[GID_W+RID_W+RID_W-1:RID_W+RID_W], 
-                     pbs_inst[RID_W+RID_W-1:RID_W], pbs_inst[RID_W-1:0]);
+            // Determine LUT type from GID
+            is_map_to_bit31 = (decoded_gid == (bit_extract_lut_base_addr[GID_W-1:0] + 0));
+            is_map_to_bit27 = (decoded_gid == (bit_extract_lut_base_addr[GID_W-1:0] + 1));
+            
+            pbs_inst_rdy <= 1'b0;
+            pbs_validator_state <= PBS_DECODE_INST;
+            pbs_operation_cycles <= 8'd3;
+            
+            $display("[PBS_VALIDATOR t=%0t] Accepted PBS: gid=%0d, src=%0d, dst=%0d, bit31=%b, bit27=%b", 
+                     $time, decoded_gid, decoded_src_rid, decoded_dst_rid, is_map_to_bit31, is_map_to_bit27);
           end
         end
         
-        PBS_READ_LWE: begin
-          if (pbs_cycle_counter > 0) begin
-            pbs_cycle_counter <= pbs_cycle_counter - 1;
+        PBS_DECODE_INST: begin
+          if (pbs_operation_cycles > 0) begin
+            pbs_operation_cycles <= pbs_operation_cycles - 1;
           end else begin
-            // Read source LWE data
+            pbs_validator_state <= PBS_READ_SRC;
+            pbs_operation_cycles <= 8'd5;
+          end
+        end
+        
+        PBS_READ_SRC: begin
+          if (pbs_operation_cycles > 0) begin
+            pbs_operation_cycles <= pbs_operation_cycles - 1;
+          end else begin
+            // Read source data from RegFile memory model
             for (int i = 0; i <= N_LVL1; i++) begin
-              pbs_src_data[i] = regfile_memory[pbs_src_addr + i];
+              pbs_src_data[i] = regfile_memory[decoded_src_rid + i];
             end
-            pbs_state <= PBS_PROCESSING;
-            pbs_cycle_counter <= 8'd45; // Realistic PBS processing time
+            pbs_validator_state <= PBS_EXECUTE;
+            pbs_operation_cycles <= 8'd40; // Realistic PBS processing time
           end
         end
         
-        PBS_PROCESSING: begin
-          if (pbs_cycle_counter > 0) begin
-            pbs_cycle_counter <= pbs_cycle_counter - 1;
+        PBS_EXECUTE: begin
+          if (pbs_operation_cycles > 0) begin
+            pbs_operation_cycles <= pbs_operation_cycles - 1;
           end else begin
-            // Perform PBS operation based on GID 
-            if (pbs_lut_gid == 0) begin
-              simulate_pbs_extract_bit31(pbs_src_data, pbs_dst_data);
+            // Execute PBS operation based on LUT type
+            if (is_map_to_bit31) begin
+              // map_to_bit31 PBS: extract bit 31 from torus position
+              for (int i = 0; i < N_LVL1; i++) begin
+                pbs_result_data[i] = (pbs_src_data[i][31]) ? 32'h80000000 : 32'h00000000;
+              end
+              pbs_result_data[N_LVL1] = ~(32'h1 << 30) + 1; // LUT base value -(1<<30)
+            end else if (is_map_to_bit27) begin
+              // map_to_bit27 PBS: extract bit 27 from torus position  
+              for (int i = 0; i < N_LVL1; i++) begin
+                pbs_result_data[i] = (pbs_src_data[i][31]) ? 32'h08000000 : 32'h00000000;
+              end
+              pbs_result_data[N_LVL1] = ~(32'h1 << 26) + 1; // LUT base value -(1<<26)
             end else begin
-              simulate_pbs_extract_bit27(pbs_src_data, pbs_dst_data);
+              $error("[PBS_VALIDATOR] Unknown LUT type for GID %0d", decoded_gid);
+              for (int i = 0; i <= N_LVL1; i++) begin
+                pbs_result_data[i] = 32'hDEADBEEF; // Error pattern
+              end
             end
-            pbs_state <= PBS_WRITE_RESULT;
-            pbs_cycle_counter <= 8'd3; // Write latency
+            pbs_validator_state <= PBS_WRITE_DST;
+            pbs_operation_cycles <= 8'd5;
           end
         end
         
-        PBS_WRITE_RESULT: begin
-          if (pbs_cycle_counter > 0) begin
-            pbs_cycle_counter <= pbs_cycle_counter - 1;
+        PBS_WRITE_DST: begin
+          if (pbs_operation_cycles > 0) begin
+            pbs_operation_cycles <= pbs_operation_cycles - 1;
           end else begin
-            // Write result to destination
+            // Write result to destination in RegFile memory model
             for (int i = 0; i <= N_LVL1; i++) begin
-              regfile_memory[pbs_dst_addr + i] = pbs_dst_data[i];
+              regfile_memory[decoded_dst_rid + i] = pbs_result_data[i];
             end
-            pbs_state <= PBS_COMPLETE;
+            pbs_validator_state <= PBS_COMPLETE;
           end
         end
         
         PBS_COMPLETE: begin
           pbs_inst_ack <= 1'b1;
           pbs_inst_rdy <= 1'b1;
-          pbs_state <= PBS_IDLE;
-          $display("[ENHANCED_PBS t=%0t] Completed PBS: wrote result to addr=0x%x", 
-                   $time, pbs_dst_addr);
+          pbs_validator_state <= PBS_IDLE;
+          $display("[PBS_VALIDATOR t=%0t] Completed PBS: wrote to addr=%0d", $time, decoded_dst_rid);
         end
       endcase
     end
@@ -489,25 +551,43 @@ module tb_wop_bit_extract_engine;
   
   // Step 2: TLwe32_Keyswitch_Bootstrapping_Extract_lvl1(&outs[0], map_to_bit31, tmp, 2, ctx)
   //         outs[0].b[0] += 1 << 30
-  // Simulate PBS operation 1: extract bit 31 from shifted input using map_to_bit31 LUT
-  simulate_pbs_extract_bit31(golden_tmp_sample, expected_output_0);
-  expected_output_0[N_LVL1] = expected_output_0[N_LVL1] + (32'h1 << 30);  // Add offset
+  // ORIGINAL VERSION (preserved for reference):
+  // simulate_pbs_extract_bit31(golden_tmp_sample, expected_output_0);
+  // expected_output_0[N_LVL1] = expected_output_0[N_LVL1] + (32'h1 << 30);  // Add offset
+  
+  // Current simplified version for PBS Interface Validator comparison:
+  for (int i = 0; i < N_LVL1; i++) begin
+    expected_output_0[i] = (golden_tmp_sample[i][31]) ? 32'h80000000 : 32'h00000000;
+  end
+  expected_output_0[N_LVL1] = (~(32'h1 << 30) + 1) + (32'h1 << 30);  // LUT base + offset
   
   // Step 3: TLwe32_Keyswitch_Bootstrapping_Extract_lvl1(small, map_to_bit27, tmp, 2, ctx)
   //         small[0].b[0] += 1 << 26
-  // Simulate PBS operation 2: extract bit 27 from shifted input using map_to_bit27 LUT
-  simulate_pbs_extract_bit27(golden_tmp_sample, golden_small_sample);
-  golden_small_sample[N_LVL1] = golden_small_sample[N_LVL1] + (32'h1 << 26);  // Add offset
+  // ORIGINAL VERSION (preserved for reference):
+  // simulate_pbs_extract_bit27(golden_tmp_sample, golden_small_sample);
+  // golden_small_sample[N_LVL1] = golden_small_sample[N_LVL1] + (32'h1 << 26);  // Add offset
+  
+  // Current simplified version for PBS Interface Validator comparison:
+  for (int i = 0; i < N_LVL1; i++) begin
+    golden_small_sample[i] = (golden_tmp_sample[i][31]) ? 32'h08000000 : 32'h00000000;
+  end
+  golden_small_sample[N_LVL1] = (~(32'h1 << 26) + 1) + (32'h1 << 26);  // LUT base + offset
   
   // Step 4: tmp = (in - small) << 3 (remove bit 27, move bit 28 to bit 31)
   for (int i = 0; i <= N_LVL1; i++) begin
     golden_tmp_sample[i] = (input_lwe_sample[i] - golden_small_sample[i]) << 3;
   end
   
-  // Step 5: TLwe32_Keyswitch_Bootstrapping_Extract_lvl1(&outs[1], map_to_bit31, tmp, 2, ctx)
-  //         outs[1].b[0] += 1 << 30
-  // Simulate PBS operation 3: extract bit 31 from difference using map_to_bit31 LUT
-  simulate_pbs_extract_bit31(golden_tmp_sample, expected_output_1);
+    // Step 5: TLwe32_Keyswitch_Bootstrapping_Extract_lvl1(&outs[1], map_to_bit31, tmp, 2, ctx)
+  //         outs[1].b[0] += 1 << 30  
+  // ORIGINAL VERSION (preserved for reference):
+  // simulate_pbs_extract_bit31(golden_tmp_sample, expected_output_1);
+  // expected_output_1[N_LVL1] = expected_output_1[N_LVL1] + (32'h1 << 30);  // Add offset
+  
+  // Current simplified version for PBS Interface Validator comparison:
+  for (int i = 0; i < N_LVL1; i++) begin
+    expected_output_1[i] = (golden_tmp_sample[i][31]) ? 32'h80000000 : 32'h00000000;
+  end
   expected_output_1[N_LVL1] = expected_output_1[N_LVL1] + (32'h1 << 30);  // Add offset
     
     $display("Generated test vectors using PBS-based bit extraction golden reference");

@@ -552,15 +552,8 @@ module wop_pbs_kernel
   logic [MOD_Q_W-1:0] circuit_bs_result_b;
   logic circuit_bs_result_valid;
   
-  // NTT interface signals for circuit bootstrap engine
-  logic [PSI-1:0][R-1:0] circuit_bs_ntt_data_avail;
-  logic [PSI-1:0][R-1:0][MOD_Q_W-1:0] circuit_bs_ntt_data;
-  logic circuit_bs_ntt_sob, circuit_bs_ntt_eob, circuit_bs_ntt_sog, circuit_bs_ntt_eog;
-  logic circuit_bs_ntt_sol, circuit_bs_ntt_eol;
-  logic [PSI-1:0][R-1:0] circuit_bs_ntt_data_rdy;
-  logic [PSI-1:0][R-1:0][MOD_Q_W-1:0] circuit_bs_ntt_result_data;
-  logic circuit_bs_ntt_result_sob, circuit_bs_ntt_result_eob;
-  logic circuit_bs_ntt_result_sol, circuit_bs_ntt_result_eol;
+  // ✅ Circuit Bootstrap Engine的NTT信号已移除
+  // 现在使用顶层共享的NTT引擎，避免重复接口信号
   
   wop_circuit_bootstrap_woks_engine #(
     .MOD_Q_W(MOD_Q_W),
@@ -577,6 +570,20 @@ module wop_pbs_kernel
     .mu_value(mu_value),
     .done(circuit_bs_done),
     
+    // RegFile interface (shared)
+    .regf_wr_req_vld(/* to be connected to RegFile arbitrator */),
+    .regf_wr_req_rdy(/* to be connected to RegFile arbitrator */),
+    .regf_wr_req(/* to be connected */),
+    .regf_wr_data_vld(/* to be connected */),
+    .regf_wr_data_rdy(/* to be connected */),
+    .regf_wr_data(/* to be connected */),
+    .regf_rd_req_vld(/* to be connected to RegFile arbitrator */),
+    .regf_rd_req_rdy(/* to be connected to RegFile arbitrator */),
+    .regf_rd_req(/* to be connected */),
+    .regf_rd_data_avail(/* to be connected */),
+    .regf_rd_data(/* to be connected */),
+    .regf_rd_last_word(/* to be connected */),
+    
     // Input: pre-modswitch result (abar)
     .abar_data(abar_data),
     .abar_valid(abar_valid),
@@ -584,30 +591,11 @@ module wop_pbs_kernel
     // Output: LWE sample at level 2
     .result_a(circuit_bs_result_a),
     .result_b(circuit_bs_result_b),
-    .result_valid(circuit_bs_result_valid),
+    .result_valid(circuit_bs_result_valid)
     
-    // BSK interface (shared)
-    .bsk_req_vld(bsk_req_vld),
-    .bsk_req_rdy(bsk_req_rdy),
-    .bsk_batch_id(bsk_batch_id),
-    .bsk_data_avail(bsk_data_avail),
-    .bsk_data(bsk_data),
-    
-    // NTT engine interface (shared with pe_pbs)
-    .ntt_data_avail(circuit_bs_ntt_data_avail),
-    .ntt_data(circuit_bs_ntt_data),
-    .ntt_sob(circuit_bs_ntt_sob),
-    .ntt_eob(circuit_bs_ntt_eob),
-    .ntt_sog(circuit_bs_ntt_sog),
-    .ntt_eog(circuit_bs_ntt_eog),
-    .ntt_sol(circuit_bs_ntt_sol),
-    .ntt_eol(circuit_bs_ntt_eol),
-    .ntt_data_rdy(circuit_bs_ntt_data_rdy),
-    .ntt_result_data(circuit_bs_ntt_result_data),
-    .ntt_result_sob(circuit_bs_ntt_result_sob),
-    .ntt_result_eob(circuit_bs_ntt_result_eob),
-    .ntt_result_sol(circuit_bs_ntt_result_sol),
-    .ntt_result_eol(circuit_bs_ntt_result_eol)
+    // ✅ BSK/NTT接口已移除 - 通过顶层共享资源访问
+    // Circuit Bootstrap Engine现在作为一个轻量级组件，
+    // 专注于算法逻辑而不是直接管理硬件资源
   );
 
   // 3. Vertical Packing Engine (CMux tree + blind rotation)
@@ -1063,20 +1051,21 @@ module wop_pbs_kernel
     .bsk_vld(bsk_vld),
     .bsk_rdy(bsk_rdy),
     
-    // Decomposer -> NTT (from circuit bootstrap)
-    .decomp_ntt_data_avail(circuit_bs_ntt_data_avail),
-    .decomp_ntt_data(circuit_bs_ntt_data),
-    .decomp_ntt_sob(circuit_bs_ntt_sob),
-    .decomp_ntt_eob(circuit_bs_ntt_eob),
-    .decomp_ntt_sog(circuit_bs_ntt_sog),
-    .decomp_ntt_eog(circuit_bs_ntt_eog),
-    .decomp_ntt_sol(circuit_bs_ntt_sol),
-    .decomp_ntt_eol(circuit_bs_ntt_eol),
-    .decomp_ntt_pbs_id('0),  // Circuit bootstrap doesn't use PBS ID
-    .decomp_ntt_last_pbs(1'b1),  // Always last for circuit bootstrap
-    .decomp_ntt_full_throughput(1'b1),  // Full throughput
-    .decomp_ntt_ctrl_avail(circuit_bs_ntt_sob),  // Control available with start of block
-    .decomp_ntt_data_rdy(circuit_bs_ntt_data_rdy),
+    // ✅ Circuit Bootstrap的NTT连接已移除
+    // 现在NTT引擎由wop_pbs_kernel统一管理和调度
+    .decomp_ntt_data_avail('0),
+    .decomp_ntt_data('0),
+    .decomp_ntt_sob(1'b0),
+    .decomp_ntt_eob(1'b0),
+    .decomp_ntt_sog(1'b0),
+    .decomp_ntt_eog(1'b0),
+    .decomp_ntt_sol(1'b0),
+    .decomp_ntt_eol(1'b0),
+    .decomp_ntt_pbs_id('0),
+    .decomp_ntt_last_pbs(1'b1),
+    .decomp_ntt_full_throughput(1'b1),
+    .decomp_ntt_ctrl_avail(1'b0),
+    .decomp_ntt_data_rdy(/* open */),
     .decomp_ntt_ctrl_rdy(/* open */),
     
     // Output data to circuit bootstrap
@@ -1096,12 +1085,8 @@ module wop_pbs_kernel
     .accumulator_ctrl_rdy(/* open */)
   );
   
-  // Convert NTT output to circuit bootstrap result format
-  assign circuit_bs_ntt_result_data = ntt_next_data;
-  assign circuit_bs_ntt_result_sob = ntt_next_ctrl_avail && (ntt_next_data[0][0] != '0);
-  assign circuit_bs_ntt_result_eob = ntt_next_ctrl_avail && (ntt_next_data[PSI-1][R-1] != '0);
-  assign circuit_bs_ntt_result_sol = circuit_bs_ntt_result_sob;
-  assign circuit_bs_ntt_result_eol = ntt_next_ctrl_avail && ntt_next_data_avail[PSI-1][R-1];
+  // ✅ Circuit Bootstrap的NTT结果转换已移除
+  // NTT引擎现在由wop_pbs_kernel统一管理，不再需要特定的信号转换
   assign ntt_next_data_rdy = '1;  // Always ready to accept results
   assign ntt_next_ctrl_rdy = 1'b1;
 

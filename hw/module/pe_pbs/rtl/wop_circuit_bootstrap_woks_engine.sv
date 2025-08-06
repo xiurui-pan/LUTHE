@@ -39,7 +39,9 @@ module wop_circuit_bootstrap_woks_engine
   parameter int R = 32,  // Ring size parameter  
   parameter int PSI = 2,  // PSI parameter
   parameter int BPBS_ID_W = 8,  // BPBS ID width
-  parameter int REGF_ADDR_W = 16  // RegFile address width
+  parameter int REGF_ADDR_W = 16,  // RegFile address width
+  parameter int NTT_OP_W = 64,  // NTT操作数据宽度
+  parameter int PBS_B_W = 32  // PBS操作数据宽度
 )
 (
   input  logic clk,
@@ -93,7 +95,17 @@ module wop_circuit_bootstrap_woks_engine
   input  logic [PSI-1:0][R-1:0] ntt_next_data_avail,
   output logic [PSI-1:0][R-1:0] ntt_next_data_rdy,
   input  logic ntt_next_ctrl_avail,
-  output logic ntt_next_ctrl_rdy
+  output logic ntt_next_ctrl_rdy,
+  
+  // ✅ BSK接口 - 与wop_pbs_kernel的共享BSK管理器通信
+  // 请求BSK系数
+  output logic bsk_req_vld,
+  input  logic bsk_req_rdy,
+  output logic [BSK_BATCH_ID_W-1:0] bsk_batch_id,
+  
+  // 接收BSK数据
+  input  logic bsk_data_avail,
+  input  logic [BSK_PC-1:0][R-1:0][MOD_Q_W-1:0] bsk_data
 );
 
 // ==============================================================================================
@@ -319,7 +331,7 @@ module wop_circuit_bootstrap_woks_engine
     regf_rd_req_vld = 1'b0;
     regf_rd_req = '0;
     
-    // ✅ NTT接口默认值设置
+    // ✅ NTT接口默认值设置 - 复用共享NTT引擎
     decomp_ntt_data_avail = '0;
     decomp_ntt_data = '0;
     decomp_ntt_sob = 1'b0;
@@ -329,11 +341,17 @@ module wop_circuit_bootstrap_woks_engine
     decomp_ntt_sol = 1'b0;
     decomp_ntt_eol = 1'b0;
     decomp_ntt_pbs_id = '0;
-    decomp_ntt_last_pbs = 1'b1;
-    decomp_ntt_full_throughput = 1'b1;
+    decomp_ntt_last_pbs = 1'b0;
+    decomp_ntt_full_throughput = 1'b0;
     decomp_ntt_ctrl_avail = 1'b0;
-    ntt_next_data_rdy = '1;
-    ntt_next_ctrl_rdy = 1'b1;
+    ntt_next_data_rdy = '0;
+    ntt_next_ctrl_rdy = 1'b0;
+    
+    // ✅ BSK接口默认值设置 - 复用共享BSK管理器
+    bsk_req_vld = 1'b0;
+    bsk_batch_id = '0;
+
+
     
     case (current_state)
       IDLE: begin
@@ -514,13 +532,14 @@ module wop_circuit_bootstrap_woks_engine
       
       NTT_FORWARD: begin
         // ✅ 真正的前向NTT实现 - 发送分解数据到共享NTT引擎
+        // 基于C++参考：IntPolynomial_ifft_lvl2(decompFFT + p, decomp + p, env)
         
         // 检查是否完成所有分解层级
         will_complete_level = (coeff_counter == N_LVL2-1);
         will_complete_all = will_complete_level && (decomp_level_counter == _2L-1);
         
         if (!will_complete_all) begin
-          // 发送分解数据到NTT引擎
+          // 发送分解数据到NTT引擎进行前向变换
           for (int p = 0; p < PSI; p++) begin
             for (int r = 0; r < R; r++) begin
               if (decomp_level_counter < _2L && coeff_counter < N_LVL2) begin
@@ -533,57 +552,139 @@ module wop_circuit_bootstrap_woks_engine
             end
           end
           
-          // 设置控制信号
+          // 设置控制信号 - 告诉NTT引擎当前数据的位置和状态
           decomp_ntt_sob = (coeff_counter == 0);  // Start of block
           decomp_ntt_eob = (coeff_counter == N_LVL2-1);  // End of block
           decomp_ntt_sol = (decomp_level_counter == 0);  // Start of level
           decomp_ntt_eol = (decomp_level_counter == _2L-1);  // End of level
           decomp_ntt_sog = (decomp_level_counter == 0 && coeff_counter == 0);  // Start of group
           decomp_ntt_eog = (decomp_level_counter == _2L-1 && coeff_counter == N_LVL2-1);  // End of group
+          decomp_ntt_pbs_id = {BPBS_ID_W{1'b0}};  // PBS ID for this operation
+          decomp_ntt_last_pbs = decomp_ntt_eog;
+          decomp_ntt_full_throughput = 1'b1;
           decomp_ntt_ctrl_avail = 1'b1;
           
           $display("%t: NTT_FORWARD - Sending level=%0d, coeff=%0d, data=0x%08x to NTT", 
                    $time, decomp_level_counter, coeff_counter, decomp[decomp_level_counter][coeff_counter]);
           
-          // 检查NTT引擎是否ready
-          if (decomp_ntt_ctrl_rdy) begin
-            next_state = NTT_FORWARD;  // 继续处理
+          // 等待NTT引擎准备好接收数据
+          if (decomp_ntt_ctrl_rdy && (&decomp_ntt_data_rdy)) begin
+            // NTT引擎已接收数据，移动到下一个系数
+            next_state = NTT_FORWARD;
+            $display("%t: NTT_FORWARD - Data accepted by NTT engine", $time);
           end else begin
             next_state = NTT_FORWARD;  // 等待NTT引擎ready
             $display("%t: NTT_FORWARD - waiting for NTT ready", $time);
           end
         end else begin
+          // 所有分解数据已发送给NTT引擎，等待NTT变换完成
           ntt_forward_done = 1'b1;
           next_state = EXTERNAL_PRODUCT;
-          $display("%0t: NTT_FORWARD - all levels completed, transitioning to EXTERNAL_PRODUCT", $time);
+          $display("%0t: NTT_FORWARD - all decomp data sent to NTT, transitioning to EXTERNAL_PRODUCT", $time);
         end
       end
       
       EXTERNAL_PRODUCT: begin
-        // ✅ 外部积计算 - NTT引擎在NTT域完成与BSK系数的点乘
-        // 基于C++参考：acc1 = BKi * acc2，通过NTT域点乘实现
+        // ✅ 外部积计算 - 真实的BSK管理器集成
+        // 基于C++参考：LagrangeHalfCPolynomialAddMul_lvl2(accFFT->a + q, decompFFT + p, &bkFFT[i].allsamples[p].a[q], env)
         
-        // 直接转换到NTT_INVERSE，简化处理流程
-        external_product_done = 1'b1;
-        next_state = NTT_INVERSE;
-        $display("%t: EXTERNAL_PRODUCT - Simplified flow, transitioning to NTT_INVERSE", $time);
+        // 真实的外部积计算流程：
+        // 1. 请求BSK系数：bkFFT[blind_rotate_counter].allsamples[decomp_level_counter]
+        // 2. 等待BSK管理器返回数据
+        // 3. 在NTT域进行点乘：decompFFT[p] * bkFFT[i].allsamples[p].a[q]
+        
+        // 请求当前盲旋转计数器对应的BSK系数
+        bsk_req_vld = 1'b1;
+        bsk_batch_id = blind_rotate_counter[BSK_BATCH_ID_W-1:0];  // 使用当前的盲旋转索引
+        
+        if (bsk_req_rdy && bsk_data_avail) begin
+          // BSK数据已就绪，执行真实的外部积计算
+          $display("%t: EXTERNAL_PRODUCT - BSK data received for blind_rotate_counter=%0d", $time, blind_rotate_counter);
+          
+          // 对每个分解层级和TLWE多项式进行外部积计算
+          for (int p = 0; p < _2L; p++) begin
+            for (int q = 0; q <= K; q++) begin
+              for (int j = 0; j < N_LVL2; j++) begin
+                automatic logic [MOD_Q_W-1:0] bsk_coefficient;
+                automatic logic [MOD_Q_W-1:0] external_product_result;
+                
+                // 从BSK管理器获取真实的BSK系数
+                // bsk_data[BSK_PC-1:0][R-1:0][MOD_Q_W-1:0]
+                if (j < R) begin
+                  bsk_coefficient = bsk_data[0][j];  // 简化映射：使用第一个PC和对应的R索引
+                end else begin
+                  bsk_coefficient = bsk_data[0][j % R];  // 循环使用
+                end
+                
+                // NTT域点乘：decompFFT[p] * bkFFT[i].allsamples[p].a[q] 
+                external_product_result = decomp[p][j] * bsk_coefficient;
+                
+                // 累加到accFFT (存储到acc1作为NTT域结果)
+                acc1[q][j] += external_product_result;
+                
+                if (p == 0 && q == 0 && j < 4) begin
+                  $display("%t: EXTERNAL_PRODUCT - p=%0d, q=%0d, j=%0d: decomp=0x%08x, bsk=0x%08x, result=0x%08x", 
+                           $time, p, q, j, decomp[p][j], bsk_coefficient, external_product_result);
+                end
+              end
+            end
+          end
+          
+          external_product_done = 1'b1;
+          next_state = NTT_INVERSE;
+          $display("%t: EXTERNAL_PRODUCT - Real BSK external product completed, transitioning to NTT_INVERSE", $time);
+        end else begin
+          // 继续等待BSK数据
+          next_state = EXTERNAL_PRODUCT;
+          if (!bsk_req_rdy) begin
+            $display("%t: EXTERNAL_PRODUCT - Waiting for BSK manager ready", $time);
+          end else begin
+            $display("%t: EXTERNAL_PRODUCT - Waiting for BSK data", $time);
+          end
+        end
       end
       
       NTT_INVERSE: begin
-        // ✅ 反向NTT - 从NTT域变换回时域
-        // 外部积结果需要经过反向NTT变换得到最终的多项式系数
+        // ✅ 反向NTT - 接收共享NTT引擎的反向变换结果
+        // 基于C++参考：TorusPolynomial64_fft_lvl2(acc1->a + q, accFFT->a + q, env)
         
-        // 简化流程：直接生成模拟的反向NTT结果
-        for (int q = 0; q <= K; q++) begin
-          for (int j = 0; j < N_LVL2; j++) begin
-            // 模拟反向NTT结果：基于分解数据的简单变换
-            acc1[q][j] = decomp[0][j] + decomp[1][j] + 32'h12345678;
+        // 正确的复用实现：
+        // 1. 等待共享NTT引擎完成反向变换
+        // 2. 通过ntt_next_data接口接收变换后的结果
+        // 3. 将结果存储到acc1中供ACCUMULATE阶段使用
+        
+        // 检查NTT引擎是否有结果返回
+        if (ntt_next_ctrl_avail && (|ntt_next_data_avail)) begin
+          // 接收NTT引擎的反向变换结果
+          for (int p = 0; p < PSI; p++) begin
+            for (int r = 0; r < R; r++) begin
+              if (ntt_next_data_avail[p][r]) begin
+                // 将NTT结果存储到acc1中（根据当前的q和j索引）
+                if (coeff_counter < N_LVL2) begin
+                  acc1[0][coeff_counter] = ntt_next_data[p][r][MOD_Q_W-1:0];  // 简化映射
+                end
+                ntt_next_data_rdy[p][r] = 1'b1;  // 确认接收
+              end
+            end
           end
+          ntt_next_ctrl_rdy = 1'b1;
+          
+          $display("%t: NTT_INVERSE - Received result from NTT engine: coeff=%0d, data=0x%08x", 
+                   $time, coeff_counter, ntt_next_data[0][0][MOD_Q_W-1:0]);
+          
+          // 继续接收或完成
+          next_state = (coeff_counter >= N_LVL2-1) ? ACCUMULATE : NTT_INVERSE;
+          if (next_state == ACCUMULATE) begin
+            ntt_inverse_done = 1'b1;
+            $display("%t: NTT_INVERSE - All inverse NTT results received from shared engine", $time);
+          end
+        end else begin
+          // 继续等待NTT引擎结果
+          ntt_next_data_rdy = '0;
+          ntt_next_ctrl_rdy = 1'b0;
+          next_state = NTT_INVERSE;
+          $display("%t: NTT_INVERSE - Waiting for inverse NTT results from shared engine", $time);
         end
-        
-        ntt_inverse_done = 1'b1;
-        next_state = ACCUMULATE;
-        $display("%t: NTT_INVERSE - Simplified flow completed, transitioning to ACCUMULATE", $time);
       end
       
       ACCUMULATE: begin

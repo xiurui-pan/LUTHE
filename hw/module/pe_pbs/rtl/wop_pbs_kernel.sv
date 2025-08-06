@@ -560,6 +560,10 @@ module wop_pbs_kernel
   logic circuit_bs_regf_rd_req_vld;
   logic [REGF_RD_REQ_W-1:0] circuit_bs_regf_rd_req;
   
+  // ✅ Circuit Bootstrap Engine的BSK接口信号
+  logic circuit_bs_bsk_req_vld;
+  logic [BSK_BATCH_ID_W-1:0] circuit_bs_bsk_batch_id;
+  
   // ✅ Circuit Bootstrap Engine现在完全集成NTT接口
   // 通过共享的NTT引擎进行前向/反向NTT和外部积计算
   
@@ -568,7 +572,15 @@ module wop_pbs_kernel
     .N_LVL0(N_LVL0),
     .N_LVL2(N_LVL2),
     .ELL_LVL2(ELL_LVL2),
-    .K(1)
+    .K(1),
+    .BSK_BATCH_ID_W(BSK_BATCH_ID_W),
+    .BSK_PC(BSK_PC),
+    .R(R),
+    .PSI(PSI),
+    .BPBS_ID_W(BPBS_ID_W),
+    .REGF_ADDR_W(REGF_ADDR_W),
+    .NTT_OP_W(NTT_OP_W),
+    .PBS_B_W(PBS_B_W)
   ) i_circuit_bs_woks_engine (
     .clk(clk),
     .s_rst_n(s_rst_n),
@@ -622,7 +634,14 @@ module wop_pbs_kernel
     .ntt_next_data_avail(ntt_next_data_avail),
     .ntt_next_data_rdy(ntt_next_data_rdy),
     .ntt_next_ctrl_avail(ntt_next_ctrl_avail),
-    .ntt_next_ctrl_rdy(ntt_next_ctrl_rdy)
+    .ntt_next_ctrl_rdy(ntt_next_ctrl_rdy),
+    
+    // ✅ BSK接口 - 连接到共享BSK管理器
+    .bsk_req_vld(circuit_bs_bsk_req_vld),
+    .bsk_req_rdy(bsk_req_rdy),  // 共享BSK ready信号
+    .bsk_batch_id(circuit_bs_bsk_batch_id),
+    .bsk_data_avail(bsk_data_avail),  // 共享BSK数据信号
+    .bsk_data(bsk_data)  // 共享BSK数据
   );
 
   // 3. Vertical Packing Engine (CMux tree + blind rotation)
@@ -1167,6 +1186,35 @@ module wop_pbs_kernel
     
     // Fill remaining error bits
     error[PEP_ERROR_W-1:3] = '0;
+  end
+  
+  // ==============================================================================================
+  // BSK Interface Arbitration
+  // ==============================================================================================
+  
+  // BSK接口仲裁逻辑 - 在不同引擎间共享BSK管理器
+  always_comb begin
+    // 默认值：no request
+    bsk_req_vld = 1'b0;
+    bsk_batch_id = '0;
+    
+    // 根据当前状态仲裁BSK请求
+    case (current_state)
+      WOP_PBS_STATE_STAGE2: begin
+        // Stage 2 - Circuit Bootstrap Engine has priority
+        bsk_req_vld = circuit_bs_bsk_req_vld;
+        bsk_batch_id = circuit_bs_bsk_batch_id;
+      end
+      WOP_PBS_STATE_STAGE3: begin
+        // Stage 3 - Vertical Packing Engine (placeholder for future)
+        bsk_req_vld = 1'b0;  // TODO: add vertical packing BSK requests
+        bsk_batch_id = '0;
+      end
+      default: begin
+        bsk_req_vld = 1'b0;
+        bsk_batch_id = '0;
+      end
+    endcase
   end
   
   // Performance monitoring

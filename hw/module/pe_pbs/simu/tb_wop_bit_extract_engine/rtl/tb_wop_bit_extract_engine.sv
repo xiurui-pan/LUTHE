@@ -269,6 +269,7 @@ module tb_wop_bit_extract_engine;
 // RegFile Model
 // ==============================================================================================
   // RegFile model with proper multi-coefficient support
+  // TODO: This is still a temporary model, need to be replaced with real RegFile model
   int read_counter = 0;
   logic reading_in_progress = 1'b0;
   logic [REGF_ADDR_W-1:0] current_read_addr;

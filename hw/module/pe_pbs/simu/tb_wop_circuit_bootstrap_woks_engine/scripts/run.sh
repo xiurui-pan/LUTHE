@@ -12,7 +12,7 @@ cli="$*"
 
 # aliases are not expanded when the shell is not interactive.
 # Redefine here for more clarity
-run_edalize=${PROJECT_DIR}/hw/scripts/edalize/run_edalize.py
+run_edalize="${PROJECT_DIR}/hw/scripts/edalize/run_edalize.py"
 
 module="tb_wop_circuit_bootstrap_woks_engine"
 
@@ -194,6 +194,7 @@ eda_args="$eda_args \
 ###################################################################################################
 # Run_edalize configure
 ###################################################################################################
+mkdir -p "${PROJECT_DIR}/hw/output"
 TMP_FILE="${PROJECT_DIR}/hw/output/${RANDOM}${RANDOM}._info"
 echo -n "" > $TMP_FILE
 

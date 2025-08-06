@@ -86,11 +86,11 @@ module wop_bit_extract_engine
   localparam logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] MAP_TO_BIT31_OFFSET = 0;
   localparam logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] MAP_TO_BIT27_OFFSET = 1; // Simplified offset within GID range
   
-  // Temporary RegFile addresses for intermediate results (use RID_W-compatible range)
-  localparam logic [REGF_ADDR_W-1:0] TEMP_ADDR_BASE = 16'h0040; // Low address space compatible with RID_W=7
-  localparam logic [REGF_ADDR_W-1:0] TEMP_SHIFTED_ADDR   = TEMP_ADDR_BASE + 0;   // tmp = in << 4
-  localparam logic [REGF_ADDR_W-1:0] TEMP_SMALL_ADDR     = TEMP_ADDR_BASE + 10;  // small from bit27 extraction
-  localparam logic [REGF_ADDR_W-1:0] TEMP_DIFF_ADDR      = TEMP_ADDR_BASE + 20;  // (in - small) << 3
+  // FINAL FIX: Address allocation with non-overlapping ranges and RID_W=7 truncation
+  // Ensure no overlap in both full addresses and RID_W truncated addresses
+  localparam logic [REGF_ADDR_W-1:0] TEMP_SHIFTED_ADDR   = 16'h0040; // tmp = in << 4 (0x0040 & 0x7F = 0x40)
+  localparam logic [REGF_ADDR_W-1:0] TEMP_SMALL_ADDR     = 16'h0080; // small from bit27 extraction (0x0080 & 0x7F = 0x00)  
+  localparam logic [REGF_ADDR_W-1:0] TEMP_DIFF_ADDR      = 16'h0120; // (in - small) << 3 (0x0120 & 0x7F = 0x20)
   
   // Offset values from C++ code
   localparam logic [MOD_Q_W-1:0] OFFSET_30 = 32'h40000000; // 1 << 30
@@ -122,10 +122,14 @@ module wop_bit_extract_engine
   // Counters and control
   logic [$clog2(N_LVL1+2)-1:0] coeff_counter, next_coeff_counter;
   logic [$clog2(N_LVL1+2)-1:0] write_coeff_counter;
+// Dedicated counter for shifted-data write loop
+logic [$clog2(N_LVL1+2)-1:0] shift_wr_cnt, next_shift_wr_cnt;
   
   // Operation completion flags
   logic input_read_complete;
-  logic shift_write_complete;
+  logic shift_write_complete, next_shift_write_complete;
+// Debug signal for previous shift_write_complete state
+logic prev_shift_write_complete;
   logic pbs1_complete;
   logic offset1_complete; 
   logic pbs2_complete;
@@ -182,10 +186,12 @@ module wop_bit_extract_engine
       current_state <= IDLE;
       coeff_counter <= '0;
       write_coeff_counter <= '0;
+      shift_wr_cnt      <= '0;
       
       // Initialize completion flags
       input_read_complete <= 1'b0;
       shift_write_complete <= 1'b0;
+      prev_shift_write_complete <= 1'b0;
       pbs1_complete <= 1'b0;
       offset1_complete <= 1'b0;
       pbs2_complete <= 1'b0;
@@ -212,6 +218,14 @@ module wop_bit_extract_engine
     end else begin
       current_state <= next_state;
       coeff_counter <= next_coeff_counter;
+      shift_wr_cnt <= next_shift_wr_cnt;
+      shift_write_complete <= next_shift_write_complete;
+      prev_shift_write_complete <= shift_write_complete;
+      
+      // Clear writing_shifted_data when write is complete
+      if (next_shift_write_complete && !shift_write_complete) begin
+        writing_shifted_data <= 1'b0;
+      end
       
       // Track PBS completion based on ack signals
       if (pbs_inst_ack) begin
@@ -262,6 +276,7 @@ module wop_bit_extract_engine
           offset3_complete <= 1'b0;
           
           // Reset RegFile operation flags
+          shift_wr_cnt        <= '0;
           writing_shifted_data <= 1'b0;
           reading_small_data <= 1'b0;
           offset_operation_active <= 1'b0;
@@ -361,7 +376,10 @@ module wop_bit_extract_engine
           // Read small data, compute difference, and write to temp storage
           if (!reading_small_data) begin
             reading_small_data <= 1'b1;
-          end else if (regf_rd_data_avail[0]) begin
+          end
+          
+          // Handle reading small data (separate from writing)
+          if (reading_small_data && regf_rd_data_avail[0]) begin
             // Store incoming small sample data
             small_sample[coeff_counter] <= regf_rd_data[0];
             
@@ -373,14 +391,22 @@ module wop_bit_extract_engine
               reading_small_data <= 1'b0;
               write_coeff_counter <= '0;  // Reset write counter for diff data write phase
               diff_write_active <= 1'b1;  // Start writing diff data
+              $display("[COMPUTE_DIFF %0t] Starting diff write phase, computed %0d coefficients", $time, N_LVL1+1);
             end
-          end else if (diff_write_active && regf_wr_data_rdy[0]) begin
+          end
+          
+          // Handle writing diff data (separate from reading)
+          if (diff_write_active && regf_wr_data_rdy[0]) begin
             // Write diff data to RegFile sequentially
             write_coeff_counter <= write_coeff_counter + 1;
+            $display("[COMPUTE_DIFF %0t] Writing diff_data[%0d]=0x%08x to addr=0x%04x", 
+                     $time, write_coeff_counter, diff_data[write_coeff_counter], 
+                     TEMP_DIFF_ADDR + write_coeff_counter);
             if (write_coeff_counter >= N_LVL1) begin
               // Finished writing all difference data
               diff_compute_complete <= 1'b1;
               diff_write_active <= 1'b0;
+              $display("[COMPUTE_DIFF %0t] *** DIFF WRITE COMPLETE at cnt=%0d", $time, write_coeff_counter);
             end
           end
         end
@@ -423,6 +449,8 @@ module wop_bit_extract_engine
   always_comb begin
     next_state = current_state;
     next_coeff_counter = coeff_counter;
+    next_shift_wr_cnt = shift_wr_cnt;
+    next_shift_write_complete = shift_write_complete;
     done = 1'b0;
     
     // PBS interface defaults
@@ -461,19 +489,44 @@ module wop_bit_extract_engine
       end
       
       WRITE_SHIFTED: begin
-        // Write shifted data to RegFile
-        if (writing_shifted_data) begin
-          regf_wr_req_vld = 1'b1;
+        // Compute and write shifted data: tmp = input << 4
+        if (!writing_shifted_data) begin
+          // One-shot computation of all shifted coefficients
+          for (int i = 0; i <= N_LVL1; i++) begin
+            shifted_data[i] <= input_lwe_sample[i] << 4;
+          end
+          writing_shifted_data <= 1'b1;
+          next_shift_wr_cnt  = '0;            // reset local write counter
+          next_shift_write_complete = 1'b0;   // ensure completion flag is reset
+        end else begin
+          // Stream out one coefficient per cycle to the RegFile
+          regf_wr_req_vld   = 1'b1;
           regf_wr_data_vld[0] = 1'b1;
-          regf_wr_req = {TEMP_SHIFTED_ADDR + {{(REGF_ADDR_W-$clog2(N_LVL1+2)){1'b0}}, coeff_counter}, 16'h0000};
-          regf_wr_data[0] = shifted_data[coeff_counter];
-          
+          regf_wr_req       = {TEMP_SHIFTED_ADDR + {{(REGF_ADDR_W-$clog2(N_LVL1+2)){1'b0}}, shift_wr_cnt}, 16'h0000};
+          regf_wr_data[0]   = shifted_data[shift_wr_cnt];
+
           if (regf_wr_data_rdy[0]) begin
-            next_coeff_counter = coeff_counter + 1;
+            next_shift_wr_cnt = shift_wr_cnt + 1;
+            // Debug print for write operations
+            if (shift_wr_cnt < 40) begin  // Limit prints to prevent spam
+              $display("[WR_DBG %0t] shift_wr_cnt=%0d addr=0x%04x data=0x%08x vld=%b rdy=%b", 
+                       $time, shift_wr_cnt, 
+                       TEMP_SHIFTED_ADDR + shift_wr_cnt, 
+                       shifted_data[shift_wr_cnt],
+                       regf_wr_data_vld[0], regf_wr_data_rdy[0]);
+            end
+            if (shift_wr_cnt == N_LVL1) begin
+              next_shift_write_complete = 1'b1;
+              // writing_shifted_data will be cleared in sequential logic
+              $display("[WR_DBG %0t] *** WRITE COMPLETE at cnt=%0d (N_LVL1=%0d)", $time, shift_wr_cnt, N_LVL1);
+            end
+            // Safety assertion
+            assert (shift_wr_cnt <= N_LVL1) 
+              else $fatal("[FATAL] shift_wr_cnt overflow: %0d > N_LVL1=%0d", shift_wr_cnt, N_LVL1);
           end
         end
-        
-        if (shift_write_complete) begin
+
+        if (next_shift_write_complete) begin
           next_state = PBS1_EXTRACT_BIT31;
         end
       end
@@ -556,6 +609,12 @@ module wop_bit_extract_engine
       end
       
       COMPUTE_DIFF: begin
+        // Read small data from TEMP_SMALL_ADDR
+        if (reading_small_data) begin
+          regf_rd_req_vld = 1'b1;
+          regf_rd_req = {TEMP_SMALL_ADDR, 16'h0000}; // Read from small data address
+        end
+        
         // Write diff data to RegFile
         if (diff_write_active && (write_coeff_counter <= N_LVL1)) begin
           regf_wr_req_vld = 1'b1;

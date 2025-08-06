@@ -86,11 +86,12 @@ module wop_bit_extract_engine
   localparam logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] MAP_TO_BIT31_OFFSET = 0;
   localparam logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] MAP_TO_BIT27_OFFSET = 1; // Simplified offset within GID range
   
-  // FINAL FIX: Address allocation with non-overlapping ranges and RID_W=7 truncation
-  // Ensure no overlap in both full addresses and RID_W truncated addresses
-  localparam logic [REGF_ADDR_W-1:0] TEMP_SHIFTED_ADDR   = 16'h0040; // tmp = in << 4 (0x0040 & 0x7F = 0x40)
-  localparam logic [REGF_ADDR_W-1:0] TEMP_SMALL_ADDR     = 16'h0080; // small from bit27 extraction (0x0080 & 0x7F = 0x00)  
-  localparam logic [REGF_ADDR_W-1:0] TEMP_DIFF_ADDR      = 16'h0120; // (in - small) << 3 (0x0120 & 0x7F = 0x20)
+  // SCALABLE FIX: Large address allocation supporting up to N_LVL1=1024
+  // Each region gets 0x800 (2048) addresses, well beyond max N_LVL1+1=1025 requirement
+  // Ensure unique RID_W=7 truncated addresses to avoid conflicts
+  localparam logic [REGF_ADDR_W-1:0] TEMP_SHIFTED_ADDR   = 16'h1000; // tmp = in << 4 (0x1000 & 0x7F = 0x00)
+  localparam logic [REGF_ADDR_W-1:0] TEMP_SMALL_ADDR     = 16'h2020; // small from bit27 extraction (0x2020 & 0x7F = 0x20)  
+  localparam logic [REGF_ADDR_W-1:0] TEMP_DIFF_ADDR      = 16'h3040; // (in - small) << 3 (0x3040 & 0x7F = 0x40)
   
   // Offset values from C++ code
   localparam logic [MOD_Q_W-1:0] OFFSET_30 = 32'h40000000; // 1 << 30
@@ -399,9 +400,9 @@ logic prev_shift_write_complete;
           if (diff_write_active && regf_wr_data_rdy[0]) begin
             // Write diff data to RegFile sequentially
             write_coeff_counter <= write_coeff_counter + 1;
-            $display("[COMPUTE_DIFF %0t] Writing diff_data[%0d]=0x%08x to addr=0x%04x", 
-                     $time, write_coeff_counter, diff_data[write_coeff_counter], 
-                     TEMP_DIFF_ADDR + write_coeff_counter);
+            // $display("[COMPUTE_DIFF %0t] Writing diff_data[%0d]=0x%08x to addr=0x%04x", 
+            //          $time, write_coeff_counter, diff_data[write_coeff_counter], 
+            //          TEMP_DIFF_ADDR + write_coeff_counter);
             if (write_coeff_counter >= N_LVL1) begin
               // Finished writing all difference data
               diff_compute_complete <= 1'b1;
@@ -507,14 +508,14 @@ logic prev_shift_write_complete;
 
           if (regf_wr_data_rdy[0]) begin
             next_shift_wr_cnt = shift_wr_cnt + 1;
-            // Debug print for write operations
-            if (shift_wr_cnt < 40) begin  // Limit prints to prevent spam
-              $display("[WR_DBG %0t] shift_wr_cnt=%0d addr=0x%04x data=0x%08x vld=%b rdy=%b", 
-                       $time, shift_wr_cnt, 
-                       TEMP_SHIFTED_ADDR + shift_wr_cnt, 
-                       shifted_data[shift_wr_cnt],
-                       regf_wr_data_vld[0], regf_wr_data_rdy[0]);
-            end
+            // Debug print for write operations (disabled for production)
+            // if (shift_wr_cnt < 40) begin  // Limit prints to prevent spam
+            //   $display("[WR_DBG %0t] shift_wr_cnt=%0d addr=0x%04x data=0x%08x vld=%b rdy=%b", 
+            //            $time, shift_wr_cnt, 
+            //            TEMP_SHIFTED_ADDR + shift_wr_cnt, 
+            //            shifted_data[shift_wr_cnt],
+            //            regf_wr_data_vld[0], regf_wr_data_rdy[0]);
+            // end
             if (shift_wr_cnt == N_LVL1) begin
               next_shift_write_complete = 1'b1;
               // writing_shifted_data will be cleared in sequential logic

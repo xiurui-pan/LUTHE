@@ -330,17 +330,16 @@ module tb_wop_bit_extract_engine;
         automatic logic [REGF_ADDR_W-1:0] addr = regf_wr_req[REGF_WR_REQ_W-1:REGF_ADDR_W];
         automatic logic [REGF_ADDR_W-1:0] mapped_addr;
         
-        // Address mapping for DUT writes - non-overlapping ranges with correct priority
-        // TEMP_DIFF_ADDR must be checked FIRST to avoid overlap with TEMP_SMALL_ADDR
-        // TEMP_SHIFTED_ADDR: 0x0040-0x007F -> 0x3000-0x303F (RID: 0x40-0x7F)
-        // TEMP_SMALL_ADDR:   0x0080-0x00BF -> 0x3100-0x313F (RID: 0x00-0x3F) 
-        // TEMP_DIFF_ADDR:    0x0120-0x015F -> 0x3200-0x323F (RID: 0x20-0x5F)
-        if (addr >= 16'h0120 && addr <= 16'h015F) begin  // TEMP_DIFF_ADDR range (check first)
-          mapped_addr = 16'h3200 + (addr - 16'h0120);  // Map to 0x3200-0x323F
-        end else if (addr >= 16'h0080 && addr <= 16'h00BF) begin  // TEMP_SMALL_ADDR range
-          mapped_addr = 16'h3100 + (addr - 16'h0080);  // Map to 0x3100-0x313F
-        end else if (addr >= 16'h0040 && addr <= 16'h007F) begin  // TEMP_SHIFTED_ADDR range
-          mapped_addr = 16'h3000 + (addr - 16'h0040);  // Map to 0x3000-0x303F
+        // Address mapping for DUT writes - large address spaces supporting N_LVL1=1024
+        // TEMP_SHIFTED_ADDR: 0x1000-0x17FF -> 0x5000-0x57FF (RID: 0x00, 2048 addresses)
+        // TEMP_SMALL_ADDR:   0x2020-0x281F -> 0x6000-0x67FF (RID: 0x20, 2048 addresses) 
+        // TEMP_DIFF_ADDR:    0x3040-0x383F -> 0x7000-0x77FF (RID: 0x40, 2048 addresses)
+        if (addr >= 16'h1000 && addr <= 16'h17FF) begin  // TEMP_SHIFTED_ADDR range
+          mapped_addr = 16'h5000 + (addr - 16'h1000);  // Map to 0x5000-0x57FF
+        end else if (addr >= 16'h2020 && addr <= 16'h281F) begin  // TEMP_SMALL_ADDR range
+          mapped_addr = 16'h6000 + (addr - 16'h2020);  // Map to 0x6000-0x67FF
+        end else if (addr >= 16'h3040 && addr <= 16'h383F) begin  // TEMP_DIFF_ADDR range
+          mapped_addr = 16'h7000 + (addr - 16'h3040);  // Map to 0x7000-0x77FF
         end else begin
           mapped_addr = addr;  // Use original address
         end
@@ -470,17 +469,17 @@ module tb_wop_bit_extract_engine;
           if (pbs_operation_cycles > 0) begin
             pbs_operation_cycles <= pbs_operation_cycles - 1;
           end else begin
-            // FINAL FIX: Address mapping considering RID_W=7 truncation  
+            // SCALABLE FIX: Address mapping for large address spaces supporting N_LVL1=1024
             // Map DUT's RID_W-truncated addresses to actual testbench mapped addresses
             automatic logic [REGF_ADDR_W-1:0] actual_src_addr;
-            if (decoded_src_rid == 16'h0040) begin  // TEMP_SHIFTED_ADDR (0x0040 & 0x7F = 0x40)
-              actual_src_addr = 16'h3000;  // Map to testbench address (0x3000-0x303F)
+            if (decoded_src_rid == 16'h0000) begin  // TEMP_SHIFTED_ADDR (0x1000 & 0x7F = 0x00)
+              actual_src_addr = 16'h5000;  // Map to testbench address (0x5000-0x57FF)
               $display("[PBS_VALIDATOR t=%0t] Address mapping: src 0x%04x (TEMP_SHIFTED_ADDR) -> 0x%04x", $time, decoded_src_rid, actual_src_addr);
-            end else if (decoded_src_rid == 16'h0000) begin  // TEMP_SMALL_ADDR (0x0080 & 0x7F = 0x00)
-              actual_src_addr = 16'h3100;  // Map to testbench address (0x3100-0x313F)  
+            end else if (decoded_src_rid == 16'h0020) begin  // TEMP_SMALL_ADDR (0x2020 & 0x7F = 0x20)
+              actual_src_addr = 16'h6000;  // Map to testbench address (0x6000-0x67FF)  
               $display("[PBS_VALIDATOR t=%0t] Address mapping: src 0x%04x (TEMP_SMALL_ADDR) -> 0x%04x", $time, decoded_src_rid, actual_src_addr);
-            end else if (decoded_src_rid == 16'h0020) begin  // TEMP_DIFF_ADDR (0x0120 & 0x7F = 0x20)
-              actual_src_addr = 16'h3200;  // Map to testbench address (0x3200-0x323F)
+            end else if (decoded_src_rid == 16'h0040) begin  // TEMP_DIFF_ADDR (0x3040 & 0x7F = 0x40)
+              actual_src_addr = 16'h7000;  // Map to testbench address (0x7000-0x77FF)
               $display("[PBS_VALIDATOR t=%0t] Address mapping: src 0x%04x (TEMP_DIFF_ADDR) -> 0x%04x", $time, decoded_src_rid, actual_src_addr);
             end else begin
               actual_src_addr = decoded_src_rid;  // Use original address
@@ -489,10 +488,10 @@ module tb_wop_bit_extract_engine;
             
             for (int i = 0; i <= N_LVL1; i++) begin
               pbs_src_data[i] = regfile_memory[actual_src_addr + i][0];  // Read from mapped addresses
-              if (i >= 20 && i < 25) begin // Debug last few reads
-                $display("[PBS_READ_DBG t=%0t] Reading addr=0x%04x: data=0x%08x", 
-                         $time, actual_src_addr + i, regfile_memory[actual_src_addr + i][0]);
-              end
+              // if (i >= 20 && i < 25) begin // Debug last few reads
+              //   $display("[PBS_READ_DBG t=%0t] Reading addr=0x%04x: data=0x%08x", 
+              //            $time, actual_src_addr + i, regfile_memory[actual_src_addr + i][0]);
+              // end
             end
             pbs_validator_state <= PBS_EXECUTE;
             pbs_operation_cycles <= 8'd40; // Realistic PBS processing time
@@ -508,10 +507,10 @@ module tb_wop_bit_extract_engine;
               // map_to_bit31: CORRECTED - input[31]=0→0x00000000, input[31]=1→0x80000000
               for (int i = 0; i < N_LVL1; i++) begin
                 pbs_result_data[i] = (pbs_src_data[i][31]) ? 32'h80000000 : 32'h00000000;
-                if (i < 5 || i >= 20) begin // Debug first few and last few coefficients
-                  $display("[PBS_DEBUG t=%0t] map_to_bit31: src[%0d]=0x%08x, bit31=%b → result=0x%08x", 
-                           $time, i, pbs_src_data[i], pbs_src_data[i][31], pbs_result_data[i]);
-                end
+                // if (i < 5 || i >= 20) begin // Debug first few and last few coefficients
+                //   $display("[PBS_DEBUG t=%0t] map_to_bit31: src[%0d]=0x%08x, bit31=%b → result=0x%08x", 
+                //            $time, i, pbs_src_data[i], pbs_src_data[i][31], pbs_result_data[i]);
+                // end
               end
               pbs_result_data[N_LVL1] = ~(32'h1 << 30) + 1; // LUT base value -(1<<30)
             end else if (is_map_to_bit27) begin
@@ -538,25 +537,22 @@ module tb_wop_bit_extract_engine;
           if (pbs_operation_cycles > 0) begin
             pbs_operation_cycles <= pbs_operation_cycles - 1;
           end else begin
-            // FINAL FIX: Address mapping for destination writes considering RID_W=7 truncation
+            // SCALABLE FIX: Address mapping for destination writes supporting large address spaces
             // Map DUT's RID_W-limited addresses to actual testbench addresses
             // Address mappings (DUT uses RID_W=7, so addresses are truncated):
             // - output_bit_addr_0 = 0x0200 -> 0x0200 & 0x7F = 0x00 
             // - output_bit_addr_1 = 0x0310 -> 0x0310 & 0x7F = 0x10
-            // - TEMP_SMALL_ADDR  = 0x0080 -> 0x0080 & 0x7F = 0x00 (conflicts with output_bit_addr_0!)
-            // Solution: Use LUT type to distinguish PBS2 (map_to_bit27) vs PBS1/PBS3 (map_to_bit31)
+            // - TEMP_SMALL_ADDR  = 0x2020 -> 0x2020 & 0x7F = 0x20 (no conflicts now!)
             automatic logic [REGF_ADDR_W-1:0] actual_dst_addr;
-            if (decoded_dst_rid == 16'h0000) begin  // Could be output_bit_addr_0 OR TEMP_SMALL_ADDR
-              if (is_map_to_bit27) begin  // PBS2: TEMP_SMALL_ADDR (0x0080 & 0x7F = 0x00)
-                actual_dst_addr = 16'h3100;  // Map to testbench address for temp small (0x3100-0x313F)
-                $display("[PBS_VALIDATOR t=%0t] Address mapping: dst 0x%04x (TEMP_SMALL_ADDR) -> 0x%04x", $time, decoded_dst_rid, actual_dst_addr);
-              end else begin  // PBS1/PBS3: output_bit_addr_0 (0x0200 & 0x7F = 0x00)
-                actual_dst_addr = 16'h1000;  // Map to testbench address for output_0
-                $display("[PBS_VALIDATOR t=%0t] Address mapping: dst 0x%04x (output_bit_addr_0) -> 0x%04x", $time, decoded_dst_rid, actual_dst_addr);
-              end
+            if (decoded_dst_rid == 16'h0000) begin  // output_bit_addr_0 (0x0200 & 0x7F = 0x00)
+              actual_dst_addr = 16'h1000;  // Map to testbench address for output_0
+              $display("[PBS_VALIDATOR t=%0t] Address mapping: dst 0x%04x (output_bit_addr_0) -> 0x%04x", $time, decoded_dst_rid, actual_dst_addr);
             end else if (decoded_dst_rid == 16'h0010) begin  // output_bit_addr_1 truncated (0x0310 & 0x7F = 0x10)
               actual_dst_addr = 16'h2000;  // Map to testbench address for output_1
               $display("[PBS_VALIDATOR t=%0t] Address mapping: dst 0x%04x (output_bit_addr_1) -> 0x%04x", $time, decoded_dst_rid, actual_dst_addr);
+            end else if (decoded_dst_rid == 16'h0020) begin  // TEMP_SMALL_ADDR (0x2020 & 0x7F = 0x20)
+              actual_dst_addr = 16'h6000;  // Map to testbench address for temp small (0x6000-0x67FF)
+              $display("[PBS_VALIDATOR t=%0t] Address mapping: dst 0x%04x (TEMP_SMALL_ADDR) -> 0x%04x", $time, decoded_dst_rid, actual_dst_addr);
             end else begin
               actual_dst_addr = decoded_dst_rid;  // Use original address
               $display("[PBS_VALIDATOR t=%0t] Address mapping: dst 0x%04x (no mapping) -> 0x%04x", $time, decoded_dst_rid, actual_dst_addr);

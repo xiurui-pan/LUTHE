@@ -12,7 +12,7 @@ cli="$*"
 
 # aliases are not expanded when the shell is not interactive.
 # Redefine here for more clarity
-run_edalize="${PROJECT_DIR}/hw/scripts/edalize/run_edalize.py"
+run_edalize=${PROJECT_DIR}/hw/scripts/edalize/run_edalize.py
 
 module="tb_wop_circuit_bootstrap_woks_engine"
 
@@ -25,7 +25,7 @@ echo "./run.sh [options]"
 echo "Options are:"
 echo "-h                       : print this help."
 echo "-g                       : GLWE_K (default 2)"
-echo "-W                       : MOD_Q_W: modulo width (default 32)"
+echo "-W                       : MOD_Q_W: modulo width (default 64)"
 echo "-q                       : MOD_Q: modulo (default 2**32)"
 echo "-0                       : N_LVL0: LWE dimension level 0 (default 630)"
 echo "-2                       : N_LVL2: LWE dimension level 2 (default 2048)"
@@ -37,6 +37,7 @@ echo "-i                       : Regfile number of registers (default 64)"
 echo "-j                       : Regfile number of coefficients (default 32)"
 echo "-k                       : Regfile number of sequences (default 4)"
 echo "-- <run_edalize options> : run_edalize options."
+echo "--real                   : use real NTT head in TB (USE_REAL_CORES=1)"
 
 }
 
@@ -53,7 +54,7 @@ GLWE_K=2
 PBS_L=1
 R=8
 S=8
-MOD_Q_W=32
+MOD_Q_W=64
 MOD_Q="2**32"
 N_LVL0=630
 N_LVL2=2048
@@ -66,7 +67,8 @@ REGF_COEF_NB=32
 REGF_SEQ=4
 
 # Initialize your own variables here:
-while getopts "hzg:W:0:2:E:K:P:R:i:j:k:q:" opt; do
+USE_REAL=0
+while getopts "hzg:W:0:2:E:K:P:R:i:j:k:q:-:" opt; do
   case "$opt" in
     h)
       usage
@@ -80,6 +82,17 @@ while getopts "hzg:W:0:2:E:K:P:R:i:j:k:q:" opt; do
       ;;
     q)
       MOD_Q=$OPTARG
+      ;;
+    -)
+      case "$OPTARG" in
+        real)
+          USE_REAL=1
+          ;;
+        *)
+          echo "Invalid long option: --$OPTARG"
+          exit 1
+          ;;
+      esac
       ;;
     0)
       N_LVL0=$OPTARG
@@ -191,6 +204,12 @@ eda_args="$eda_args \
             -F APPLICATION APPLI_simu \
             -F REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ}"
 
+# Enable real NTT/BSK head if requested
+if [ $USE_REAL -eq 1 ]; then
+  eda_args="$eda_args -P USE_REAL_CORES int 1"
+  echo "INFO> USE_REAL_CORES=1 (real NTT head enabled)"
+fi
+
 ###################################################################################################
 # Run_edalize configure
 ###################################################################################################
@@ -217,4 +236,12 @@ echo $cli > ${work_dir}/cli.log
 ###################################################################################################
 # Run phase : simulation
 ###################################################################################################
-$run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -k keep $eda_args $args
+LOG_TS=$(date +%Y%m%d_%H%M%S)
+OUT_LOG="${work_dir}/output/${module}_${LOG_TS}.log"
+echo "INFO> Logging simulator output to: ${OUT_LOG}"
+
+# Run simulation, save full log, and print only key lines to console
+$run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -k keep $eda_args $args 2>&1 \
+  | tee ${OUT_LOG} \
+  | grep -v "WARNING>" \
+  | egrep -i "TEST STATUS|TEST PASSED|TEST FAILED|TIMEOUT|\\[TB_|Circuit bootstrap|Starting|completed|Result|SAMPLE_EXTRACT|^ERROR:|^FATAL:" || true

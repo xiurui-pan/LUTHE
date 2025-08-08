@@ -29,7 +29,7 @@ module wop_circuit_bootstrap_woks_engine
   import regf_common_param_pkg::*;
   import pep_if_pkg::*;
 #(
-  parameter int MOD_Q_W = 32,
+  parameter int MOD_Q_W = 64,
   parameter int N_LVL0 = 630,
   parameter int N_LVL2 = 2048,
   parameter int ELL_LVL2 = 8,
@@ -41,7 +41,8 @@ module wop_circuit_bootstrap_woks_engine
   parameter int BPBS_ID_W = 8,  // BPBS ID width
   parameter int REGF_ADDR_W = 16,  // RegFile address width
   parameter int NTT_OP_W = 64,  // NTT操作数据宽度
-  parameter int PBS_B_W = 32  // PBS操作数据宽度
+  parameter int PBS_B_W = 32,  // PBS操作数据宽度
+  parameter bit APPLY_POST_SCALE = 1'b0  // 可选 N^{-1} 缩放开关（默认关）
 )
 (
   input  logic clk,
@@ -68,7 +69,7 @@ module wop_circuit_bootstrap_woks_engine
   input  logic regf_rd_last_word,
   
   // Input: pre-modswitch result (abar)
-  input  logic [N_LVL0:0][31:0] abar_data,  // abar[n_lvl0+1] from preModSwitch
+  input  logic [N_LVL0:0][63:0] abar_data,  // abar[n_lvl0+1] from preModSwitch
   input  logic abar_valid,
   
   // Output: LWE sample at level 2
@@ -113,6 +114,13 @@ module wop_circuit_bootstrap_woks_engine
 // ==============================================================================================
   localparam int N2 = N_LVL2 / 2;
   localparam int _2L = 2 * ELL_LVL2;
+  // Compile-time check for 64-bit mode (P1)
+  initial begin
+    if (MOD_Q_W != 64) $fatal(1, "MOD_Q_W must be 64 for P1 phase");
+  end
+  // log2(N) for optional post INTT scaling
+  localparam int N_LVL2_LOG2 = $clog2(N_LVL2);
+  // Optional post-scale enable (parameterized)
   
   // Address space design - 基于Bit Extract成功经验，支持大规模存储
   // 每个区域分配0x800 (2048)地址，支持最大N_LVL2=2048系数
@@ -131,6 +139,23 @@ module wop_circuit_bootstrap_woks_engine
   logic [63:0] buf_storage [0:K][0:N_LVL2-1];
   logic will_complete_level, will_complete_all;
 
+  // Optional INTT post-scaling for torus64
+  function automatic logic [MOD_Q_W-1:0] post_scale_intt (
+    input logic [NTT_OP_W-1:0] intt_word
+  );
+    logic signed [MOD_Q_W-1:0] narrowed;
+    logic signed [MOD_Q_W-1:0] scaled;
+    begin
+      narrowed = intt_word[MOD_Q_W-1:0];
+      if (APPLY_POST_SCALE) begin
+        scaled = narrowed >>> N_LVL2_LOG2;
+      end else begin
+        scaled = narrowed;
+      end
+      post_scale_intt = scaled;
+    end
+  endfunction
+
 // ==============================================================================================
 // State Machine
 // ==============================================================================================
@@ -142,22 +167,12 @@ module wop_circuit_bootstrap_woks_engine
     COMPUTE_ACC2,             // acc2 = (X^aibar - 1) * acc1
     DECOMPOSE_ACC2,           // Gadget decomposition of acc2
     NTT_FORWARD,              // Forward NTT of decomposed polynomials
-    EXTERNAL_PRODUCT,         // Point-wise multiplication with BSK
+    // EXTERNAL_PRODUCT removed: external product handled inside shared NTT core
     NTT_INVERSE,              // Inverse NTT of product results
     ACCUMULATE,               // acc += acc1
     SAMPLE_EXTRACT,           // Extract final LWE sample
     DONE
   } state_e;
-
-  // External product sub-state machine
-  typedef enum logic [2:0] {
-    EP_IDLE,
-    EP_DECOMPOSE,
-    EP_NTT_FWD,
-    EP_MULTIPLY,
-    EP_NTT_INV,
-    EP_DONE
-  } external_product_state_e;
 
   state_e current_state, next_state;
 
@@ -175,18 +190,20 @@ module wop_circuit_bootstrap_woks_engine
   
   // Loop control
   logic [$clog2(N_LVL0+1)-1:0] loop_counter;
-  logic [31:0] current_aibar;
+  logic [63:0] current_aibar;
   logic [MOD_Q_W-1:0] mu2;
-  logic [31:0] bbar;
+  logic [63:0] bbar;
   
   // Decomposition storage for external product (Gadget decomposition)
-  logic [_2L-1:0][N_LVL2-1:0][31:0] decomp;
+  logic [_2L-1:0][N_LVL2-1:0][63:0] decomp;
   logic [_2L-1:0][N_LVL2-1:0][MOD_Q_W-1:0] decomp_fft;
   
-  // External product state and control
-  external_product_state_e ep_state;
+  // NTT traversal control
   logic [$clog2(_2L)-1:0] decomp_level_counter;
   logic [$clog2(N_LVL2)-1:0] coeff_counter;
+  // INTT receive aggregator counters
+  logic [$clog2((K+1)*N_LVL2+1)-1:0] ntt_recv_count;
+  logic [$clog2((K+1)*N_LVL2+1)-1:0] ntt_recv_count_incr;
   
   // ✅ TFHE标准Gadget分解参数 (tGsw64DecompH)
   // 参考: env->bgbit_lvl2 和 env->ell_lvl2
@@ -205,7 +222,6 @@ module wop_circuit_bootstrap_woks_engine
   logic acc2_compute_done;
   logic decompose_done;
   logic ntt_forward_done;
-  logic external_product_done;
   logic ntt_inverse_done;
   logic accumulate_done;
   logic sample_extract_done;
@@ -219,17 +235,11 @@ module wop_circuit_bootstrap_woks_engine
       loop_counter <= '0;
       mu2 <= '0;
       bbar <= '0;
-      ep_state <= EP_IDLE;
       decomp_level_counter <= '0;
       coeff_counter <= '0;
+      ntt_recv_count <= '0;
     end else begin
       current_state <= next_state;
-      
-      // Debug: 打印状态机转换
-      if (current_state != next_state) begin
-        $display("%0t: State transition: %s -> %s, loop_counter=%0d", 
-                 $time, current_state.name(), next_state.name(), loop_counter);
-      end
       
       case (current_state)
         IDLE: begin
@@ -255,41 +265,44 @@ module wop_circuit_bootstrap_woks_engine
           end
         end
         
-                NTT_FORWARD: begin
-          // Handle coefficient and level counters in sequential logic
-          // Increment counters every cycle when sending data, regardless of NTT ready status
-          if (decomp_level_counter < _2L) begin
-            if (coeff_counter < N_LVL2-1) begin
-              coeff_counter <= coeff_counter + 1;
-              // Debug: Print counter increments every 100 cycles
-              if (coeff_counter % 100 == 0) begin
-                $display("%0t: NTT_FORWARD - coeff_counter incrementing: %0d", $time, coeff_counter);
+         NTT_FORWARD: begin
+          // Advance counters only when NTT core accepted the data for all lanes
+          if (decomp_level_counter < _2L && coeff_counter < N_LVL2) begin
+            if (decomp_ntt_ctrl_rdy && (&decomp_ntt_data_rdy) && decomp_ntt_ctrl_avail) begin
+              if (coeff_counter < N_LVL2-1) begin
+                coeff_counter <= coeff_counter + 1;
+                if (coeff_counter % 128 == 0) begin
+                  $display("%0t: NTT_FORWARD - accepted coeff=%0d (level=%0d)", $time, coeff_counter, decomp_level_counter);
+                end
+              end else begin
+                coeff_counter <= '0;
+                decomp_level_counter <= decomp_level_counter + 1;
+                $display("%0t: NTT_FORWARD - Level %0d completed, moving to level %0d", 
+                         $time, decomp_level_counter, decomp_level_counter + 1);
               end
-            end else begin
-              coeff_counter <= '0;
-              decomp_level_counter <= decomp_level_counter + 1;
-              $display("%0t: NTT_FORWARD - Level %0d completed, moving to level %0d", 
-                       $time, decomp_level_counter, decomp_level_counter + 1);
             end
           end
-          // Reset counters for external product
-          if (current_state != next_state && next_state == EXTERNAL_PRODUCT) begin
+          // Reset counters for inverse NTT (external product handled inside shared NTT)
+          if (current_state != next_state && next_state == NTT_INVERSE) begin
             decomp_level_counter <= '0;
             coeff_counter <= '0;
+            ntt_recv_count <= '0;
           end
 
         end
         
         NTT_INVERSE: begin
-          // Handle coefficient and level counters in sequential logic
-          // Increment counters every cycle when sending data, regardless of NTT ready status
-          if (decomp_level_counter < _2L) begin
-            if (coeff_counter < N_LVL2-1) begin
-              coeff_counter <= coeff_counter + 1;
-            end else begin
-              coeff_counter <= '0;
-              decomp_level_counter <= decomp_level_counter + 1;
-              // Level completion confirmed working
+          // Advance counters only when we accepted data from NTT for at least one lane
+          if (decomp_level_counter < _2L && coeff_counter < N_LVL2) begin
+            if (ntt_next_ctrl_avail && (|ntt_next_data_avail) && (|ntt_next_data_rdy)) begin
+              if (coeff_counter < N_LVL2-1) begin
+                coeff_counter <= coeff_counter + 1;
+              end else begin
+                coeff_counter <= '0;
+                decomp_level_counter <= decomp_level_counter + 1;
+              end
+              // accumulate accepted items
+              ntt_recv_count <= ntt_recv_count + ntt_recv_count_incr;
             end
           end
         end
@@ -305,14 +318,7 @@ module wop_circuit_bootstrap_woks_engine
           end
         end
         
-        EXTERNAL_PRODUCT: begin
-          // Reset counters for inverse NTT
-          if (current_state != next_state && next_state == NTT_INVERSE) begin
-            decomp_level_counter <= '0;
-            coeff_counter <= '0;
-            $display("%0t: Resetting counters for NTT_INVERSE transition", $time);
-          end
-        end
+        // (EXTERNAL_PRODUCT) removed
       endcase
     end
   end
@@ -491,9 +497,12 @@ module wop_circuit_bootstrap_woks_engine
         // ✅ 实现真正的tGsw64DecompH算法
         // 基于TFHE标准：预处理 + 位提取 + halfBg偏移
         
-        // Step 1: 预处理 - 添加offset (模拟torusDecompOffset64)
-        // 在真实实现中，这个offset来自于Context
-        torus_decomp_offset = 64'h8000000000000000; // 简化的offset
+        // Step 1: 预处理 - 添加offset (接近 torusDecompOffset64；具体数值由 Context 决定)
+        // 使用半 Bg 累加的近似：sum_{i=0..ELL-1} 1 << (64 - (i+1)*BASE_LOG - 1)
+        torus_decomp_offset = '0;
+        for (int i = 0; i < ELL_LVL2; i++) begin
+          torus_decomp_offset = torus_decomp_offset + (64'd1 << (64 - (i+1)*BASE_LOG - 1));
+        end
         
         for (int q = 0; q <= K; q++) begin
           for (int j = 0; j < N_LVL2; j++) begin
@@ -502,13 +511,13 @@ module wop_circuit_bootstrap_woks_engine
         end
         
         // Step 2: tGsw64DecompH标准分解
-        for (int p = 0; p < _2L; p++) begin
-          // 计算位移量: decal = 64 - (p+1) * bgbit_lvl2
-          automatic int decal = 64 - (p + 1) * BASE_LOG;
-          automatic logic [31:0] temp1;
-          automatic logic [31:0] half_bg = (1 << BASE_LOG) / 2;
-          
-          for (int q = 0; q <= K; q++) begin
+        // 正确展开索引：p = q*ELL_LVL2 + i，i为分解层(0..ELL_LVL2-1)，q为通道(0..K)
+        for (int q = 0; q <= K; q++) begin
+          for (int i = 0; i < ELL_LVL2; i++) begin
+            automatic int p = q*ELL_LVL2 + i;
+            automatic int decal = 64 - (i + 1) * BASE_LOG;
+            automatic logic [31:0] temp1;
+            automatic logic [31:0] half_bg = (1 << BASE_LOG) / 2;
             for (int j = 0; j < N_LVL2; j++) begin
               // 提取BASE_LOG位并减去halfBg
               temp1 = (buf_storage[q][j] >> decal) & MASK;
@@ -577,72 +586,15 @@ module wop_circuit_bootstrap_woks_engine
             $display("%t: NTT_FORWARD - waiting for NTT ready", $time);
           end
         end else begin
-          // 所有分解数据已发送给NTT引擎，等待NTT变换完成
+          // 所有分解数据已发送给NTT引擎，外积在NTT核内部完成，
+          // 这里等待NTT完成整个频域乘加与逆变换，再进入 ACCUMULATE
           ntt_forward_done = 1'b1;
-          next_state = EXTERNAL_PRODUCT;
-          $display("%0t: NTT_FORWARD - all decomp data sent to NTT, transitioning to EXTERNAL_PRODUCT", $time);
+          next_state = NTT_INVERSE;
+          $display("%0t: NTT_FORWARD - all decomp data sent; waiting for INTT results", $time);
         end
       end
       
-      EXTERNAL_PRODUCT: begin
-        // ✅ 外部积计算 - 真实的BSK管理器集成
-        // 基于C++参考：LagrangeHalfCPolynomialAddMul_lvl2(accFFT->a + q, decompFFT + p, &bkFFT[i].allsamples[p].a[q], env)
-        
-        // 真实的外部积计算流程：
-        // 1. 请求BSK系数：bkFFT[blind_rotate_counter].allsamples[decomp_level_counter]
-        // 2. 等待BSK管理器返回数据
-        // 3. 在NTT域进行点乘：decompFFT[p] * bkFFT[i].allsamples[p].a[q]
-        
-        // 请求当前盲旋转计数器对应的BSK系数
-        bsk_req_vld = 1'b1;
-        bsk_batch_id = blind_rotate_counter[BSK_BATCH_ID_W-1:0];  // 使用当前的盲旋转索引
-        
-        if (bsk_req_rdy && bsk_data_avail) begin
-          // BSK数据已就绪，执行真实的外部积计算
-          $display("%t: EXTERNAL_PRODUCT - BSK data received for blind_rotate_counter=%0d", $time, blind_rotate_counter);
-          
-          // 对每个分解层级和TLWE多项式进行外部积计算
-          for (int p = 0; p < _2L; p++) begin
-            for (int q = 0; q <= K; q++) begin
-              for (int j = 0; j < N_LVL2; j++) begin
-                automatic logic [MOD_Q_W-1:0] bsk_coefficient;
-                automatic logic [MOD_Q_W-1:0] external_product_result;
-                
-                // 从BSK管理器获取真实的BSK系数
-                // bsk_data[BSK_PC-1:0][R-1:0][MOD_Q_W-1:0]
-                if (j < R) begin
-                  bsk_coefficient = bsk_data[0][j];  // 简化映射：使用第一个PC和对应的R索引
-                end else begin
-                  bsk_coefficient = bsk_data[0][j % R];  // 循环使用
-                end
-                
-                // NTT域点乘：decompFFT[p] * bkFFT[i].allsamples[p].a[q] 
-                external_product_result = decomp[p][j] * bsk_coefficient;
-                
-                // 累加到accFFT (存储到acc1作为NTT域结果)
-                acc1[q][j] += external_product_result;
-                
-                if (p == 0 && q == 0 && j < 4) begin
-                  $display("%t: EXTERNAL_PRODUCT - p=%0d, q=%0d, j=%0d: decomp=0x%08x, bsk=0x%08x, result=0x%08x", 
-                           $time, p, q, j, decomp[p][j], bsk_coefficient, external_product_result);
-                end
-              end
-            end
-          end
-          
-          external_product_done = 1'b1;
-          next_state = NTT_INVERSE;
-          $display("%t: EXTERNAL_PRODUCT - Real BSK external product completed, transitioning to NTT_INVERSE", $time);
-        end else begin
-          // 继续等待BSK数据
-          next_state = EXTERNAL_PRODUCT;
-          if (!bsk_req_rdy) begin
-            $display("%t: EXTERNAL_PRODUCT - Waiting for BSK manager ready", $time);
-          end else begin
-            $display("%t: EXTERNAL_PRODUCT - Waiting for BSK data", $time);
-          end
-        end
-      end
+      // EXTERNAL_PRODUCT removed: external product is performed inside shared NTT core head
       
       NTT_INVERSE: begin
         // ✅ 反向NTT - 接收共享NTT引擎的反向变换结果
@@ -656,24 +608,36 @@ module wop_circuit_bootstrap_woks_engine
         // 检查NTT引擎是否有结果返回
         if (ntt_next_ctrl_avail && (|ntt_next_data_avail)) begin
           // 接收NTT引擎的反向变换结果
+          ntt_recv_count_incr = '0;
           for (int p = 0; p < PSI; p++) begin
             for (int r = 0; r < R; r++) begin
               if (ntt_next_data_avail[p][r]) begin
-                // 将NTT结果存储到acc1中（根据当前的q和j索引）
+                // 写回映射：q_idx 依据分层 p_total / ELL_LVL2，j 依据 coeff_counter
                 if (coeff_counter < N_LVL2) begin
-                  acc1[0][coeff_counter] = ntt_next_data[p][r][MOD_Q_W-1:0];  // 简化映射
+                  automatic int q_idx = (decomp_level_counter / ELL_LVL2);
+                  if (q_idx <= K) begin
+                    acc1[q_idx][coeff_counter] = post_scale_intt(ntt_next_data[p][r]);
+                  end
                 end
-                ntt_next_data_rdy[p][r] = 1'b1;  // 确认接收
+                ntt_next_data_rdy[p][r] = 1'b1;
+                ntt_recv_count_incr = ntt_recv_count_incr + 1;
               end
             end
           end
           ntt_next_ctrl_rdy = 1'b1;
           
-          $display("%t: NTT_INVERSE - Received result from NTT engine: coeff=%0d, data=0x%08x", 
-                   $time, coeff_counter, ntt_next_data[0][0][MOD_Q_W-1:0]);
+          // Debug: 打点q与层边界
+          if ((coeff_counter % 256) == 0) begin
+            $display("%t: NTT_INVERSE - q=%0d coeff=%0d recv_incr=%0d recv_total=%0d sample=0x%08x",
+                     $time, (decomp_level_counter/ELL_LVL2), coeff_counter, ntt_recv_count_incr, ntt_recv_count + ntt_recv_count_incr, ntt_next_data[0][0][MOD_Q_W-1:0]);
+          end
+          if ((coeff_counter == N_LVL2-1)) begin
+            $display("%t: NTT_INVERSE - Completed coeff ring for q=%0d (level=%0d)", $time, (decomp_level_counter/ELL_LVL2), decomp_level_counter);
+          end
           
-          // 继续接收或完成
-          next_state = (coeff_counter >= N_LVL2-1) ? ACCUMULATE : NTT_INVERSE;
+          // 继续接收或完成：按接收总数达到 (K+1)*N_LVL2 判定完成
+          assert ((ntt_recv_count + ntt_recv_count_incr) <= ((K+1)*N_LVL2)) else $fatal("NTT_INVERSE - recv overflow: %0d > %0d", ntt_recv_count + ntt_recv_count_incr, ((K+1)*N_LVL2));
+          next_state = ((ntt_recv_count + ntt_recv_count_incr) >= ((K+1)*N_LVL2)) ? ACCUMULATE : NTT_INVERSE;
           if (next_state == ACCUMULATE) begin
             ntt_inverse_done = 1'b1;
             $display("%t: NTT_INVERSE - All inverse NTT results received from shared engine", $time);

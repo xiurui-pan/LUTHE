@@ -240,6 +240,10 @@ module wop_circuit_bootstrap_woks_engine
       ntt_recv_count <= '0;
     end else begin
       current_state <= next_state;
+      // Debug state transitions
+      if (current_state != next_state) begin
+        $display("[WoKS] State transition: %0d -> %0d at t=%0t", current_state, next_state, $time);
+      end
       
       case (current_state)
         IDLE: begin
@@ -537,9 +541,11 @@ module wop_circuit_bootstrap_woks_engine
         
         decompose_done = 1'b1;
         next_state = NTT_FORWARD;
+        $display("[WoKS] DECOMPOSE_ACC2 -> NTT_FORWARD: decompose_done=1, next_state=%0d", NTT_FORWARD);
       end
       
       NTT_FORWARD: begin
+        $display("[WoKS] Entered NTT_FORWARD state at t=%0t, level=%0d, coeff=%0d, will_complete_all=%0b", $time, decomp_level_counter, coeff_counter, will_complete_all);
         // ✅ 真正的前向NTT实现 - 发送分解数据到共享NTT引擎
         // 基于C++参考：IntPolynomial_ifft_lvl2(decompFFT + p, decomp + p, env)
         
@@ -577,13 +583,14 @@ module wop_circuit_bootstrap_woks_engine
                    $time, decomp_level_counter, coeff_counter, decomp[decomp_level_counter][coeff_counter]);
           
           // 等待NTT引擎准备好接收数据
+          $display("%t: NTT_FORWARD - NTT signals: ctrl_rdy=%0b, data_rdy=%0b, ctrl_avail=%0b", $time, decomp_ntt_ctrl_rdy, (&decomp_ntt_data_rdy), decomp_ntt_ctrl_avail);
           if (decomp_ntt_ctrl_rdy && (&decomp_ntt_data_rdy)) begin
             // NTT引擎已接收数据，移动到下一个系数
             next_state = NTT_FORWARD;
             $display("%t: NTT_FORWARD - Data accepted by NTT engine", $time);
           end else begin
             next_state = NTT_FORWARD;  // 等待NTT引擎ready
-            $display("%t: NTT_FORWARD - waiting for NTT ready", $time);
+            $display("%t: NTT_FORWARD - waiting for NTT ready (ctrl_rdy=%0b, data_rdy=%0b)", $time, decomp_ntt_ctrl_rdy, (&decomp_ntt_data_rdy));
           end
         end else begin
           // 所有分解数据已发送给NTT引擎，外积在NTT核内部完成，
@@ -703,5 +710,23 @@ module wop_circuit_bootstrap_woks_engine
   
   // Note: This is a simplified interface - the actual implementation would need
   // detailed state machines for managing the NTT pipeline and data flow
+
+  // Debug: Print current state every 10000 time units  
+  always @(posedge clk) begin
+    if ($time % 10000 == 0 && $time > 100000) begin
+      $display("[WoKS_DEBUG] t=%0t: current_state=%0d (%s)", $time, current_state, 
+               current_state == IDLE ? "IDLE" :
+               current_state == GENERATE_TEST_VECTOR ? "GENERATE_TEST_VECTOR" :
+               current_state == INIT_ACCUMULATOR ? "INIT_ACCUMULATOR" :
+               current_state == BLIND_ROTATE_LOOP ? "BLIND_ROTATE_LOOP" :
+               current_state == COMPUTE_ACC2 ? "COMPUTE_ACC2" :
+               current_state == DECOMPOSE_ACC2 ? "DECOMPOSE_ACC2" :
+               current_state == NTT_FORWARD ? "NTT_FORWARD" :
+               current_state == NTT_INVERSE ? "NTT_INVERSE" :
+               current_state == ACCUMULATE ? "ACCUMULATE" :
+               current_state == SAMPLE_EXTRACT ? "SAMPLE_EXTRACT" :
+               current_state == DONE ? "DONE" : "UNKNOWN");
+    end
+  end
 
 endmodule

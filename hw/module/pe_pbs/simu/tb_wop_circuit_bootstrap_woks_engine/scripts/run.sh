@@ -174,6 +174,28 @@ mkdir -p $RTL_DIR
 
 # Create package
 if [ $GEN_STIMULI -eq 1 ] ; then
+  # Adjust PSI for real mode FIRST, before generating any packages
+  if [ $USE_REAL -eq 1 ]; then
+    # 调整PSI参数满足NTT约束: R*PSI >= radix_block_size(32)  
+    # R=8, PSI=8 => R*PSI=64 远大于32，确保满足约束
+    PSI=8
+    echo "INFO> Real mode: PSI adjusted to $PSI (R=$R) for R*PSI=$((R*PSI)) constraint"
+  fi
+  
+  # Generate custom R and PSI packages for real mode BEFORE param package
+  if [ $USE_REAL -eq 1 ]; then
+    echo "INFO> Generating custom R package (R=$R) for real mode to avoid conflicts"
+    r_pkg_cmd="python3 ${PROJECT_DIR}/hw/module/number_theoretic_transform/module/ntt_core_common/scripts/gen_ntt_core_common_r_definition_pkg.py -f -R ${R} -o ${RTL_DIR}/ntt_core_common_r_definition_pkg.sv"
+    echo "INFO> Running : $r_pkg_cmd"
+    $r_pkg_cmd || exit 1
+    
+    echo "INFO> Generating custom PSI package (PSI=$PSI) for real mode to avoid conflicts"
+    psi_pkg_cmd="python3 ${PROJECT_DIR}/hw/module/number_theoretic_transform/module/ntt_core_common/scripts/gen_ntt_core_common_psi_definition_pkg.py -f -P ${PSI} -o ${RTL_DIR}/ntt_core_common_psi_definition_pkg.sv"
+    echo "INFO> Running : $psi_pkg_cmd"
+    $psi_pkg_cmd || exit 1
+    echo "INFO> Custom R and PSI packages generated: R=$R, PSI=$PSI (R*PSI=$((R*PSI)))"
+  fi
+
   pkg_cmd="python3 ${PROJECT_DIR}/hw/module/param/scripts/gen_param_tfhe_definition_pkg.py -f -N $N -g $GLWE_K -l $PBS_L -K $LWE_K \
            -q $MOD_Q -W $MOD_Q_W -o ${RTL_DIR}/param_tfhe_definition_pkg.sv"
   echo "INFO> N=${N}, GLWE_K=${GLWE_K}, PBS_L=${PBS_L} LWE_K=$LWE_K MOD_Q=$MOD_Q MOD_Q_W=$MOD_Q_W"
@@ -181,24 +203,6 @@ if [ $GEN_STIMULI -eq 1 ] ; then
   echo "INFO> Creating param_tfhe_definition_pkg.sv"
   echo "INFO> Running : $pkg_cmd"
   $pkg_cmd || exit 1
-
-  # Generate NTT core common arch/psi override packages when real profile requested
-  if [ -n "$REAL_PROFILE" ]; then
-    case "$REAL_PROFILE" in
-      gf64_r2_psi16)
-        R=2; PSI=16
-        arch="NTT_CORE_ARCH_gf64"
-        psi_val=16
-        ;;
-      *)
-        echo "ERROR> Unknown --real-profile: $REAL_PROFILE"; exit 1;;
-    esac
-    echo "INFO> Generating NTT arch/psi packages for profile $REAL_PROFILE (R=$R PSI=$PSI)"
-    arch_pkg_cmd="python3 ${PROJECT_DIR}/hw/module/number_theoretic_transform/module/ntt_core_common/scripts/gen_ntt_core_common_arch_definition_pkg.py -f -a ${arch} -o ${RTL_DIR}/ntt_core_common_arch_definition_pkg.sv"
-    echo "INFO> Running : $arch_pkg_cmd"; $arch_pkg_cmd || exit 1
-    psi_pkg_cmd="python3 ${PROJECT_DIR}/hw/module/number_theoretic_transform/module/ntt_core_common/scripts/gen_ntt_core_common_psi_definition_pkg.py -f -P ${psi_val} -o ${RTL_DIR}/ntt_core_common_psi_definition_pkg.sv"
-    echo "INFO> Running : $psi_pkg_cmd"; $psi_pkg_cmd || exit 1
-  fi
 
   pkg_cmd="python3 ${PROJECT_DIR}/hw/module/regfile/module/regf_common/scripts/gen_regf_common_definition_pkg.py -f \
           -regf_reg_nb $REGF_REG_NB -regf_coef_nb $REGF_COEF_NB -regf_seq $REGF_SEQ -o ${RTL_DIR}/regf_common_definition_pkg.sv"
@@ -213,9 +217,17 @@ if [ $GEN_STIMULI -eq 1 ] ; then
                 -o ${INFO_DIR}/file_list.json \
                 -p ${RTL_DIR} \
                 -R param_tfhe_definition_pkg.sv simu 0 1 \
-                -R regf_common_definition_pkg.sv simu 0 1 \
-                -R ntt_core_common_arch_definition_pkg.sv simu 0 1 \
-                -R ntt_core_common_psi_definition_pkg.sv simu 0 1 \
+                -R regf_common_definition_pkg.sv simu 0 1"
+  
+  # Add R and PSI package overrides for real mode
+  if [ $USE_REAL -eq 1 ]; then
+    file_list_cmd="${file_list_cmd} \
+                -R ntt_core_common_r_definition_pkg.sv simu 0 1 \
+                -R ntt_core_common_psi_definition_pkg.sv simu 0 1"
+    echo "INFO> Added custom R and PSI package overrides to file list"
+  fi
+  
+  file_list_cmd="${file_list_cmd} \
                 -F param_tfhe_definition_pkg.sv APPLICATION APPLI_simu \
                 -F regf_common_definition_pkg.sv REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ}"
   echo "INFO> Running : $file_list_cmd"
@@ -227,6 +239,8 @@ else
   echo "INFO> Using existing ${RTL_DIR}/param_tfhe_definition_pkg.sv"
   echo "INFO> Using existing ${RTL_DIR}/regf_common_definition_pkg.sv"
 fi
+
+# No PSI adjustment here - it's done before package generation
 
 eda_args=""
 
@@ -241,10 +255,13 @@ eda_args="$eda_args \
             -F APPLICATION APPLI_simu \
             -F REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ}"
 
-# Enable real NTT/BSK head if requested
+# Always pass USE_REAL_CORES parameter to testbench
 if [ $USE_REAL -eq 1 ]; then
   eda_args="$eda_args -P USE_REAL_CORES int 1"
-  echo "INFO> USE_REAL_CORES=1 (real NTT head enabled)"
+  echo "INFO> USE_REAL_CORES=1 (real NTT head enabled, using custom PSI=$PSI)"
+else
+  eda_args="$eda_args -P USE_REAL_CORES int 0"
+  echo "INFO> USE_REAL_CORES=0 (simulated NTT/BSK cores enabled)"
 fi
 
 if [ $USE_DPI_GOLDEN -eq 1 ]; then
@@ -286,7 +303,7 @@ echo "INFO> Logging simulator output to: ${OUT_LOG}"
 $run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -k keep $eda_args $args 2>&1 \
   | tee ${OUT_LOG} \
   | grep -v "WARNING>" \
-  | egrep -i "TEST STATUS|TEST PASSED|TEST FAILED|TIMEOUT|\\[TB_|Circuit bootstrap|Starting|completed|Result|SAMPLE_EXTRACT|^ERROR:|^FATAL:" || true
+  | egrep -i "TEST STATUS|TEST PASSED|TEST FAILED|TIMEOUT|\\[TB_|\\[WoKS|WoKS_DEBUG|TB_DEBUG|TB_NTT_DEBUG|TB_NTT_STATE|TB_NTT_SIMPLE|TB_RST_DEBUG|TB_NTT_FORCE|Circuit bootstrap|Starting|completed|Result|SAMPLE_EXTRACT|NTT_FORWARD|State transition|^ERROR:|^FATAL:" || true
 
 # Optional: run standalone C++ golden and compare low32 of a0-3,b
 if [ $USE_GOLDEN_COMPARE -eq 1 ]; then

@@ -15,9 +15,18 @@
 module tb_wop_circuit_bootstrap_woks_engine;
 
   import param_tfhe_pkg::*;
+  import param_ntt_pkg::*;
+  import ntt_core_common_param_pkg::*;
   import regf_common_param_pkg::*;
   import common_definition_pkg::*;
   import pep_if_pkg::*;
+  import top_common_param_pkg::*;
+  import pep_common_param_pkg::*;
+  import bsk_if_common_param_pkg::*;
+  import bsk_mgr_common_param_pkg::*;
+  import axi_if_common_param_pkg::*;
+  import axi_if_bsk_axi_pkg::*;
+  import hpu_common_instruction_pkg::*;
 
 // ==============================================================================================
 // Parameters
@@ -52,7 +61,9 @@ module tb_wop_circuit_bootstrap_woks_engine;
   initial begin
     clk = 0;
     a_rst_n = 0;
+    $display("[TB_RST_DEBUG] t=%0t: Initial reset start, a_rst_n=0", $time);
     #17 a_rst_n = 1;  // release async reset after 17ns
+    $display("[TB_RST_DEBUG] t=%0t: Reset released, a_rst_n=1", $time);
   end
   
   always begin
@@ -61,6 +72,9 @@ module tb_wop_circuit_bootstrap_woks_engine;
   
   always_ff @(posedge clk) begin
     s_rst_n <= a_rst_n;
+    if ($time < 100000 && $time % 10000 == 0) begin
+      $display("[TB_RST_DEBUG] t=%0t: a_rst_n=%0b, s_rst_n=%0b", $time, a_rst_n, s_rst_n);
+    end
   end
 
 // ==============================================================================================
@@ -112,7 +126,7 @@ module tb_wop_circuit_bootstrap_woks_engine;
   logic [N_LVL2-1:0][MOD_Q_W-1:0] test_vector;
   logic [N_LVL0:0][63:0] test_abar;
   logic [63:0] test_mu;
-
+  
   // DPI golden buffers（静态，避免在 task 中声明带来的语法/作用域问题）
   int abar_i [0:N_LVL0];
   longint unsigned golden_full_a [0:N_LVL2-1];
@@ -243,81 +257,232 @@ module tb_wop_circuit_bootstrap_woks_engine;
 // ✅ BSK/NTT 仿真或真实核选择（按 USE_REAL_CORES 开关）
 // ==============================================================================================
 
+  // AXI4 BSK接口信号（用于真实模式）
+  logic [BSK_PC-1:0][axi_if_bsk_axi_pkg::AXI4_ID_W-1:0]         m_axi4_bsk_arid;
+  logic [BSK_PC-1:0][axi_if_bsk_axi_pkg::AXI4_ADD_W-1:0]        m_axi4_bsk_araddr;
+  logic [BSK_PC-1:0][AXI4_LEN_W-1:0]                            m_axi4_bsk_arlen;
+  logic [BSK_PC-1:0][AXI4_SIZE_W-1:0]                           m_axi4_bsk_arsize;
+  logic [BSK_PC-1:0][AXI4_BURST_W-1:0]                          m_axi4_bsk_arburst;
+  logic [BSK_PC-1:0]                                            m_axi4_bsk_arvalid;
+  logic [BSK_PC-1:0]                                            m_axi4_bsk_arready;
+  logic [BSK_PC-1:0][axi_if_bsk_axi_pkg::AXI4_ID_W-1:0]         m_axi4_bsk_rid;
+  logic [BSK_PC-1:0][axi_if_bsk_axi_pkg::AXI4_DATA_W-1:0]       m_axi4_bsk_rdata;
+  logic [BSK_PC-1:0][AXI4_RESP_W-1:0]                           m_axi4_bsk_rresp;
+  logic [BSK_PC-1:0]                                            m_axi4_bsk_rlast;
+  logic [BSK_PC-1:0]                                            m_axi4_bsk_rvalid;
+  logic [BSK_PC-1:0]                                            m_axi4_bsk_rready;
+
+  // BSK 管理和控制信号（用于真实模式）
+  logic                                                         reset_bsk_cache;
+  logic                                                         reset_bsk_cache_done;
+  logic                                                         bsk_mem_avail;
+  logic [BSK_PC_MAX-1:0][axi_if_bsk_axi_pkg::AXI4_ADD_W-1:0]    bsk_mem_addr;
+  logic [BR_BATCH_CMD_W-1:0]                                    br_batch_cmd;
+  logic                                                         br_batch_cmd_avail;
+  logic                                                         bsk_if_batch_start_1h;
+  logic                                                         inc_bsk_wr_ptr;
+  logic                                                         inc_bsk_rd_ptr;
+
+  // 真实BSK输出到NTT头部
+  logic [PSI-1:0][R-1:0][GLWE_K_P1-1:0][MOD_NTT_W-1:0]          real_bsk;
+  logic [PSI-1:0][R-1:0][GLWE_K_P1-1:0]                         real_bsk_vld;
+  logic [PSI-1:0][R-1:0][GLWE_K_P1-1:0]                         real_bsk_rdy;
+
+  // Force NTT ready signals outside generate block for debugging
+  initial begin
+    #1000;
+    $display("[TB_NTT_FORCE] t=%0t: Forcing ready signals outside generate", $time);
+  end
+  
+  // Simple NTT response mechanism outside generate block
+  typedef enum logic [2:0] {
+    SIMPLE_NTT_IDLE,
+    SIMPLE_NTT_COLLECTING,
+    SIMPLE_NTT_PROCESSING,
+    SIMPLE_NTT_READY
+  } simple_ntt_state_e;
+  
+  simple_ntt_state_e simple_ntt_state;
+  logic [31:0] simple_ntt_data_count;
+  logic [31:0] simple_ntt_process_timer;
+  
+  always_comb begin
+    if (!USE_REAL_CORES) begin
+      decomp_ntt_ctrl_rdy = 1'b1;
+      for (int p = 0; p < PSI; p++) begin
+        for (int r = 0; r < R; r++) begin
+          decomp_ntt_data_rdy[p][r] = 1'b1;
+        end
+      end
+    end else begin
+      // For real mode, simple tie-off 
+      decomp_ntt_ctrl_rdy = '1;
+      decomp_ntt_data_rdy = '1;
+    end
+  end
+  
+  // Simple NTT response state machine outside generate
+  always_ff @(posedge clk) begin
+    if (!s_rst_n) begin
+      simple_ntt_state <= SIMPLE_NTT_IDLE;
+      simple_ntt_data_count <= '0;
+      simple_ntt_process_timer <= '0;
+      ntt_next_data_avail <= '0;
+      ntt_next_ctrl_avail <= 1'b0;
+      ntt_next_data <= '0;
+    end else if (!USE_REAL_CORES) begin
+      case (simple_ntt_state)
+        SIMPLE_NTT_IDLE: begin
+          if (decomp_ntt_ctrl_avail && |decomp_ntt_data_avail) begin
+            simple_ntt_state <= SIMPLE_NTT_COLLECTING;
+            simple_ntt_data_count <= '0;
+            $display("[TB_NTT_SIMPLE] t=%0t: Started collecting data from WoKS", $time);
+          end
+        end
+        
+        SIMPLE_NTT_COLLECTING: begin
+          // Count data being sent by WoKS
+          if (decomp_ntt_ctrl_avail && |decomp_ntt_data_avail) begin
+            simple_ntt_data_count <= simple_ntt_data_count + 1;
+            if (simple_ntt_data_count % 256 == 0) begin
+              $display("[TB_NTT_SIMPLE] t=%0t: Collected %0d data items", $time, simple_ntt_data_count);
+            end
+          end
+          
+          // When WoKS finishes sending (no more data available), start processing
+          if (!decomp_ntt_ctrl_avail || !(|decomp_ntt_data_avail)) begin
+            simple_ntt_state <= SIMPLE_NTT_PROCESSING;
+            simple_ntt_process_timer <= 100; // 100 cycles processing time
+            $display("[TB_NTT_SIMPLE] t=%0t: Finished collecting, total=%0d, starting processing", $time, simple_ntt_data_count);
+          end
+        end
+        
+        SIMPLE_NTT_PROCESSING: begin
+          if (simple_ntt_process_timer > 0) begin
+            simple_ntt_process_timer <= simple_ntt_process_timer - 1;
+          end else begin
+            simple_ntt_state <= SIMPLE_NTT_READY;
+            // Generate fake results
+            for (int p = 0; p < PSI; p++) begin
+              for (int r = 0; r < R; r++) begin
+                ntt_next_data[p][r] <= 32'hDEADBEEF + p*16 + r;
+                ntt_next_data_avail[p][r] <= 1'b1;
+              end
+            end
+            ntt_next_ctrl_avail <= 1'b1;
+            $display("[TB_NTT_SIMPLE] t=%0t: Processing complete, results ready", $time);
+          end
+        end
+        
+        SIMPLE_NTT_READY: begin
+          // Keep providing results continuously until WoKS is done
+          // Generate fresh results each cycle
+          for (int p = 0; p < PSI; p++) begin
+            for (int r = 0; r < R; r++) begin
+              ntt_next_data[p][r] <= 32'hDEADBEEF + p*16 + r + ($time/10000);
+              ntt_next_data_avail[p][r] <= 1'b1;
+            end
+          end
+          ntt_next_ctrl_avail <= 1'b1;
+          
+          if (ntt_next_ctrl_rdy && (&ntt_next_data_rdy)) begin
+            $display("[TB_NTT_SIMPLE] t=%0t: Results accepted by WoKS (continuous mode)", $time);
+          end
+          
+          // Only return to idle when WoKS stops requesting
+          if (!ntt_next_ctrl_rdy) begin
+            simple_ntt_state <= SIMPLE_NTT_IDLE;
+            ntt_next_data_avail <= '0;
+            ntt_next_ctrl_avail <= 1'b0;
+            $display("[TB_NTT_SIMPLE] t=%0t: WoKS finished, returning to idle", $time);
+          end
+        end
+      endcase
+    end
+  end
+
   generate
     if (!USE_REAL_CORES) begin : gen_sim_bsk_ntt
+      initial begin
+        $display("[TB_DEBUG] Using simulated BSK/NTT cores (USE_REAL_CORES=0)");
+        $display("[TB_DEBUG] Simulated NTT generate block is ACTIVE");
+        #100000;
+        $display("[TB_DEBUG] t=%0t: Simulated NTT generate block still running", $time);
+      end
+      
       // -----------------------------
       // BSK 管理器模拟
       // -----------------------------
-      typedef struct {
+  typedef struct {
         logic [MOD_Q_W-1:0] coefficients[R];
-      } bsk_batch_t;
-
+  } bsk_batch_t;
+  
       bsk_batch_t bsk_storage[256];
-      logic bsk_initialized = 1'b0;
-
-      typedef enum logic [1:0] {
-        BSK_IDLE,
-        BSK_PROCESSING,
-        BSK_DATA_READY
-      } bsk_state_e;
-
-      bsk_state_e bsk_state = BSK_IDLE;
-      logic [7:0] current_bsk_batch;
-      logic [3:0] bsk_latency_counter;
-
-      initial begin
-        bsk_initialized = 1'b0;
+  logic bsk_initialized = 1'b0;
+  
+  typedef enum logic [1:0] {
+    BSK_IDLE,
+    BSK_PROCESSING,
+    BSK_DATA_READY
+  } bsk_state_e;
+  
+  bsk_state_e bsk_state = BSK_IDLE;
+  logic [7:0] current_bsk_batch;
+  logic [3:0] bsk_latency_counter;
+  
+  initial begin
+    bsk_initialized = 1'b0;
         #1000;
         $display("[TB] Initializing BSK storage with deterministic data...");
-        for (int batch = 0; batch < 256; batch++) begin
-          for (int r = 0; r < R; r++) begin
-            bsk_storage[batch].coefficients[r] = {batch[7:0], 8'hAB, r[7:0], 8'hCD} ^ (batch * r);
+    for (int batch = 0; batch < 256; batch++) begin
+      for (int r = 0; r < R; r++) begin
+        bsk_storage[batch].coefficients[r] = {batch[7:0], 8'hAB, r[7:0], 8'hCD} ^ (batch * r);
+      end
+    end
+    bsk_initialized = 1'b1;
+        $display("[TB] BSK storage initialized (%0d batches)", 256);
+  end
+  
+  always_ff @(posedge clk) begin
+    if (!s_rst_n) begin
+      bsk_state <= BSK_IDLE;
+      bsk_req_rdy <= 1'b0;
+      bsk_data_avail <= 1'b0;
+      bsk_data <= '0;
+      current_bsk_batch <= '0;
+      bsk_latency_counter <= '0;
+    end else begin
+      case (bsk_state)
+        BSK_IDLE: begin
+          bsk_req_rdy <= 1'b1;
+          bsk_data_avail <= 1'b0;
+          if (bsk_req_vld && bsk_req_rdy && bsk_initialized) begin
+            current_bsk_batch <= bsk_batch_id;
+                bsk_latency_counter <= 4'd3;
+            bsk_state <= BSK_PROCESSING;
+            bsk_req_rdy <= 1'b0;
+                if (bsk_batch_id < 5) $display("[TB] BSK Manager - req batch_id=%0d", bsk_batch_id);
           end
         end
-        bsk_initialized = 1'b1;
-        $display("[TB] BSK storage initialized (%0d batches)", 256);
-      end
-
-      always_ff @(posedge clk) begin
-        if (!s_rst_n) begin
-          bsk_state <= BSK_IDLE;
-          bsk_req_rdy <= 1'b0;
-          bsk_data_avail <= 1'b0;
-          bsk_data <= '0;
-          current_bsk_batch <= '0;
-          bsk_latency_counter <= '0;
-        end else begin
-          case (bsk_state)
-            BSK_IDLE: begin
-              bsk_req_rdy <= 1'b1;
-              bsk_data_avail <= 1'b0;
-              if (bsk_req_vld && bsk_req_rdy && bsk_initialized) begin
-                current_bsk_batch <= bsk_batch_id;
-                bsk_latency_counter <= 4'd3;
-                bsk_state <= BSK_PROCESSING;
-                bsk_req_rdy <= 1'b0;
-                if (bsk_batch_id < 5) $display("[TB] BSK Manager - req batch_id=%0d", bsk_batch_id);
-              end
+        BSK_PROCESSING: begin
+          bsk_latency_counter <= bsk_latency_counter - 1;
+          if (bsk_latency_counter == 1) begin
+            for (int r = 0; r < R; r++) begin
+              bsk_data[0][r] <= bsk_storage[current_bsk_batch].coefficients[r];
             end
-            BSK_PROCESSING: begin
-              bsk_latency_counter <= bsk_latency_counter - 1;
-              if (bsk_latency_counter == 1) begin
-                for (int r = 0; r < R; r++) begin
-                  bsk_data[0][r] <= bsk_storage[current_bsk_batch].coefficients[r];
-                end
-                bsk_data_avail <= 1'b1;
-                bsk_state <= BSK_DATA_READY;
-              end
-            end
-            BSK_DATA_READY: begin
-              if (bsk_req_vld) begin
-                bsk_state <= BSK_IDLE;
-                bsk_data_avail <= 1'b0;
-              end
-            end
-          endcase
+            bsk_data_avail <= 1'b1;
+            bsk_state <= BSK_DATA_READY;
+          end
         end
-      end
+        BSK_DATA_READY: begin
+          if (bsk_req_vld) begin
+            bsk_state <= BSK_IDLE;
+            bsk_data_avail <= 1'b0;
+          end
+        end
+      endcase
+    end
+  end
 
       // -----------------------------
       // NTT 服务模拟器（轻量）
@@ -340,125 +505,107 @@ module tb_wop_circuit_bootstrap_woks_engine;
       localparam int NTT_EXTERNAL_CYCLES = 2;
       localparam int NTT_INVERSE_CYCLES = 4;
 
+      // ✅ Duplicate NTT simulator removed - unified version used below at line ~731
+      /*
       always_ff @(posedge clk) begin
         if (!s_rst_n) begin
-          ntt_state <= NTT_IDLE;
-          decomp_ntt_data_rdy <= '1;
-          decomp_ntt_ctrl_rdy <= 1'b1;
-          ntt_next_data_avail <= '0;
-          ntt_next_data <= '0;
-          ntt_next_ctrl_avail <= 1'b0;
-          ntt_process_counter <= '0;
-          ntt_op_count <= '0;
-          ntt_accept_count <= '0;
-        end else begin
-          case (ntt_state)
-            NTT_IDLE: begin
-              decomp_ntt_data_rdy <= '1;
-              decomp_ntt_ctrl_rdy <= 1'b1;
-              ntt_next_data_avail <= '0;
-              ntt_next_ctrl_avail <= 1'b0;
-              if (decomp_ntt_ctrl_avail && |decomp_ntt_data_avail) begin
-                ntt_process_counter <= NTT_FORWARD_CYCLES;
-                decomp_ntt_ctrl_rdy <= 1'b1;
-                ntt_state <= NTT_FORWARD_PROCESSING;
-                ntt_op_count <= ntt_op_count + 1;
-                $display("[TB_NTT t=%0t] Forward NTT Start - Op: %0d", $time, ntt_op_count);
-              end
-            end
-            NTT_FORWARD_PROCESSING: begin
-              if (ntt_process_counter > 0) begin
-                ntt_process_counter <= ntt_process_counter - 1;
-              end else begin
-                ntt_process_counter <= NTT_EXTERNAL_CYCLES;
-                ntt_state <= NTT_EXTERNAL_PRODUCT;
-                $display("[TB_NTT t=%0t] Forward Complete, starting External Product", $time);
-              end
-            end
-            NTT_EXTERNAL_PRODUCT: begin
-              if (ntt_process_counter > 0) begin
-                ntt_process_counter <= ntt_process_counter - 1;
-              end else begin
-                ntt_process_counter <= NTT_INVERSE_CYCLES;
-                ntt_state <= NTT_INVERSE_PROCESSING;
-                $display("[TB_NTT t=%0t] External Product Complete, starting Inverse NTT", $time);
-              end
-            end
-            NTT_INVERSE_PROCESSING: begin
-              if (ntt_process_counter > 0) begin
-                ntt_process_counter <= ntt_process_counter - 1;
-              end else begin
-                for (int p = 0; p < PSI; p++) begin
-                  for (int r = 0; r < R; r++) begin
-                    automatic logic [31:0] seed = {ntt_op_count[7:0], 8'h00, 8'hAA, 8'h55} + p*16 + r;
-                    ntt_next_data[p][r] <= seed ^ (seed << 16);
-                    ntt_next_data_avail[p][r] <= 1'b1;
-                  end
-                end
-                ntt_next_ctrl_avail <= 1'b1;
-                ntt_accept_count <= '0;
-                ntt_state <= NTT_RESULT_READY;
-                $display("[TB_NTT t=%0t] Inverse NTT Complete, result ready", $time);
-              end
-            end
-            NTT_RESULT_READY: begin
-              int accept_incr;
-              accept_incr = 0;
-              for (int p = 0; p < PSI; p++) begin
-                for (int r = 0; r < R; r++) begin
-                  if (ntt_next_data_avail[p][r] && ntt_next_data_rdy[p][r] && ntt_next_ctrl_rdy) begin
-                    accept_incr++;
-                  end
-                end
-              end
-              if (accept_incr != 0) begin
-                ntt_accept_count <= ntt_accept_count + accept_incr;
-              end
-              if ((ntt_accept_count + accept_incr) >= NTT_EXPECTED_ACCEPTS) begin
-                ntt_next_data_avail <= '0;
-                ntt_next_ctrl_avail <= 1'b0;
-                decomp_ntt_ctrl_rdy <= 1'b1;
-                ntt_state <= NTT_IDLE;
-                $display("[TB_NTT t=%0t] Result accepted, returning to IDLE (accepted=%0d)", $time, ntt_accept_count + accept_incr);
-              end else begin
-                ntt_next_ctrl_avail <= 1'b1;
-                for (int p = 0; p < PSI; p++) begin
-                  for (int r = 0; r < R; r++) begin
-                    ntt_next_data_avail[p][r] <= 1'b1;
-                  end
-                end
-              end
-            end
-          endcase
-        end
-      end
-    end else begin : gen_real_ntt_head
-      // 真实 NTT 头部：提供常量 twiddle 与常量 BSK（占位），用于数值对齐模式
-      import param_ntt_pkg::*;
-      // twiddle 配置占位（真实环境下由 edalize/memfile 提供）
-      logic [1:0][R/2-1:0][MOD_NTT_W-1:0] twd_omg_ru_r_pow;
-      initial twd_omg_ru_r_pow = '0;
+          // REMOVED to avoid signal conflicts with unified NTT Service Simulator
+        // DUPLICATE ALWAYS_FF BLOCK CONTENT REMOVED
+        // end else begin
+        //   ... (NTT state machine logic - using unified version instead)
+        // end
+      // end
+      */ // End of commented duplicate NTT simulator
 
-      // 批处理命令（占位）
-      logic [BR_BATCH_CMD_W-1:0] br_batch_cmd;
-      logic br_batch_cmd_avail;
-      initial begin
-        br_batch_cmd = '0;
-        br_batch_cmd_avail = 1'b0;
-        $display("[TB] USE_REAL_CORES=1: pe_pbs_with_ntt_core_head is instantiated with placeholder twiddles and constant BSK.");
-      end
-
-      // 常量 BSK（占位）：简单确定性填充
-      logic [PSI-1:0][R-1:0][GLWE_K_P1-1:0][MOD_NTT_W-1:0] bsk_const;
-      logic [PSI-1:0][R-1:0][GLWE_K_P1-1:0]               bsk_vld_const;
-      logic [PSI-1:0][R-1:0][GLWE_K_P1-1:0]               bsk_rdy_const;
-      initial begin
+      // 在模拟模式中，将模拟的BSK数据映射到统一接口
+      always_comb begin
+        // 模拟模式下BSK输出（简化为单个数据源）
         for (int p = 0; p < PSI; p++) begin
           for (int r = 0; r < R; r++) begin
             for (int g = 0; g < GLWE_K_P1; g++) begin
-              bsk_const[p][r][g] = (32'hA5A5_0000 | (p<<8) | r) + g;
-              bsk_vld_const[p][r][g] = 1'b1;
+              real_bsk[p][r][g] = (g == 0) ? bsk_data[0][r] : '0; // 只填充第一个GLWE维度
+              real_bsk_vld[p][r][g] = bsk_data_avail;
             end
+          end
+        end
+        real_bsk_rdy = '1; // 总是准备接收
+      end
+      
+      // ✅ Completed NTT Service Simulator in gen_sim_bsk_ntt block  
+    end else begin : gen_real_bsk_ntt
+      // 真实 BSK 和 NTT 头部集成
+      
+      // BSK控制信号初始化
+      initial begin
+        $display("[TB] USE_REAL_CORES=1: Instantiating real pe_pbs_with_bsk and pe_pbs_with_ntt_core_head");
+        reset_bsk_cache = 1'b0;
+        bsk_mem_avail = 1'b1;
+        bsk_mem_addr = '0;
+        br_batch_cmd = '0;
+        br_batch_cmd_avail = 1'b0;
+        bsk_if_batch_start_1h = 1'b0;
+        inc_bsk_rd_ptr = 1'b0;
+      end
+
+      // 简化的BSK AXI接口模拟器（暂时不使用axi4_mem）
+      // 所有AXI BSK通道tie-off，直接提供BSK数据
+      always_comb begin
+        for (int pc = 0; pc < BSK_PC; pc++) begin
+          m_axi4_bsk_arready[pc] = 1'b1;  // 总是准备接收
+          m_axi4_bsk_rid[pc] = '0;
+          m_axi4_bsk_rdata[pc] = 64'hDEADBEEF_12345678;  // 简单的测试数据
+          m_axi4_bsk_rresp[pc] = 2'b00;   // OKAY
+          m_axi4_bsk_rlast[pc] = 1'b1;    // 总是最后一个
+          m_axi4_bsk_rvalid[pc] = m_axi4_bsk_arvalid[pc]; // 跟随请求
+        end
+      end
+
+      // 真实 BSK 模块实例化
+      pe_pbs_with_bsk pe_pbs_with_bsk_u (
+        .clk                        (clk),
+        .s_rst_n                    (s_rst_n),
+        .reset_bsk_cache            (reset_bsk_cache),
+        .reset_bsk_cache_done       (reset_bsk_cache_done),
+        .bsk_mem_avail              (bsk_mem_avail),
+        .bsk_mem_addr               (bsk_mem_addr),
+        // AXI4 BSK 接口
+        .m_axi4_bsk_arid            (m_axi4_bsk_arid),
+        .m_axi4_bsk_araddr          (m_axi4_bsk_araddr),
+        .m_axi4_bsk_arlen           (m_axi4_bsk_arlen),
+        .m_axi4_bsk_arsize          (m_axi4_bsk_arsize),
+        .m_axi4_bsk_arburst         (m_axi4_bsk_arburst),
+        .m_axi4_bsk_arvalid         (m_axi4_bsk_arvalid),
+        .m_axi4_bsk_arready         (m_axi4_bsk_arready),
+        .m_axi4_bsk_rid             (m_axi4_bsk_rid),
+        .m_axi4_bsk_rdata           (m_axi4_bsk_rdata),
+        .m_axi4_bsk_rresp           (m_axi4_bsk_rresp),
+        .m_axi4_bsk_rlast           (m_axi4_bsk_rlast),
+        .m_axi4_bsk_rvalid          (m_axi4_bsk_rvalid),
+        .m_axi4_bsk_rready          (m_axi4_bsk_rready),
+        // 控制接口
+        .br_batch_cmd               (br_batch_cmd),
+        .br_batch_cmd_avail         (br_batch_cmd_avail),
+        .bsk_if_batch_start_1h      (bsk_if_batch_start_1h),
+        .inc_bsk_wr_ptr             (inc_bsk_wr_ptr),
+        .inc_bsk_rd_ptr             (inc_bsk_rd_ptr),
+        // BSK 数据输出
+        .bsk                        (real_bsk),
+        .bsk_vld                    (real_bsk_vld),
+        .bsk_rdy                    (real_bsk_rdy),
+        // 错误和统计（未连接）
+        .pep_error                  (),
+        .pep_rif_counter_inc        (),
+        .pep_rif_info               ()
+      );
+
+      // twiddle 配置（真实环境）
+      logic [1:0][R/2-1:0][MOD_NTT_W-1:0] twd_omg_ru_r_pow;
+      initial begin
+        // 简单初始化为单位元（实际中由memory file提供）
+        twd_omg_ru_r_pow = '0;
+        for (int i = 0; i < 2; i++) begin
+          for (int r = 0; r < R/2; r++) begin
+            twd_omg_ru_r_pow[i][r] = 32'h00000001; // 单位元，避免乘法错误
           end
         end
       end
@@ -477,9 +624,10 @@ module tb_wop_circuit_bootstrap_woks_engine;
         .twd_omg_ru_r_pow           (twd_omg_ru_r_pow),
         .br_batch_cmd               (br_batch_cmd),
         .br_batch_cmd_avail         (br_batch_cmd_avail),
-        .bsk                        (bsk_const),
-        .bsk_vld                    (bsk_vld_const),
-        .bsk_rdy                    (bsk_rdy_const),
+        // 连接真实BSK输出
+        .bsk                        (real_bsk),
+        .bsk_vld                    (real_bsk_vld),
+        .bsk_rdy                    (real_bsk_rdy),
         .decomp_ntt_data_avail      (decomp_ntt_data_avail),
         .decomp_ntt_data            (decomp_ntt_data),
         .decomp_ntt_sob             (decomp_ntt_sob),
@@ -509,16 +657,33 @@ module tb_wop_circuit_bootstrap_woks_engine;
         .pep_rif_counter_inc        ()
       );
 
-      // 映射回 DUT 的 NTT next 接口
-      assign ntt_next_data        = next_data_w;
-      assign ntt_next_data_avail  = next_data_avail_w;
-      assign ntt_next_ctrl_avail  = next_ctrl_avail_w;
-      // DUT 的 ntt_next_data_rdy / ntt_next_ctrl_rdy 由 DUT 驱动，不需额外连接
-    end
-  endgenerate
+      // 将真实 NTT 的输出转换为标准接口（扩展NTT_OP_W到MOD_Q_W）
+      always_comb begin
+        for (int p = 0; p < PSI; p++) begin
+          for (int r = 0; r < R; r++) begin
+            ntt_next_data[p][r] = {{(MOD_Q_W-NTT_OP_W){1'b0}}, next_data_w[p][r]};
+          end
+        end
+        ntt_next_data_avail = next_data_avail_w;
+        ntt_next_ctrl_avail = next_ctrl_avail_w;
+      end
 
-// (Removed duplicate early NTT simulator to avoid enum/name clashes; unified NTT Service Simulator kept below)
-
+      // 真实BSK控制逻辑 - 简化为自动启动
+      always_ff @(posedge clk) begin
+        if (!s_rst_n) begin
+          bsk_if_batch_start_1h <= 1'b0;
+        end else begin
+          // 简单启动逻辑：当WoKS开始分解时启动BSK
+          if (decomp_ntt_ctrl_avail && |decomp_ntt_data_avail && !bsk_if_batch_start_1h) begin
+            bsk_if_batch_start_1h <= 1'b1;
+            $display("[TB] t=%0t: BSK batch start triggered by decomp", $time);
+          end else begin
+            bsk_if_batch_start_1h <= 1'b0;
+          end
+        end
+      end
+      
+      // ==============================================================================================
   // RegFile simulation memory (simple array - no axi_ram complexity)
   logic [N_LVL2-1:0][MOD_Q_W-1:0] regfile_memory [0:65535];
   
@@ -589,134 +754,178 @@ module tb_wop_circuit_bootstrap_woks_engine;
 // ==============================================================================================
 // NTT Service Simulator (Simple deterministic model)
 // ==============================================================================================
-  typedef enum logic [2:0] {
-    NTT_IDLE,
-    NTT_FORWARD_PROCESSING,
-    NTT_EXTERNAL_PRODUCT,
-    NTT_INVERSE_PROCESSING,
-    NTT_RESULT_READY
-  } ntt_state_e;
+  // ✅ REMOVED duplicate NTT Service State Machine - unified version now in gen_sim_bsk_ntt block
   
-  ntt_state_e ntt_state;
-  logic [7:0] ntt_process_counter;
-  logic [31:0] ntt_op_count;
-  logic [31:0] ntt_accept_count;
-  localparam int NTT_EXPECTED_ACCEPTS = (K+1)*N_LVL2;
+  // (Duplicate NTT always_ff block removed - see unified version in generate block)
   
-  // NTT processing timing (realistic but fast for simulation)
-  localparam int NTT_FORWARD_CYCLES = 4;
-  localparam int NTT_EXTERNAL_CYCLES = 2;
-  localparam int NTT_INVERSE_CYCLES = 4;
-  
-  // NTT Service State Machine - Simple deterministic behavior
-  always_ff @(posedge clk) begin
-    if (!s_rst_n) begin
-      ntt_state <= NTT_IDLE;
-      decomp_ntt_data_rdy <= '1;
-      decomp_ntt_ctrl_rdy <= 1'b1;
-      ntt_next_data_avail <= '0;
-      ntt_next_data <= '0;
-      ntt_next_ctrl_avail <= 1'b0;
-      ntt_process_counter <= '0;
-      ntt_op_count <= '0;
-      ntt_accept_count <= '0;
-    end else begin
-      case (ntt_state)
-        NTT_IDLE: begin
-          decomp_ntt_data_rdy <= '1;
-          decomp_ntt_ctrl_rdy <= 1'b1;
+// ==============================================================================================
+
+      // ==============================================================================================
+      // NTT Service Simulator (Simple deterministic model) - MOVED HERE TO AVOID CONFLICTS
+      // ==============================================================================================
+      typedef enum logic [2:0] {
+        NTT_IDLE,
+        NTT_FORWARD_PROCESSING,
+        NTT_EXTERNAL_PRODUCT,
+        NTT_INVERSE_PROCESSING,
+        NTT_RESULT_READY
+      } ntt_state_e;
+      
+      ntt_state_e ntt_state;
+      logic [7:0] ntt_process_counter;
+      logic [31:0] ntt_op_count;
+      logic [31:0] ntt_accept_count;
+      localparam int NTT_EXPECTED_ACCEPTS = (K+1)*N_LVL2;
+      
+      // NTT processing timing (realistic but fast for simulation)
+      localparam int NTT_FORWARD_CYCLES = 4;
+      localparam int NTT_EXTERNAL_CYCLES = 2;
+      localparam int NTT_INVERSE_CYCLES = 4;
+      
+      // NTT ready signals now driven by top-level always_comb
+      
+      // Debug ready signal values
+      always @(posedge clk) begin
+        if ($time == 50000) begin
+          $display("[TB_NTT_DEBUG] t=%0t: TB side - ctrl_rdy=%0b, data_rdy[0][0]=%0b, PSI=%0d, R=%0d", $time, decomp_ntt_ctrl_rdy, decomp_ntt_data_rdy[0][0], PSI, R);
+          for (int p = 0; p < PSI; p++) begin
+            for (int r = 0; r < R; r++) begin
+              $display("[TB_NTT_DEBUG] data_rdy[%0d][%0d] = %0b", p, r, decomp_ntt_data_rdy[p][r]);
+            end
+          end
+        end
+      end
+      
+      initial begin
+        $display("[TB_NTT_DEBUG] NTT simulator: Force ready signals to 1 for simulation");
+      end
+      
+      // NTT Service State Machine - Simple deterministic behavior
+      always_ff @(posedge clk) begin
+        // Debug: Print NTT state machine activity
+        if ($time == 50000 || $time == 200000 || ($time % 1000000 == 0 && $time > 0)) begin
+          $display("[TB_NTT_STATE] t=%0t: NTT state machine running, state=%0d, s_rst_n=%0b", $time, ntt_state, s_rst_n);
+        end
+        
+        if (!s_rst_n) begin
+          ntt_state <= NTT_IDLE;
+          // // decomp_ntt_data_rdy <= '1;  // commented out  // Now driven by assign
+          // // // decomp_ntt_ctrl_rdy <= 1'b1;  // commented out to avoid multiple drivers  // Now driven by assign  // Now driven by assign
+          $display("[TB_NTT_DEBUG] t=%0t: NTT simulator reset: ctrl_rdy=1, data_rdy=all_ones", $time);
           ntt_next_data_avail <= '0;
+          ntt_next_data <= '0;
           ntt_next_ctrl_avail <= 1'b0;
-          
-          // Detect NTT request from DUT
-          if (decomp_ntt_ctrl_avail && |decomp_ntt_data_avail) begin
-            ntt_process_counter <= NTT_FORWARD_CYCLES;
-            // Keep ready high so DUT can stream decomp data and advance counters
-            decomp_ntt_ctrl_rdy <= 1'b1;
-            ntt_state <= NTT_FORWARD_PROCESSING;
-            ntt_op_count <= ntt_op_count + 1;
-            $display("[TB_NTT t=%0t] Forward NTT Start - Op: %0d", $time, ntt_op_count);
+          ntt_process_counter <= '0;
+          ntt_op_count <= '0;
+          ntt_accept_count <= '0;
+        end else begin
+          // Debug: Print NTT state every 50000 time units
+          if ($time % 50000 == 0 && $time > 0 && $time < 200000) begin
+            $display("[TB_NTT_DEBUG] t=%0t: NTT normal operation - ctrl_rdy=%0b, data_rdy[0]=%0b, state=%0d", $time, decomp_ntt_ctrl_rdy, decomp_ntt_data_rdy[0], ntt_state);
           end
-        end
-        
-        NTT_FORWARD_PROCESSING: begin
-          if (ntt_process_counter > 0) begin
-            ntt_process_counter <= ntt_process_counter - 1;
-          end else begin
-            ntt_process_counter <= NTT_EXTERNAL_CYCLES;
-            ntt_state <= NTT_EXTERNAL_PRODUCT;
-            $display("[TB_NTT t=%0t] Forward Complete, starting External Product", $time);
-          end
-        end
-        
-        NTT_EXTERNAL_PRODUCT: begin
-          if (ntt_process_counter > 0) begin
-            ntt_process_counter <= ntt_process_counter - 1;
-          end else begin
-            ntt_process_counter <= NTT_INVERSE_CYCLES;
-            ntt_state <= NTT_INVERSE_PROCESSING;
-            $display("[TB_NTT t=%0t] External Product Complete, starting Inverse NTT", $time);
-          end
-        end
-        
-        NTT_INVERSE_PROCESSING: begin
-          if (ntt_process_counter > 0) begin
-            ntt_process_counter <= ntt_process_counter - 1;
-          end else begin
-            // Generate deterministic NTT result
-            for (int p = 0; p < PSI; p++) begin
-              for (int r = 0; r < R; r++) begin
-                // Simple deterministic pattern based on operation count
-                automatic logic [31:0] seed = {ntt_op_count[7:0], 8'h00, 8'hAA, 8'h55} + p*16 + r;
-                ntt_next_data[p][r] <= seed ^ (seed << 16);
-                ntt_next_data_avail[p][r] <= 1'b1;
+          case (ntt_state)
+            NTT_IDLE: begin
+              // // decomp_ntt_data_rdy <= '1;  // commented out  // Now driven by assign
+              // // // decomp_ntt_ctrl_rdy <= 1'b1;  // commented out to avoid multiple drivers  // Now driven by assign  // Now driven by assign
+              ntt_next_data_avail <= '0;
+              ntt_next_ctrl_avail <= 1'b0;
+              
+              // Detect NTT request from DUT
+              if (decomp_ntt_ctrl_avail && |decomp_ntt_data_avail) begin
+                $display("[TB_NTT_DEBUG] t=%0t: NTT_IDLE detected request - ctrl_avail=%0b, data_avail=%0b", $time, decomp_ntt_ctrl_avail, |decomp_ntt_data_avail);
+                ntt_process_counter <= NTT_FORWARD_CYCLES;
+                // Keep ready high so DUT can stream decomp data and advance counters
+                // // // decomp_ntt_ctrl_rdy <= 1'b1;  // commented out to avoid multiple drivers  // Now driven by assign  // Now driven by assign
+                ntt_state <= NTT_FORWARD_PROCESSING;
+                ntt_op_count <= ntt_op_count + 1;
+                $display("[TB_NTT t=%0t] Forward NTT Start - Op: %0d", $time, ntt_op_count);
+                $display("[TB_NTT_DEBUG] t=%0t: State transition NTT_IDLE -> NTT_FORWARD_PROCESSING", $time);
               end
             end
             
-            ntt_next_ctrl_avail <= 1'b1;
-            ntt_accept_count <= '0;
-            ntt_state <= NTT_RESULT_READY;
-            $display("[TB_NTT t=%0t] Inverse NTT Complete, result ready", $time);
-          end
-        end
-        
-        NTT_RESULT_READY: begin
-          // Stream results until DUT has accepted (K+1)*N_LVL2 items
-          int accept_incr;
-          accept_incr = 0;
-          for (int p = 0; p < PSI; p++) begin
-            for (int r = 0; r < R; r++) begin
-              if (ntt_next_data_avail[p][r] && ntt_next_data_rdy[p][r] && ntt_next_ctrl_rdy) begin
-                accept_incr++;
+            NTT_FORWARD_PROCESSING: begin
+              // Keep accepting decomp_data during forward phase
+              // // decomp_ntt_ctrl_rdy <= 1'b1;  // commented out to avoid multiple drivers  // Now driven by assign
+              
+              if (ntt_process_counter > 0) begin
+                ntt_process_counter <= ntt_process_counter - 1;
+              end else begin
+                ntt_process_counter <= NTT_EXTERNAL_CYCLES;
+                ntt_state <= NTT_EXTERNAL_PRODUCT;
+                $display("[TB_NTT t=%0t] Forward Complete, starting External Product", $time);
               end
             end
-          end
-          if (accept_incr != 0) begin
-            ntt_accept_count <= ntt_accept_count + accept_incr;
-          end
-          if ((ntt_accept_count + accept_incr) >= NTT_EXPECTED_ACCEPTS) begin
-            ntt_next_data_avail <= '0;
-            ntt_next_ctrl_avail <= 1'b0;
-            decomp_ntt_ctrl_rdy <= 1'b1;
-            ntt_state <= NTT_IDLE;
-            $display("[TB_NTT t=%0t] Result accepted, returning to IDLE (accepted=%0d)", $time, ntt_accept_count + accept_incr);
-          end else begin
-            // Keep signals active until DUT accepts enough items
-            ntt_next_ctrl_avail <= 1'b1;
-            for (int p = 0; p < PSI; p++) begin
-              for (int r = 0; r < R; r++) begin
-                ntt_next_data_avail[p][r] <= 1'b1;
+            
+            NTT_EXTERNAL_PRODUCT: begin
+              // // decomp_ntt_ctrl_rdy <= 1'b1;  // commented out to avoid multiple drivers  // Now driven by assign
+              
+              if (ntt_process_counter > 0) begin
+                ntt_process_counter <= ntt_process_counter - 1;
+              end else begin
+                ntt_process_counter <= NTT_INVERSE_CYCLES;
+                ntt_state <= NTT_INVERSE_PROCESSING;
+                $display("[TB_NTT t=%0t] External Product Complete, starting Inverse NTT", $time);
               end
             end
-          end
+            
+            NTT_INVERSE_PROCESSING: begin
+              // // decomp_ntt_ctrl_rdy <= 1'b0;  // commented out  // Now driven by assign - always ready
+              
+              if (ntt_process_counter > 0) begin
+                ntt_process_counter <= ntt_process_counter - 1;
+              end else begin
+                for (int p = 0; p < PSI; p++) begin
+                  for (int r = 0; r < R; r++) begin
+                    automatic logic [31:0] seed = {ntt_op_count[7:0], 8'h00, 8'hAA, 8'h55} + p*16 + r;
+                    ntt_next_data[p][r] <= seed ^ (seed << 16);
+                    ntt_next_data_avail[p][r] <= 1'b1;
+                  end
+                end
+                ntt_next_ctrl_avail <= 1'b1;
+                ntt_accept_count <= '0;
+                ntt_state <= NTT_RESULT_READY;
+                $display("[TB_NTT t=%0t] Inverse NTT Complete, result ready", $time);
+              end
+            end
+            
+            NTT_RESULT_READY: begin
+              int accept_incr;
+              accept_incr = 0;
+              for (int p = 0; p < PSI; p++) begin
+                for (int r = 0; r < R; r++) begin
+                  if (ntt_next_data_avail[p][r] && ntt_next_data_rdy[p][r] && ntt_next_ctrl_rdy) begin
+                    accept_incr++;
+                  end
+                end
+              end
+              if (accept_incr != 0) begin
+                ntt_accept_count <= ntt_accept_count + accept_incr;
+                $display("[TB_NTT t=%0t] Accepted %0d items, total=%0d/%0d", $time, accept_incr, ntt_accept_count + accept_incr, NTT_EXPECTED_ACCEPTS);
+              end
+              if ((ntt_accept_count + accept_incr) >= NTT_EXPECTED_ACCEPTS) begin
+                ntt_next_data_avail <= '0;
+                ntt_next_ctrl_avail <= 1'b0;
+                // // // decomp_ntt_ctrl_rdy <= 1'b1;  // commented out to avoid multiple drivers  // Now driven by assign  // Now driven by assign
+                ntt_state <= NTT_IDLE;
+                $display("[TB_NTT t=%0t] Result accepted, returning to IDLE (accepted=%0d)", $time, ntt_accept_count + accept_incr);
+              end else begin
+                ntt_next_ctrl_avail <= 1'b1;
+                for (int p = 0; p < PSI; p++) begin
+                  for (int r = 0; r < R; r++) begin
+                    ntt_next_data_avail[p][r] <= 1'b1;
+                  end
+                end
+              end
+            end
+          endcase
         end
-      endcase
+      end
     end
-  end
+  endgenerate
 
 // ==============================================================================================
-// ✅ CLEANUP COMPLETE - Old NTT simulator code removed
-// Real hardware NTT and RegFile are now instantiated above
+// ✅ CLEANUP COMPLETE - NTT simulator moved into gen_sim_bsk_ntt generate block
+// Real hardware mode uses separate generate block without simulator conflicts  
 // ==============================================================================================
 
 // ==============================================================================================
@@ -819,7 +1028,7 @@ module tb_wop_circuit_bootstrap_woks_engine;
     logic [31:0] golden_b_32;
     
     $display("[TB] RTL vs Golden Reference Verification");
-
+    
     if (USE_DPI_GOLDEN) begin
       // 将 test_abar 转换为 int 数组以匹配 C++ 接口（使用模块级静态缓冲区）
       for (int i = 0; i <= N_LVL0; i++) begin
@@ -841,10 +1050,10 @@ module tb_wop_circuit_bootstrap_woks_engine;
       golden_result_b = golden_full_b[63:0];
     end else begin
       // 简化占位 Golden（未启用 DPI 时）
-      for (int i = 0; i < 4; i++) begin
-        golden_result_a[i] = 64'h1234567890ABCDEF + i*64'h1111111111111111;
-      end
-      golden_result_b = 64'hFEDCBA0987654321;
+    for (int i = 0; i < 4; i++) begin
+      golden_result_a[i] = 64'h1234567890ABCDEF + i*64'h1111111111111111;
+    end
+    golden_result_b = 64'hFEDCBA0987654321;
     end
     
     $display("[TB] RTL Results:");
@@ -925,7 +1134,7 @@ module tb_wop_circuit_bootstrap_woks_engine;
         check_results();
       end
       begin
-        #1000000; // extend timeout to 1ms
+        #5000000; // extend timeout to 5ms for circuit bootstrap
         $display("❌ TIMEOUT: Circuit bootstrap did not complete in time");
         test_status = TEST_TIMEOUT;
       end

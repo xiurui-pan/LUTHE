@@ -22,6 +22,40 @@
             "env": ["simu"],
             "target": ["all"],
             "is_include_file": false
+        },
+        {
+            "name": "hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/gen/rtl/param_tfhe_definition_pkg.sv",
+            "library": "work",
+            "env": ["simu"],
+            "target": ["all"],
+            "is_include_file": false,
+            "is_generated": true,
+            "APPLICATION": "APPLI_simu"
+        },
+        {
+            "name": "hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/gen/rtl/regf_common_definition_pkg.sv",
+            "library": "work",
+            "env": ["simu"],
+            "target": ["all"],
+            "is_include_file": false,
+            "is_generated": true,
+            "REGF_STRUCT": "REGF_STRUCT_reg64_coef32_seq4"
+        },
+        {
+            "name": "hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/gen/rtl/ntt_core_common_r_definition_pkg.sv",
+            "library": "work",
+            "env": ["simu"],
+            "target": ["all"],
+            "is_include_file": false,
+            "is_generated": true
+        },
+        {
+            "name": "hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/gen/rtl/ntt_core_common_psi_definition_pkg.sv",
+            "library": "work",
+            "env": ["simu"],
+            "target": ["all"],
+            "is_include_file": false,
+            "is_generated": true
         }
     ],
     "dependency_dir": [

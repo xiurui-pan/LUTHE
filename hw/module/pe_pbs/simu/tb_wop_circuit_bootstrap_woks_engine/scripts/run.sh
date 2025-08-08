@@ -38,6 +38,8 @@ echo "-j                       : Regfile number of coefficients (default 32)"
 echo "-k                       : Regfile number of sequences (default 4)"
 echo "-- <run_edalize options> : run_edalize options."
 echo "--real                   : use real NTT head in TB (USE_REAL_CORES=1)"
+echo "--dpi-golden             : enable DPI CPP golden (USE_DPI_GOLDEN=1)"
+echo "--golden-compare         : after sim, run standalone C++ golden and compare low32 of a0-3,b"
 
 }
 
@@ -68,6 +70,8 @@ REGF_SEQ=4
 
 # Initialize your own variables here:
 USE_REAL=0
+USE_DPI_GOLDEN=0
+USE_GOLDEN_COMPARE=0
 while getopts "hzg:W:0:2:E:K:P:R:i:j:k:q:-:" opt; do
   case "$opt" in
     h)
@@ -87,6 +91,12 @@ while getopts "hzg:W:0:2:E:K:P:R:i:j:k:q:-:" opt; do
       case "$OPTARG" in
         real)
           USE_REAL=1
+          ;;
+        dpi-golden)
+          USE_DPI_GOLDEN=1
+          ;;
+        golden-compare)
+          USE_GOLDEN_COMPARE=1
           ;;
         *)
           echo "Invalid long option: --$OPTARG"
@@ -210,6 +220,11 @@ if [ $USE_REAL -eq 1 ]; then
   echo "INFO> USE_REAL_CORES=1 (real NTT head enabled)"
 fi
 
+if [ $USE_DPI_GOLDEN -eq 1 ]; then
+  eda_args="$eda_args -P USE_DPI_GOLDEN int 1"
+  echo "INFO> USE_DPI_GOLDEN=1 (DPI CPP golden enabled)"
+fi
+
 ###################################################################################################
 # Run_edalize configure
 ###################################################################################################
@@ -245,3 +260,14 @@ $run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -k keep $eda_args $args 2>&1 \
   | tee ${OUT_LOG} \
   | grep -v "WARNING>" \
   | egrep -i "TEST STATUS|TEST PASSED|TEST FAILED|TIMEOUT|\\[TB_|Circuit bootstrap|Starting|completed|Result|SAMPLE_EXTRACT|^ERROR:|^FATAL:" || true
+
+# Optional: run standalone C++ golden and compare low32 of a0-3,b
+if [ $USE_GOLDEN_COMPARE -eq 1 ]; then
+  echo "INFO> Building and running standalone C++ golden"
+  pushd $(dirname $0) >/dev/null
+  g++ -O2 -std=c++17 circuit_bootstrap_golden.cpp cb_golden_main.cpp -o cb_golden || exit 1
+  ./cb_golden ${N_LVL0} ${N_LVL2} | tail -n 1 | tee ${work_dir}/output/golden_cpp.txt
+  popd >/dev/null
+
+  echo "INFO> Comparing TB low32 vs CPP golden (manual visual compare in logs)."
+fi

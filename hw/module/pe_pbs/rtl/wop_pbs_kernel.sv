@@ -545,8 +545,8 @@ module wop_pbs_kernel
   // 2. Circuit Bootstrap WoKS Engine (core of circuit bootstrapping)
   logic circuit_bs_start;
   logic circuit_bs_done;
-  logic [MOD_Q_W-1:0] mu_value;
-  logic [N_LVL0:0][31:0] abar_data;
+  logic [63:0] mu_value;
+  logic [N_LVL0:0][63:0] abar_data;
   logic abar_valid;
   logic [N_LVL2-1:0][MOD_Q_W-1:0] circuit_bs_result_a;
   logic [MOD_Q_W-1:0] circuit_bs_result_b;
@@ -568,7 +568,7 @@ module wop_pbs_kernel
   // 通过共享的NTT引擎进行前向/反向NTT和外部积计算
   
   wop_circuit_bootstrap_woks_engine #(
-    .MOD_Q_W(MOD_Q_W),
+    .MOD_Q_W(64),
     .N_LVL0(N_LVL0),
     .N_LVL2(N_LVL2),
     .ELL_LVL2(ELL_LVL2),
@@ -1000,7 +1000,7 @@ module wop_pbs_kernel
   // Based on preModSwitch() function in circuit_bootstrapping.cpp
   logic premodswitch_start;
   logic premodswitch_done;
-  logic [N_LVL0:0][31:0] premodswitch_result;
+  logic [N_LVL0:0][63:0] premodswitch_result;
   
   wop_premodswitch_engine #(
     .N_LVL0(N_LVL0),
@@ -1144,18 +1144,14 @@ module wop_pbs_kernel
     // Output data to circuit bootstrap
     .next_data(ntt_next_data),
     .next_data_avail(ntt_next_data_avail),
-    .next_data_rdy(ntt_next_data_rdy),
-    .next_ctrl_avail(ntt_next_ctrl_avail),
-    .next_ctrl_rdy(ntt_next_ctrl_rdy),
-    
-    // Other signals (not used by circuit bootstrap)
-    .accumulator_add_mode(1'b0),
-    .accumulator_add_en('0),
-    .accumulator_result('0),
-    .accumulator_result_avail('0),
-    .accumulator_result_rdy('1),
-    .accumulator_ctrl_avail(1'b0),
-    .accumulator_ctrl_rdy(/* open */)
+    .next_sob(),
+    .next_eob(),
+    .next_sol(),
+    .next_eol(),
+    .next_sos(),
+    .next_eos(),
+    .next_pbs_id(),
+    .next_ctrl_avail(ntt_next_ctrl_avail)
   );
   
   // ✅ NTT ready信号现在由Circuit Bootstrap Engine控制

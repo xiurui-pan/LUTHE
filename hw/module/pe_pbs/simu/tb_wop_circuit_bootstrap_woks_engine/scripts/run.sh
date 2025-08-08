@@ -40,6 +40,7 @@ echo "-- <run_edalize options> : run_edalize options."
 echo "--real                   : use real NTT head in TB (USE_REAL_CORES=1)"
 echo "--dpi-golden             : enable DPI CPP golden (USE_DPI_GOLDEN=1)"
 echo "--golden-compare         : after sim, run standalone C++ golden and compare low32 of a0-3,b"
+echo "--real-profile <name>    : preset params and generate NTT arch/psi pkgs (e.g., gf64_r2_psi16)"
 
 }
 
@@ -72,6 +73,7 @@ REGF_SEQ=4
 USE_REAL=0
 USE_DPI_GOLDEN=0
 USE_GOLDEN_COMPARE=0
+REAL_PROFILE=""
 while getopts "hzg:W:0:2:E:K:P:R:i:j:k:q:-:" opt; do
   case "$opt" in
     h)
@@ -97,6 +99,11 @@ while getopts "hzg:W:0:2:E:K:P:R:i:j:k:q:-:" opt; do
           ;;
         golden-compare)
           USE_GOLDEN_COMPARE=1
+          ;;
+        real-profile)
+          # get next argument as value for real-profile
+          REAL_PROFILE=${!OPTIND}
+          OPTIND=$((OPTIND+1))
           ;;
         *)
           echo "Invalid long option: --$OPTARG"
@@ -175,6 +182,24 @@ if [ $GEN_STIMULI -eq 1 ] ; then
   echo "INFO> Running : $pkg_cmd"
   $pkg_cmd || exit 1
 
+  # Generate NTT core common arch/psi override packages when real profile requested
+  if [ -n "$REAL_PROFILE" ]; then
+    case "$REAL_PROFILE" in
+      gf64_r2_psi16)
+        R=2; PSI=16
+        arch="NTT_CORE_ARCH_gf64"
+        psi_val=16
+        ;;
+      *)
+        echo "ERROR> Unknown --real-profile: $REAL_PROFILE"; exit 1;;
+    esac
+    echo "INFO> Generating NTT arch/psi packages for profile $REAL_PROFILE (R=$R PSI=$PSI)"
+    arch_pkg_cmd="python3 ${PROJECT_DIR}/hw/module/number_theoretic_transform/module/ntt_core_common/scripts/gen_ntt_core_common_arch_definition_pkg.py -f -a ${arch} -o ${RTL_DIR}/ntt_core_common_arch_definition_pkg.sv"
+    echo "INFO> Running : $arch_pkg_cmd"; $arch_pkg_cmd || exit 1
+    psi_pkg_cmd="python3 ${PROJECT_DIR}/hw/module/number_theoretic_transform/module/ntt_core_common/scripts/gen_ntt_core_common_psi_definition_pkg.py -f -P ${psi_val} -o ${RTL_DIR}/ntt_core_common_psi_definition_pkg.sv"
+    echo "INFO> Running : $psi_pkg_cmd"; $psi_pkg_cmd || exit 1
+  fi
+
   pkg_cmd="python3 ${PROJECT_DIR}/hw/module/regfile/module/regf_common/scripts/gen_regf_common_definition_pkg.py -f \
           -regf_reg_nb $REGF_REG_NB -regf_coef_nb $REGF_COEF_NB -regf_seq $REGF_SEQ -o ${RTL_DIR}/regf_common_definition_pkg.sv"
   echo "INFO> REGF_REG_NB=$REGF_REG_NB REGF_COEF_NB=$REGF_COEF_NB REGF_SEQ=$REGF_SEQ"
@@ -189,6 +214,8 @@ if [ $GEN_STIMULI -eq 1 ] ; then
                 -p ${RTL_DIR} \
                 -R param_tfhe_definition_pkg.sv simu 0 1 \
                 -R regf_common_definition_pkg.sv simu 0 1 \
+                -R ntt_core_common_arch_definition_pkg.sv simu 0 1 \
+                -R ntt_core_common_psi_definition_pkg.sv simu 0 1 \
                 -F param_tfhe_definition_pkg.sv APPLICATION APPLI_simu \
                 -F regf_common_definition_pkg.sv REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ}"
   echo "INFO> Running : $file_list_cmd"
@@ -269,5 +296,26 @@ if [ $USE_GOLDEN_COMPARE -eq 1 ]; then
   ./cb_golden ${N_LVL0} ${N_LVL2} | tail -n 1 | tee ${work_dir}/output/golden_cpp.txt
   popd >/dev/null
 
-  echo "INFO> Comparing TB low32 vs CPP golden (manual visual compare in logs)."
+  echo "INFO> Comparing TB low32 vs CPP golden"
+  rtl_a_line=$(grep "\[TB\]   result_a\[0-3\]" "${OUT_LOG}" | head -n 1)
+  rtl_b_line=$(grep "\[TB\]   result_b:" "${OUT_LOG}" | head -n 1)
+  # Extract first four hex for a0-3
+  read a1 a2 a3 a4 <<< $(echo "$rtl_a_line" | grep -o "0x[0-9a-fA-F]\+" | head -n 4)
+  rb=$(echo "$rtl_b_line" | grep -o "0x[0-9a-fA-F]\+" | head -n 1)
+  # Function to cut low32 (last 8 hex chars)
+  cut_lo32() { local x=${1#0x}; local n=${#x}; if [ $n -gt 8 ]; then echo 0x${x:$(($n-8)):8}; else echo 0x$(printf "%08s" "$x" | tr ' ' 0); fi; }
+  rtl_a0=$(cut_lo32 $a1); rtl_a1=$(cut_lo32 $a2); rtl_a2=$(cut_lo32 $a3); rtl_a3=$(cut_lo32 $a4); rtl_b=$(cut_lo32 $rb)
+  golden_line=$(tail -n 1 ${work_dir}/output/golden_cpp.txt)
+  ga0=$(echo "$golden_line" | sed -E 's/.*a0-3=\[0x([0-9a-fA-F]{8}),0x([0-9a-fA-F]{8}),0x([0-9a-fA-F]{8}),0x([0-9a-fA-F]{8})\].*/0x\1 0x\2 0x\3 0x\4/')
+  gb=$(echo "$golden_line" | sed -E 's/.* b=0x([0-9a-fA-F]{8}).*/0x\1/')
+  read ga0 ga1 ga2 ga3 <<< "$ga0"
+  echo "INFO> TB low32: a0-3=[$rtl_a0,$rtl_a1,$rtl_a2,$rtl_a3] b=$rtl_b"
+  echo "INFO> CPP low32: a0-3=[$ga0,$ga1,$ga2,$ga3] b=$gb"
+  if [ "$rtl_a0" = "$ga0" ] && [ "$rtl_a1" = "$ga1" ] && [ "$rtl_a2" = "$ga2" ] && [ "$rtl_a3" = "$ga3" ] && [ "$rtl_b" = "$gb" ]; then
+    echo "GOLDEN_COMPARE PASS"
+  else
+    echo "GOLDEN_COMPARE FAIL"
+    # keep non-zero exit for CI visibility
+    exit 2
+  fi
 fi

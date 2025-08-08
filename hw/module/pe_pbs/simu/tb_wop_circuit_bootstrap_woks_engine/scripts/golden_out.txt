@@ -1,0 +1,50 @@
+[CPP_GOLDEN] circuit_bootstrap_woks_golden_ref called
+[CPP_GOLDEN] mu=0x8000000000000000, n_lvl0=16, n_lvl2=256
+[CPP_GOLDEN] abar[0-4]: 0x00000001 0x00000002 0x00000003 0x00000004 0x00000005
+[CPP_GOLDEN] mu2=0x4000000000000000, bbar=1, N2=128
+[CPP_GOLDEN] testvect[0-4]: 0xc000000000000000 0xc000000000000000 0xc000000000000000 0xc000000000000000 0xc000000000000000
+[CPP_GOLDEN] Processing i=0, aibar=1
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0x8891ffdfeec800fa, 0x088effdceec20110, 0x888effd9eebc012b, 0x088fffd6eeb60141]
+[CPP_GOLDEN] Processing i=1, aibar=2
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0x911a2edb4c04454f, 0xf03a989449ff767f, 0x56564aa28f3489ae, 0x69bfac6b5024bfb2]
+[CPP_GOLDEN] Processing i=2, aibar=3
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0x2a51a31aca0ba17d, 0x4b5df946f65d75c9, 0x7d1deed880555677, 0xe5bebc2a92172525]
+[CPP_GOLDEN] Processing i=3, aibar=4
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0xcf9e679c01f6a9c0, 0xbaa8d530d5af6797, 0x09b2bf03a297764f, 0xb592e7ca31dfc3c1]
+[CPP_GOLDEN] Processing i=4, aibar=5
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0x04e8518d3fd69ddb, 0x8c8d4b15eec90a0d, 0xc3e87d2a31eb194d, 0x3b72525d56091b56]
+[CPP_GOLDEN] Processing i=5, aibar=6
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0x85de189d145d10f7, 0xa4dfd1ff3bd0667c, 0xbab6665d6c576667, 0x6289eb88b34e5589]
+[CPP_GOLDEN] Processing i=6, aibar=7
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0x71916fce1e7a04d6, 0xbce16bdae36277a1, 0x235e0047da1ab1da, 0x103258d7735a19c8]
+[CPP_GOLDEN] Processing i=8, aibar=1
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0x2b8db0454a286336, 0x8525dfdf730ab05c, 0x36144188e98333de, 0xac9c80f8fb11236a]
+[CPP_GOLDEN] Processing i=9, aibar=2
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0x6970981fe6700fbe, 0x9a9c320f31dd4ce6, 0x6350c66b5339bdf9, 0x1bc21dd6495b4ec3]
+[CPP_GOLDEN] Processing i=10, aibar=3
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0x98daf54e1b01bba5, 0xe4b20456191188bf, 0x32f3ecd52b11002d, 0xeb98144b3a4255a2]
+[CPP_GOLDEN] Processing i=11, aibar=4
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0x8aeeeda30e03050d, 0xa018ba831e33494e, 0xdb13335938022d04, 0x770e5ed7b5a08aa9]
+[CPP_GOLDEN] Processing i=12, aibar=5
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0x9b131a519971e3ba, 0x7376c070b82e9d2a, 0xb6e35968d487ddab, 0xc53aa50ba278254b]
+[CPP_GOLDEN] Processing i=13, aibar=6
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0x0b8f0f3224a7a1f8, 0xb88f1a9fc518c9dd, 0x19b97fb35ad251f2, 0x81615ae2af33f987]
+[CPP_GOLDEN] Processing i=14, aibar=7
+[CPP_GOLDEN] External product: decomp_levels=16, ell=8, bgbit=4
+[CPP_GOLDEN] acc1[1][0:3] after external product: [0xe2deb00dc3b6a8a8, 0xe1af66c2f3b3b8b3, 0x4d63f55a0aaf6a50, 0x1a2bd60f30087c67]
+[CPP_GOLDEN] Result_a[0-4]: 0x523d185254e9a72e 0x62e46a341b4fa2fb 0x71a72d2bcf589361 0x13f5115e16b99871 0x3b9acd44b6483baa
+[CPP_GOLDEN] Result_b: 0x523d185254e9a72e
+[GOLDEN_CPP] a0-3=[0x54e9a72e,0x1b4fa2fb,0xcf589361,0x16b99871] b=0x54e9a72e

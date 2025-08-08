@@ -75,10 +75,15 @@ WoP-PBS是TFHE中的一个重要变体，它实现了无填充的可编程自举
 - **算法**: 
   - 特殊的测试向量生成 (与标准PBS不同)
   - 盲旋转循环 (acc2 = (X^aibar - 1) * acc1)
-  - 外部积计算 (复用NTT引擎)
+  - 外部积计算：由共享 `pe_pbs_with_ntt_core_head` 在NTT域完成（不在引擎内时域近似）
   - 样本提取
-- **状态**: ⚠️ **框架完成，算法简化**
-- **实现层级**: 完整状态机 + NTT/BSK接口 + 简化密码学运算
+- **当前状态（P0完成）**: 功能正确性闭环，具体包括：
+  - ✅ tGsw64DecompH 正确展开：`p = q*ELL_LVL2 + i`，消除通道覆盖
+  - ✅ 外积迁移至共享NTT核，删除EXTERNAL_PRODUCT状态，避免重复实例化/时域近似
+  - ✅ 前/逆NTT基于握手推进层/系数计数，防止过跑/乱序
+  - ✅ INTT写回映射：`q_idx=decomp_level_counter/ELL_LVL2`，`j=coeff_counter`
+  - ✅ 接收计数守卫：累计 `(K+1)*N_LVL2` 后进入ACCUMULATE，含溢出断言与关键打点
+- **实现层级**: 完整状态机 + 与共享NTT/BSK的正确对接（密码学细节仍待P1数值校准）
 
 ##### `wop_vertical_packing_engine.sv` - 垂直封装引擎
 - **功能**: 实现`bigLut_20bit_lvl1()`的CMux树和盲旋转
@@ -175,8 +180,9 @@ Circuit Bootstrap Engine实现了从框架代码到生产级实现的**重大架
 
 3. **🔧 状态机逻辑完善**
    - ✅ **BLIND_ROTATE_LOOP修复**: 统一重复状态处理逻辑，消除竞争条件
-   - ✅ **并发操作支持**: 读写操作可并行执行，提升性能
-   - ✅ **状态转换稳定性**: 防止状态机跳跃和意外循环
+   - ✅ **NTT域对齐**: 外积在共享NTT核内部完成；引擎仅发分解流/收结果流
+   - ✅ **握手驱动推进**: 前/逆NTT层/系数计数仅在握手成功时推进
+   - ✅ **INTT写回与收敛**: 按(q,j)映射写回 + 接收计数守卫（达到 `(K+1)*N_LVL2` 收敛）
 
 4. **📊 地址空间设计 (基于Bit Extract成功经验)**
    ```systemverilog
@@ -457,17 +463,17 @@ DUT地址 → RID截断 → testbench映射
   - 复杂度：涉及密钥切换矩阵和bootstrapping
   - 预期工作量：2-3周专门开发
 
-#### **阶段2: Circuit Bootstrap Engine 最终完善** ⭐ **95%完成 - 即将完工**
+#### **阶段2: Circuit Bootstrap Engine P1完善** ⭐ **P0完成 - 进入数值对齐**
 - [x] **✅ 架构优化完成** (重大突破)
   - 完成：共享资源架构，60%硬件资源节省
   - 完成：tGsw64DecompH标准算法实现
   - 完成：状态机逻辑修复和接口精简
   - 成果：从75%提升到95%完成度
 
-- [ ] **🔥 最终5%工作 - NTT集成完善** (优先级：**高**)
-  - 当前：Gadget分解算法已完成，NTT接口占位符实现
-  - 需要：真正的前向/反向NTT数据流集成
-  - 预期工作量：1-2周完成生产就绪
+- [ ] **数值对齐与位宽统一** (优先级：**高**)
+  - 将 `MOD_Q_W` 提升至 64b（Torus64），与NTT模数/缩放/负环卷积严格对齐
+  - 建立 DPI/C++ golden 逐步对比（bit-accurate）
+  - 多lane映射策略与吞吐校准
 
 - [ ] **大规模验证和测试**
   - 当前：算法逻辑95%完成
@@ -707,7 +713,7 @@ DUT地址 → RID截断 → testbench映射
 | 引擎 | 框架完成度 | 算法完成度 | 验证状态 | 总体评价 |
 |------|------------|------------|----------|----------|
 | **Bit Extraction** | ✅ 100% | ✅ **完整实现** | ✅ **生产级验证** | ✅ **100%完成** ⭐ |
-| **Circuit Bootstrap** | ✅ 95% | ⚠️ 简化版 | ⚠️ 简化验证 | 75%完成 |
+| **Circuit Bootstrap** | ✅ 完整 | ✅ NTT/BSK | ⚠️ 简化实现（P1数值对齐中） | ~80%完成 |
 | **Vertical Packing** | ✅ 100% | ⚠️ 简化版 | ✅ 框架验证 | 80%完成 |
 
 ## 总结
@@ -815,3 +821,16 @@ make clean
 - ✅ **垂直封装**: CMux树和盲旋转（框架级）
 - ✅ **Private KeySwitch**: KSK访问和密文转换
 - ✅ **完整流程**: 端到端WoP-PBS操作（系统集成级）
+
+## P1 更新概览 – 64-bit Torus 与频域缩放对齐（2025-08-08）
+
+- **宽度统一**: `wop_circuit_bootstrap_woks_engine` 缺省 `MOD_Q_W=64`；`wop_pbs_kernel` 实例化时显式 `.MOD_Q_W(64)`。
+- **数据路径扩宽**: `mu_value/abar_data/bbar/current_aibar/premodswitch_result/decomp` 全部改 64 位，与 C++ `Torus64` 对齐。
+- **逆NTT后处理钩子**: 在 WoKS 中增设 `post_scale_intt()`，支持按 `log2(N)` 可选缩放（默认关闭，若 NTT 内已含 N^{-1} 则保持关）。
+- **编译期保护**: 若 `MOD_Q_W!=64` 直接 `fatal`，防止 32/64 位混用。
+- **断言与打点**: 保留 `(K+1)*N_LVL2` 接收计数守卫与关键打点，便于回归。
+
+### 回归建议
+- 单元：检查分解位切片、前/逆 NTT 握手推进、INTT 写回覆盖与接收计数饱和。
+- 系统：与 `circuitBootstrapping()` 做 bit-accurate 对比；若出现 ±1 LSB 偏差，启用 `APPLY_POST_SCALE` 再试。
+- 性能：统计 NTT pipeline stall 周期，确认 64 位升级未引入新增瓶颈。

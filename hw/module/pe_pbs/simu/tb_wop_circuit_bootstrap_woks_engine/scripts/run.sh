@@ -41,6 +41,7 @@ echo "--real                   : use real NTT head in TB (USE_REAL_CORES=1)"
 echo "--dpi-golden             : enable DPI CPP golden (USE_DPI_GOLDEN=1)"
 echo "--golden-compare         : after sim, run standalone C++ golden and compare low32 of a0-3,b"
 echo "--real-profile <name>    : preset params and generate NTT arch/psi pkgs (e.g., gf64_r2_psi16)"
+echo "--post-scale             : enable N^{-1} post scaling after INTT (APPLY_POST_SCALE=1)"
 
 }
 
@@ -74,6 +75,7 @@ USE_REAL=0
 USE_DPI_GOLDEN=0
 USE_GOLDEN_COMPARE=0
 REAL_PROFILE=""
+APPLY_POST_SCALE=0
 while getopts "hzg:W:0:2:E:K:P:R:i:j:k:q:-:" opt; do
   case "$opt" in
     h)
@@ -104,6 +106,9 @@ while getopts "hzg:W:0:2:E:K:P:R:i:j:k:q:-:" opt; do
           # get next argument as value for real-profile
           REAL_PROFILE=${!OPTIND}
           OPTIND=$((OPTIND+1))
+          ;;
+        post-scale)
+          APPLY_POST_SCALE=1
           ;;
         *)
           echo "Invalid long option: --$OPTARG"
@@ -252,6 +257,7 @@ eda_args="$eda_args \
             -P K int $K_PARAM \
             -P PSI int $PSI \
             -P R int $R \
+             -P APPLY_POST_SCALE int $APPLY_POST_SCALE \
             -F APPLICATION APPLI_simu \
             -F REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ}"
 

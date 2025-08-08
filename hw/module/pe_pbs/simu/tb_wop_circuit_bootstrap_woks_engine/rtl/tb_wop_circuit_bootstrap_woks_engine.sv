@@ -657,11 +657,21 @@ module tb_wop_circuit_bootstrap_woks_engine;
         .pep_rif_counter_inc        ()
       );
 
-      // 将真实 NTT 的输出转换为标准接口（扩展NTT_OP_W到MOD_Q_W）
+      // 将真实 NTT 的输出转换为标准接口（有符号扩展到MOD_Q_W）
+      function automatic logic [MOD_Q_W-1:0] sext_to_modq (
+        input logic [NTT_OP_W-1:0] x
+      );
+        logic signed [NTT_OP_W-1:0] xs;
+        begin
+          xs = x;
+          sext_to_modq = {{(MOD_Q_W-NTT_OP_W){xs[NTT_OP_W-1]}}, xs};
+        end
+      endfunction
+
       always_comb begin
         for (int p = 0; p < PSI; p++) begin
           for (int r = 0; r < R; r++) begin
-            ntt_next_data[p][r] = {{(MOD_Q_W-NTT_OP_W){1'b0}}, next_data_w[p][r]};
+            ntt_next_data[p][r] = sext_to_modq(next_data_w[p][r]);
           end
         end
         ntt_next_data_avail = next_data_avail_w;

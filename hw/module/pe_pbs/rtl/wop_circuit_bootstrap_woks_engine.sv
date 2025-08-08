@@ -156,6 +156,17 @@ module wop_circuit_bootstrap_woks_engine
     end
   endfunction
 
+  // Sign-extend a 32-bit gadget-decomposition word to PBS_B_W+1 bits for NTT interface
+  function automatic logic [PBS_B_W:0] sign_extend_to_pbsw (
+    input logic signed [63:0] value64
+  );
+    logic signed [31:0] value32;
+    begin
+      value32 = value64[31:0];
+      sign_extend_to_pbsw = {{(PBS_B_W+1-32){value32[31]}}, value32};
+    end
+  endfunction
+
 // ==============================================================================================
 // State Machine
 // ==============================================================================================
@@ -559,7 +570,8 @@ module wop_circuit_bootstrap_woks_engine
             for (int r = 0; r < R; r++) begin
               if (decomp_level_counter < _2L && coeff_counter < N_LVL2) begin
                 decomp_ntt_data_avail[p][r] = 1'b1;
-                decomp_ntt_data[p][r] = decomp[decomp_level_counter][coeff_counter];
+                // Cast gadget-decomposition output to the PBS interface width (sign-extended)
+                decomp_ntt_data[p][r] = sign_extend_to_pbsw(decomp[decomp_level_counter][coeff_counter]);
               end else begin
                 decomp_ntt_data_avail[p][r] = 1'b0;
                 decomp_ntt_data[p][r] = '0;

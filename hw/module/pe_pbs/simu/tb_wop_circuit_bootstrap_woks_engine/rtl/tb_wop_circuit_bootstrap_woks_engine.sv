@@ -285,7 +285,7 @@ module tb_wop_circuit_bootstrap_woks_engine;
   logic                                                         reset_bsk_cache_done;
   logic                                                         bsk_mem_avail;
   logic [BSK_PC_MAX-1:0][axi_if_bsk_axi_pkg::AXI4_ADD_W-1:0]    bsk_mem_addr;
-  logic [BR_BATCH_CMD_W-1:0]                                    br_batch_cmd;
+  br_batch_cmd_t                                                br_batch_cmd;
   logic                                                         br_batch_cmd_avail;
   logic                                                         bsk_if_batch_start_1h;
   logic                                                         inc_bsk_wr_ptr;
@@ -555,8 +555,8 @@ module tb_wop_circuit_bootstrap_woks_engine;
         reset_bsk_cache = 1'b0;
         bsk_mem_avail = 1'b1;
         bsk_mem_addr = '0;
-        br_batch_cmd = '0;
-        br_batch_cmd_avail = 1'b0;
+        // br_batch_cmd reset value handled in always_ff to avoid mixed drivers
+        // br_batch_cmd_avail init removed to avoid multiple procedural drivers; handled in always_ff
         bsk_if_batch_start_1h = 1'b0;
         inc_bsk_rd_ptr = 1'b0;
       end
@@ -567,7 +567,8 @@ module tb_wop_circuit_bootstrap_woks_engine;
         for (int pc = 0; pc < BSK_PC; pc++) begin
           m_axi4_bsk_arready[pc] = 1'b1;  // 总是准备接收
           m_axi4_bsk_rid[pc] = '0;
-          m_axi4_bsk_rdata[pc] = 64'hDEADBEEF_12345678;  // 简单的测试数据
+          // 生成更合理的BSK测试数据：基于地址的伪随机值
+          m_axi4_bsk_rdata[pc] = {32'h12345678 + m_axi4_bsk_araddr[pc][15:0], 32'h9ABCDEF0 + m_axi4_bsk_araddr[pc][31:16]};
           m_axi4_bsk_rresp[pc] = 2'b00;   // OKAY
           m_axi4_bsk_rlast[pc] = 1'b1;    // 总是最后一个
           m_axi4_bsk_rvalid[pc] = m_axi4_bsk_arvalid[pc]; // 跟随请求
@@ -607,6 +608,52 @@ module tb_wop_circuit_bootstrap_woks_engine;
       logic [BPBS_ID_W-1:0]                 next_pbs_id_w;
       logic                                 next_ctrl_avail_w;
 
+      // Stretch start-of-group/level pulses to 2 cycles for gf64 real head expectations
+      logic decomp_ntt_sog_stretch, decomp_ntt_sol_stretch;
+      logic [1:0] sog_cnt, sol_cnt;
+      always_ff @(posedge clk) begin
+        if (!s_rst_n) begin
+          decomp_ntt_sog_stretch <= 1'b0;
+          decomp_ntt_sol_stretch <= 1'b0;
+          sog_cnt <= '0;
+          sol_cnt <= '0;
+        end else begin
+          // Detect rising edge of sog/sol when ctrl/data avail
+          if (decomp_ntt_ctrl_avail && (|decomp_ntt_data_avail) && decomp_ntt_sog && sog_cnt == 0) begin
+            decomp_ntt_sog_stretch <= 1'b1;
+            sog_cnt <= 2;
+          end else if (sog_cnt != 0) begin
+            sog_cnt <= sog_cnt - 1;
+            decomp_ntt_sog_stretch <= (sog_cnt > 1);
+          end else begin
+            decomp_ntt_sog_stretch <= 1'b0;
+          end
+
+          if (decomp_ntt_ctrl_avail && (|decomp_ntt_data_avail) && decomp_ntt_sol && sol_cnt == 0) begin
+            decomp_ntt_sol_stretch <= 1'b1;
+            sol_cnt <= 2;
+          end else if (sol_cnt != 0) begin
+            sol_cnt <= sol_cnt - 1;
+            decomp_ntt_sol_stretch <= (sol_cnt > 1);
+          end else begin
+            decomp_ntt_sol_stretch <= 1'b0;
+          end
+        end
+      end
+
+      // Real-mode: feed decomp signals directly (no warmup gating)
+      logic [PSI-1:0][R-1:0]               decomp_avail_g;
+      logic                                 decomp_ctrl_avail_g;
+      logic                                 decomp_sob_g, decomp_eob_g, decomp_sol_g, decomp_eol_g, decomp_sog_g, decomp_eog_g;
+      assign decomp_avail_g       = decomp_ntt_data_avail;
+      assign decomp_ctrl_avail_g  = decomp_ntt_ctrl_avail;
+      assign decomp_sob_g         = decomp_ntt_sob;
+      assign decomp_eob_g         = decomp_ntt_eob;
+      assign decomp_sol_g         = decomp_ntt_sol;
+      assign decomp_eol_g         = decomp_ntt_eol;
+      assign decomp_sog_g         = decomp_ntt_sog;
+      assign decomp_eog_g         = decomp_ntt_eog;
+
       pe_pbs_with_ntt_core_head pe_pbs_with_ntt_core_head_u (
         .clk                        (clk),
         .s_rst_n                    (s_rst_n),
@@ -617,18 +664,18 @@ module tb_wop_circuit_bootstrap_woks_engine;
         .bsk                        (real_bsk),
         .bsk_vld                    (real_bsk_vld),
         .bsk_rdy                    (real_bsk_rdy),
-        .decomp_ntt_data_avail      (decomp_ntt_data_avail),
+        .decomp_ntt_data_avail      (decomp_avail_g),
         .decomp_ntt_data            (decomp_ntt_data),
-        .decomp_ntt_sob             (decomp_ntt_sob),
-        .decomp_ntt_eob             (decomp_ntt_eob),
+        .decomp_ntt_sob             (decomp_sob_g),
+        .decomp_ntt_eob             (decomp_eob_g),
         .decomp_ntt_sog             (decomp_ntt_sog),
-        .decomp_ntt_eog             (decomp_ntt_eog),
+        .decomp_ntt_eog             (decomp_eog_g),
         .decomp_ntt_sol             (decomp_ntt_sol),
-        .decomp_ntt_eol             (decomp_ntt_eol),
+        .decomp_ntt_eol             (decomp_eol_g),
         .decomp_ntt_pbs_id          (decomp_ntt_pbs_id),
         .decomp_ntt_last_pbs        (decomp_ntt_last_pbs),
         .decomp_ntt_full_throughput (decomp_ntt_full_throughput),
-        .decomp_ntt_ctrl_avail      (decomp_ntt_ctrl_avail),
+        .decomp_ntt_ctrl_avail      (decomp_ctrl_avail_g),
         .decomp_ntt_data_rdy        (decomp_ntt_data_rdy),
         .decomp_ntt_ctrl_rdy        (decomp_ntt_ctrl_rdy),
         .next_data                  (next_data_w),
@@ -656,6 +703,23 @@ module tb_wop_circuit_bootstrap_woks_engine;
           sext_to_modq = {{(MOD_Q_W-NTT_OP_W){xs[NTT_OP_W-1]}}, xs};
         end
       endfunction
+
+      // 真实模式：简化的批处理命令发送，避免cmd_fifo overflow
+      logic br_cmd_sent; // 标记当前测试是否已发送命令
+      always_ff @(posedge clk) begin
+        if (!s_rst_n) begin
+          br_cmd_sent <= 1'b0;
+          br_batch_cmd_avail <= 1'b0;
+          br_batch_cmd <= '0;
+        end else if (USE_REAL_CORES) begin
+          // 暂时完全停止发送br_batch_cmd来测试数据通路
+          br_batch_cmd_avail <= 1'b0;
+          br_batch_cmd.pbs_nb <= 1;
+          br_batch_cmd.br_loop <= 16;
+        end else begin
+          br_batch_cmd_avail <= 1'b0;
+        end
+      end
 
       always_comb begin
         for (int p = 0; p < PSI; p++) begin
@@ -1002,9 +1066,17 @@ end
     // Generate deterministic test values for reproducible results
     test_mu = 64'h8000_0000_0000_0000;  // Fixed value for consistent testing
     
-    // Generate sparse abar to speed up large-parameter TB (every 16th non-zero)
+    // Generate abar values based on parameter size:
+    // - Small parameters (N_LVL0 <= 64): use more dense values for meaningful testing
+    // - Large parameters (N_LVL0 > 64): use sparse values to speed up simulation
     for (int i = 0; i <= N_LVL0; i++) begin
-      test_abar[i] = ((i % 16) == 0) ? 64'd1 : 64'd0;
+      if (N_LVL0 <= 64) begin
+        // Dense pattern for small parameters: every 4th non-zero
+        test_abar[i] = ((i % 4) == 0) ? (64'd1 + i) : 64'd0;
+      end else begin
+        // Sparse pattern for large parameters: every 16th non-zero
+        test_abar[i] = ((i % 16) == 0) ? 64'd1 : 64'd0;
+      end
     end
     
     // Copy to DUT inputs

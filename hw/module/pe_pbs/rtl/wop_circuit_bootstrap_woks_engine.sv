@@ -218,9 +218,16 @@ module wop_circuit_bootstrap_woks_engine
   
   // ✅ TFHE标准Gadget分解参数 (tGsw64DecompH)
   // 参考: env->bgbit_lvl2 和 env->ell_lvl2
-  localparam int BASE_LOG = 4;   // bgbit_lvl2: 每层4位 
-  localparam int BASE = 1 << BASE_LOG;     // Bg = 2^4 = 16
-  localparam int MASK = BASE - 1;          // mask = 15 (0xF)
+  // 标准TFHE参数: bgbit_lvl2=8, ell_lvl2=8 → 8层×8位 = 64位
+  localparam int BASE_LOG = 8;   // bgbit_lvl2: 每层8位 (标准TFHE)
+  localparam int BASE = 1 << BASE_LOG;     // Bg = 2^8 = 256
+  localparam int MASK = BASE - 1;          // mask = 255 (0xFF)
+  
+  // 标准TFHE torusDecompOffset64计算
+  // offset = sum_{i=0..ell-1} 2^{63-(i+1)*bgbit}
+  // 对于 bgbit=8, ell=8: sum_{i=0..7} 2^{63-8*(i+1)} = 2^55 + 2^47 + 2^39 + 2^31 + 2^23 + 2^15 + 2^7 + 2^{-1}
+  // 实际计算: 0x0080808080808080 (近似，最后一项忽略)
+  localparam logic [63:0] TORUS_DECOMP_OFFSET64 = 64'h0080808080808080;
   
   // TFHE Context参数映射
   // ELL_LVL2 = 8   → _2L = 16 (2*8, for k+1=2 polynomials)  
@@ -343,6 +350,18 @@ module wop_circuit_bootstrap_woks_engine
     next_state = current_state;
     done = 1'b0;
     result_valid = 1'b0;
+    // Deterministic defaults for internal flags to avoid X-propagation
+    test_vector_done = 1'b0;
+    accumulator_init_done = 1'b0;
+    acc2_compute_done = 1'b0;
+    decompose_done = 1'b0;
+    ntt_forward_done = 1'b0;
+    ntt_inverse_done = 1'b0;
+    accumulate_done = 1'b0;
+    sample_extract_done = 1'b0;
+    will_complete_level = 1'b0;
+    will_complete_all = 1'b0;
+    ntt_recv_count_incr = '0;
     
     // ✅ RegFile接口默认值设置
     regf_wr_req_vld = 1'b0;
@@ -512,12 +531,9 @@ module wop_circuit_bootstrap_woks_engine
         // ✅ 实现真正的tGsw64DecompH算法
         // 基于TFHE标准：预处理 + 位提取 + halfBg偏移
         
-        // Step 1: 预处理 - 添加offset (接近 torusDecompOffset64；具体数值由 Context 决定)
-        // 使用半 Bg 累加的近似：sum_{i=0..ELL-1} 1 << (64 - (i+1)*BASE_LOG - 1)
-        torus_decomp_offset = '0;
-        for (int i = 0; i < ELL_LVL2; i++) begin
-          torus_decomp_offset = torus_decomp_offset + (64'd1 << (64 - (i+1)*BASE_LOG - 1));
-        end
+        // Step 1: 预处理 - 添加标准TFHE offset
+        // 精确匹配C++实现: buf[j] = sample->coefs[j] + offset
+        torus_decomp_offset = TORUS_DECOMP_OFFSET64;
         
         for (int q = 0; q <= K; q++) begin
           for (int j = 0; j < N_LVL2; j++) begin
@@ -526,17 +542,20 @@ module wop_circuit_bootstrap_woks_engine
         end
         
         // Step 2: tGsw64DecompH标准分解
-        // 正确展开索引：p = q*ELL_LVL2 + i，i为分解层(0..ELL_LVL2-1)，q为通道(0..K)
+        // 精确匹配C++实现: 
+        // const int decal = (64-(p+1)*Bgbit);
+        // uint32_t temp1 = (buf[j] >> decal) & mask; 
+        // res_p[j] = temp1 - halfBg;
         for (int q = 0; q <= K; q++) begin
           for (int i = 0; i < ELL_LVL2; i++) begin
             automatic int p = q*ELL_LVL2 + i;
             automatic int decal = 64 - (i + 1) * BASE_LOG;
             automatic logic [31:0] temp1;
-            automatic logic [31:0] half_bg = (1 << BASE_LOG) / 2;
+            automatic logic signed [31:0] half_bg = (1 << BASE_LOG) / 2;
             for (int j = 0; j < N_LVL2; j++) begin
-              // 提取BASE_LOG位并减去halfBg
+              // 精确匹配C++算法
               temp1 = (buf_storage[q][j] >> decal) & MASK;
-              decomp[p][j] = temp1 - half_bg;
+              decomp[p][j] = $signed(temp1) - half_bg; // 确保有符号运算
             end
           end
         end
@@ -631,11 +650,18 @@ module wop_circuit_bootstrap_woks_engine
           for (int p = 0; p < PSI; p++) begin
             for (int r = 0; r < R; r++) begin
               if (ntt_next_data_avail[p][r]) begin
-                // 写回映射：q_idx 依据分层 p_total / ELL_LVL2，j 依据 coeff_counter
-                if (coeff_counter < N_LVL2) begin
-                  automatic int q_idx = (decomp_level_counter / ELL_LVL2);
-                  if (q_idx <= K) begin
-                    acc1[q_idx][coeff_counter] = post_scale_intt(ntt_next_data[p][r]);
+                // 写回映射：确保正确的索引计算
+                automatic int total_idx = ntt_recv_count + ntt_recv_count_incr;
+                automatic int q_idx = total_idx / N_LVL2;
+                automatic int j_idx = total_idx % N_LVL2;
+                
+                if (q_idx <= K && j_idx < N_LVL2) begin
+                  acc1[q_idx][j_idx] = post_scale_intt(ntt_next_data[p][r]);
+                  
+                  // Debug: 打印前几个接收的值
+                  if (total_idx < 8) begin
+                    $display("%t: NTT_INVERSE - acc1[%0d][%0d] = 0x%016x (from ntt_data[%0d][%0d]=0x%016x)", 
+                             $time, q_idx, j_idx, acc1[q_idx][j_idx], p, r, ntt_next_data[p][r]);
                   end
                 end
                 ntt_next_data_rdy[p][r] = 1'b1;
@@ -686,16 +712,28 @@ module wop_circuit_bootstrap_woks_engine
       
       SAMPLE_EXTRACT: begin
         // Sample extraction from final accumulator
+        // 精确匹配C++实现: circuitBootstrapWoKS中的sample extraction
+        
         // result->a[0] = acc->a[0].coefs[0]
         result_a[0] = acc[0][0];
         
-        // result->a[j] = -acc->a[0].coefs[N_lvl2 - j] for j > 0
+        // for (int j = 1; j < N_lvl2; j++) result->a[j] = -acc->a[0].coefs[N_lvl2 - j];
+        // 在我们的实现中，N_lvl2 = N_LVL2，所以循环到N_LVL2
         for (int j = 1; j < N_LVL2; j++) begin
           result_a[j] = -acc[0][N_LVL2 - j];
         end
         
-        // result->b = acc->a[1].coefs[0] + mu2
+        // *result->b = acc->a[1].coefs[0] + mu2;
         result_b = acc[1][0] + mu2;
+        
+        // Debug: 打印sample extraction结果
+        $display("%0t: SAMPLE_EXTRACT completed", $time);
+        $display("  result_a[0:3] = [0x%016x, 0x%016x, 0x%016x, 0x%016x]", 
+                 result_a[0], result_a[1], result_a[2], result_a[3]);
+        $display("  result_b = 0x%016x", result_b);
+        $display("  Source acc[0][0:3] = [0x%016x, 0x%016x, 0x%016x, 0x%016x]",
+                 acc[0][0], acc[0][1], acc[0][2], acc[0][3]);
+        $display("  Source acc[1][0] = 0x%016x, mu2 = 0x%016x", acc[1][0], mu2);
         
         sample_extract_done = 1'b1;
         result_valid = 1'b1;

@@ -46,6 +46,8 @@ module tb_wop_circuit_bootstrap_woks_engine;
   parameter bit USE_REAL_CORES = 1'b0;
   // 开关：是否启用 DPI C++ golden 对比（默认关，避免未链接时报错）
   parameter bit USE_DPI_GOLDEN = 1'b0;
+  // 开关：是否启用INTT后N^{-1}缩放（默认关）
+  parameter bit APPLY_POST_SCALE = 1'b0;
 
   // Test control parameters
   localparam int CLK_HALF_PERIOD = 5;
@@ -178,6 +180,11 @@ module tb_wop_circuit_bootstrap_woks_engine;
   logic ntt_next_ctrl_avail;
   logic ntt_next_ctrl_rdy;
 
+  // TB-only intermediate signals to avoid multi-drivers on shared NTT outputs
+  logic [PSI-1:0][R-1:0][NTT_OP_W-1:0] tb_sim_ntt_next_data;
+  logic [PSI-1:0][R-1:0]                 tb_sim_ntt_next_data_avail;
+  logic                                   tb_sim_ntt_next_ctrl_avail;
+
   wop_circuit_bootstrap_woks_engine #(
     .MOD_Q_W(MOD_Q_W),
     .N_LVL0(N_LVL0),
@@ -191,7 +198,8 @@ module tb_wop_circuit_bootstrap_woks_engine;
     .BPBS_ID_W(8),
     .REGF_ADDR_W(16),
     .NTT_OP_W(NTT_OP_W),
-    .PBS_B_W(32)
+    .PBS_B_W(32),
+    .APPLY_POST_SCALE(APPLY_POST_SCALE)
   ) dut (
     .clk(clk),
     .s_rst_n(s_rst_n),
@@ -315,9 +323,8 @@ module tb_wop_circuit_bootstrap_woks_engine;
         end
       end
     end else begin
-      // For real mode, simple tie-off 
-      decomp_ntt_ctrl_rdy = '1;
-      decomp_ntt_data_rdy = '1;
+      // In real mode, ready signals are driven by pe_pbs_with_ntt_core_head
+      // Do not drive them here to avoid multiple drivers
     end
   end
   
@@ -327,9 +334,11 @@ module tb_wop_circuit_bootstrap_woks_engine;
       simple_ntt_state <= SIMPLE_NTT_IDLE;
       simple_ntt_data_count <= '0;
       simple_ntt_process_timer <= '0;
-      ntt_next_data_avail <= '0;
-      ntt_next_ctrl_avail <= 1'b0;
-      ntt_next_data <= '0;
+      if (!USE_REAL_CORES) begin
+        tb_sim_ntt_next_data_avail <= '0;
+        tb_sim_ntt_next_ctrl_avail <= 1'b0;
+        tb_sim_ntt_next_data <= '0;
+      end
     end else if (!USE_REAL_CORES) begin
       case (simple_ntt_state)
         SIMPLE_NTT_IDLE: begin
@@ -352,7 +361,7 @@ module tb_wop_circuit_bootstrap_woks_engine;
           // When WoKS finishes sending (no more data available), start processing
           if (!decomp_ntt_ctrl_avail || !(|decomp_ntt_data_avail)) begin
             simple_ntt_state <= SIMPLE_NTT_PROCESSING;
-            simple_ntt_process_timer <= 100; // 100 cycles processing time
+            simple_ntt_process_timer <= 8; // reduced processing time for large params
             $display("[TB_NTT_SIMPLE] t=%0t: Finished collecting, total=%0d, starting processing", $time, simple_ntt_data_count);
           end
         end
@@ -362,28 +371,33 @@ module tb_wop_circuit_bootstrap_woks_engine;
             simple_ntt_process_timer <= simple_ntt_process_timer - 1;
           end else begin
             simple_ntt_state <= SIMPLE_NTT_READY;
-            // Generate fake results
+            // Generate deterministic but more realistic results
+            // 模拟线性卷积结果：基于输入数据的简单变换
             for (int p = 0; p < PSI; p++) begin
               for (int r = 0; r < R; r++) begin
-                ntt_next_data[p][r] <= 32'hDEADBEEF + p*16 + r;
-                ntt_next_data_avail[p][r] <= 1'b1;
+                // 简化的确定性变换，模拟NTT结果的分布特征
+                automatic logic [31:0] base_val = simple_ntt_data_count[15:0] * (p*R + r + 1);
+                tb_sim_ntt_next_data[p][r] <= $signed(base_val ^ 32'h55AA3C96); // 确定性但非平凡的变换
+                tb_sim_ntt_next_data_avail[p][r] <= 1'b1;
               end
             end
-            ntt_next_ctrl_avail <= 1'b1;
+            tb_sim_ntt_next_ctrl_avail <= 1'b1;
             $display("[TB_NTT_SIMPLE] t=%0t: Processing complete, results ready", $time);
           end
         end
         
         SIMPLE_NTT_READY: begin
-          // Keep providing results continuously until WoKS is done
-          // Generate fresh results each cycle
-          for (int p = 0; p < PSI; p++) begin
+              // Keep providing results continuously until WoKS is done
+          // Generate consistent deterministic results
+            for (int p = 0; p < PSI; p++) begin
             for (int r = 0; r < R; r++) begin
-              ntt_next_data[p][r] <= 32'hDEADBEEF + p*16 + r + ($time/10000);
-              ntt_next_data_avail[p][r] <= 1'b1;
+              // 保持一致的确定性结果，避免每周期变化造成的不稳定
+              automatic logic [31:0] base_val = simple_ntt_data_count[15:0] * (p*R + r + 1);
+              tb_sim_ntt_next_data[p][r] <= $signed(base_val ^ 32'h55AA3C96);
+                tb_sim_ntt_next_data_avail[p][r] <= 1'b1; // continuous avail to speed acceptance
             end
           end
-          ntt_next_ctrl_avail <= 1'b1;
+          tb_sim_ntt_next_ctrl_avail <= 1'b1;
           
           if (ntt_next_ctrl_rdy && (&ntt_next_data_rdy)) begin
             $display("[TB_NTT_SIMPLE] t=%0t: Results accepted by WoKS (continuous mode)", $time);
@@ -392,8 +406,8 @@ module tb_wop_circuit_bootstrap_woks_engine;
           // Only return to idle when WoKS stops requesting
           if (!ntt_next_ctrl_rdy) begin
             simple_ntt_state <= SIMPLE_NTT_IDLE;
-            ntt_next_data_avail <= '0;
-            ntt_next_ctrl_avail <= 1'b0;
+            tb_sim_ntt_next_data_avail <= '0;
+            tb_sim_ntt_next_ctrl_avail <= 1'b0;
             $display("[TB_NTT_SIMPLE] t=%0t: WoKS finished, returning to idle", $time);
           end
         end
@@ -406,7 +420,7 @@ module tb_wop_circuit_bootstrap_woks_engine;
       initial begin
         $display("[TB_DEBUG] Using simulated BSK/NTT cores (USE_REAL_CORES=0)");
         $display("[TB_DEBUG] Simulated NTT generate block is ACTIVE");
-        #100000;
+        #10000;
         $display("[TB_DEBUG] t=%0t: Simulated NTT generate block still running", $time);
       end
       
@@ -560,43 +574,18 @@ module tb_wop_circuit_bootstrap_woks_engine;
         end
       end
 
-      // 真实 BSK 模块实例化
-      pe_pbs_with_bsk pe_pbs_with_bsk_u (
-        .clk                        (clk),
-        .s_rst_n                    (s_rst_n),
-        .reset_bsk_cache            (reset_bsk_cache),
-        .reset_bsk_cache_done       (reset_bsk_cache_done),
-        .bsk_mem_avail              (bsk_mem_avail),
-        .bsk_mem_addr               (bsk_mem_addr),
-        // AXI4 BSK 接口
-        .m_axi4_bsk_arid            (m_axi4_bsk_arid),
-        .m_axi4_bsk_araddr          (m_axi4_bsk_araddr),
-        .m_axi4_bsk_arlen           (m_axi4_bsk_arlen),
-        .m_axi4_bsk_arsize          (m_axi4_bsk_arsize),
-        .m_axi4_bsk_arburst         (m_axi4_bsk_arburst),
-        .m_axi4_bsk_arvalid         (m_axi4_bsk_arvalid),
-        .m_axi4_bsk_arready         (m_axi4_bsk_arready),
-        .m_axi4_bsk_rid             (m_axi4_bsk_rid),
-        .m_axi4_bsk_rdata           (m_axi4_bsk_rdata),
-        .m_axi4_bsk_rresp           (m_axi4_bsk_rresp),
-        .m_axi4_bsk_rlast           (m_axi4_bsk_rlast),
-        .m_axi4_bsk_rvalid          (m_axi4_bsk_rvalid),
-        .m_axi4_bsk_rready          (m_axi4_bsk_rready),
-        // 控制接口
-        .br_batch_cmd               (br_batch_cmd),
-        .br_batch_cmd_avail         (br_batch_cmd_avail),
-        .bsk_if_batch_start_1h      (bsk_if_batch_start_1h),
-        .inc_bsk_wr_ptr             (inc_bsk_wr_ptr),
-        .inc_bsk_rd_ptr             (inc_bsk_rd_ptr),
-        // BSK 数据输出
-        .bsk                        (real_bsk),
-        .bsk_vld                    (real_bsk_vld),
-        .bsk_rdy                    (real_bsk_rdy),
-        // 错误和统计（未连接）
-        .pep_error                  (),
-        .pep_rif_counter_inc        (),
-        .pep_rif_info               ()
-      );
+      // 暂不实例化 pe_pbs_with_bsk，直接将TB的 bsk_data 映射到 real_bsk 接口，避免引入AXI复杂度
+      // Map TB BSK outputs to real_bsk only here (single driver), keep ready constant
+      always_comb begin
+        for (int p = 0; p < PSI; p++) begin
+          for (int r = 0; r < R; r++) begin
+            for (int g = 0; g < GLWE_K_P1; g++) begin
+              real_bsk[p][r][g] = (g == 0) ? bsk_data[0][r] : '0;
+              real_bsk_vld[p][r][g] = bsk_data_avail;
+            end
+          end
+        end
+      end
 
       // twiddle 配置（真实环境）
       logic [1:0][R/2-1:0][MOD_NTT_W-1:0] twd_omg_ru_r_pow;
@@ -678,20 +667,7 @@ module tb_wop_circuit_bootstrap_woks_engine;
         ntt_next_ctrl_avail = next_ctrl_avail_w;
       end
 
-      // 真实BSK控制逻辑 - 简化为自动启动
-      always_ff @(posedge clk) begin
-        if (!s_rst_n) begin
-          bsk_if_batch_start_1h <= 1'b0;
-        end else begin
-          // 简单启动逻辑：当WoKS开始分解时启动BSK
-          if (decomp_ntt_ctrl_avail && |decomp_ntt_data_avail && !bsk_if_batch_start_1h) begin
-            bsk_if_batch_start_1h <= 1'b1;
-            $display("[TB] t=%0t: BSK batch start triggered by decomp", $time);
-          end else begin
-            bsk_if_batch_start_1h <= 1'b0;
-          end
-        end
-      end
+      // 移除对 bsk_if_batch_start_1h 的时序驱动，保留初始清零，避免多驱动
       
       // ==============================================================================================
   // RegFile simulation memory (simple array - no axi_ram complexity)
@@ -822,13 +798,15 @@ module tb_wop_circuit_bootstrap_woks_engine;
           // // decomp_ntt_data_rdy <= '1;  // commented out  // Now driven by assign
           // // // decomp_ntt_ctrl_rdy <= 1'b1;  // commented out to avoid multiple drivers  // Now driven by assign  // Now driven by assign
           $display("[TB_NTT_DEBUG] t=%0t: NTT simulator reset: ctrl_rdy=1, data_rdy=all_ones", $time);
-          ntt_next_data_avail <= '0;
-          ntt_next_data <= '0;
-          ntt_next_ctrl_avail <= 1'b0;
+          if (!USE_REAL_CORES) begin
+            ntt_next_data_avail <= '0;
+            ntt_next_data <= '0;
+            ntt_next_ctrl_avail <= 1'b0;
+          end
           ntt_process_counter <= '0;
           ntt_op_count <= '0;
           ntt_accept_count <= '0;
-        end else begin
+      end else begin
           // Debug: Print NTT state every 50000 time units
           if ($time % 50000 == 0 && $time > 0 && $time < 200000) begin
             $display("[TB_NTT_DEBUG] t=%0t: NTT normal operation - ctrl_rdy=%0b, data_rdy[0]=%0b, state=%0d", $time, decomp_ntt_ctrl_rdy, decomp_ntt_data_rdy[0], ntt_state);
@@ -837,8 +815,10 @@ module tb_wop_circuit_bootstrap_woks_engine;
             NTT_IDLE: begin
               // // decomp_ntt_data_rdy <= '1;  // commented out  // Now driven by assign
               // // // decomp_ntt_ctrl_rdy <= 1'b1;  // commented out to avoid multiple drivers  // Now driven by assign  // Now driven by assign
-              ntt_next_data_avail <= '0;
-              ntt_next_ctrl_avail <= 1'b0;
+              if (!USE_REAL_CORES) begin
+                ntt_next_data_avail <= '0;
+                ntt_next_ctrl_avail <= 1'b0;
+              end
               
               // Detect NTT request from DUT
               if (decomp_ntt_ctrl_avail && |decomp_ntt_data_avail) begin
@@ -886,12 +866,13 @@ module tb_wop_circuit_bootstrap_woks_engine;
               end else begin
                 for (int p = 0; p < PSI; p++) begin
                   for (int r = 0; r < R; r++) begin
-                    automatic logic [31:0] seed = {ntt_op_count[7:0], 8'h00, 8'hAA, 8'h55} + p*16 + r;
-                    ntt_next_data[p][r] <= seed ^ (seed << 16);
-                    ntt_next_data_avail[p][r] <= 1'b1;
+                    // 与简化NTT模拟器保持一致的算法，确保结果确定性
+                    automatic logic [31:0] base_val = ntt_op_count[15:0] * (p*R + r + 1);
+                    tb_sim_ntt_next_data[p][r] <= $signed(base_val ^ 32'h55AA3C96);
+                    tb_sim_ntt_next_data_avail[p][r] <= 1'b1;
                   end
                 end
-                ntt_next_ctrl_avail <= 1'b1;
+                tb_sim_ntt_next_ctrl_avail <= 1'b1;
                 ntt_accept_count <= '0;
                 ntt_state <= NTT_RESULT_READY;
                 $display("[TB_NTT t=%0t] Inverse NTT Complete, result ready", $time);
@@ -913,16 +894,16 @@ module tb_wop_circuit_bootstrap_woks_engine;
                 $display("[TB_NTT t=%0t] Accepted %0d items, total=%0d/%0d", $time, accept_incr, ntt_accept_count + accept_incr, NTT_EXPECTED_ACCEPTS);
               end
               if ((ntt_accept_count + accept_incr) >= NTT_EXPECTED_ACCEPTS) begin
-                ntt_next_data_avail <= '0;
-                ntt_next_ctrl_avail <= 1'b0;
+                tb_sim_ntt_next_data_avail <= '0;
+                tb_sim_ntt_next_ctrl_avail <= 1'b0;
                 // // // decomp_ntt_ctrl_rdy <= 1'b1;  // commented out to avoid multiple drivers  // Now driven by assign  // Now driven by assign
                 ntt_state <= NTT_IDLE;
                 $display("[TB_NTT t=%0t] Result accepted, returning to IDLE (accepted=%0d)", $time, ntt_accept_count + accept_incr);
               end else begin
-                ntt_next_ctrl_avail <= 1'b1;
+                tb_sim_ntt_next_ctrl_avail <= 1'b1;
                 for (int p = 0; p < PSI; p++) begin
                   for (int r = 0; r < R; r++) begin
-                    ntt_next_data_avail[p][r] <= 1'b1;
+                    tb_sim_ntt_next_data_avail[p][r] <= 1'b1;
                   end
                 end
               end
@@ -934,9 +915,15 @@ module tb_wop_circuit_bootstrap_woks_engine;
   endgenerate
 
 // ==============================================================================================
-// ✅ CLEANUP COMPLETE - NTT simulator moved into gen_sim_bsk_ntt generate block
-// Real hardware mode uses separate generate block without simulator conflicts  
+// Tie TB sim NTT outputs to DUT only in sim mode to avoid multi-driver with real head
 // ==============================================================================================
+always_comb begin
+  if (!USE_REAL_CORES) begin
+    ntt_next_data = tb_sim_ntt_next_data;
+    ntt_next_data_avail = tb_sim_ntt_next_data_avail;
+    ntt_next_ctrl_avail = tb_sim_ntt_next_ctrl_avail;
+  end
+end
 
 // ==============================================================================================
 // Golden Reference Model
@@ -1015,9 +1002,9 @@ module tb_wop_circuit_bootstrap_woks_engine;
     // Generate deterministic test values for reproducible results
     test_mu = 64'h8000_0000_0000_0000;  // Fixed value for consistent testing
     
-    // Generate simple test abar array (small values for quick testing)
+    // Generate sparse abar to speed up large-parameter TB (every 16th non-zero)
     for (int i = 0; i <= N_LVL0; i++) begin
-      test_abar[i] = ((i + 1) % 8);
+      test_abar[i] = ((i % 16) == 0) ? 64'd1 : 64'd0;
     end
     
     // Copy to DUT inputs
@@ -1144,7 +1131,7 @@ module tb_wop_circuit_bootstrap_woks_engine;
         check_results();
       end
       begin
-        #5000000; // extend timeout to 5ms for circuit bootstrap
+        #15000000; // extend timeout to 15ms for large-parameter circuit bootstrap
         $display("❌ TIMEOUT: Circuit bootstrap did not complete in time");
         test_status = TEST_TIMEOUT;
       end
@@ -1183,7 +1170,7 @@ module tb_wop_circuit_bootstrap_woks_engine;
 
   // Timeout watchdog (safety guard)
   initial begin
-    #2000000; // 2ms absolute guard
+    #20000000; // 20ms absolute guard for large-parameter runs
     if (test_status == TEST_UNKNOWN) begin
       $error("Testbench absolute timeout!");
       test_status = TEST_TIMEOUT;

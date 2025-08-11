@@ -50,7 +50,7 @@ module pe_pbs_with_ntt_core_head
                                                           "memory_file/twiddle/NTT_CORE_ARCH_WMM/R8_PSI8_S3/SOLINAS3_32_17_13/twd_ifnl_bwd"    :
                                                           "memory_file/twiddle/NTT_CORE_ARCH_WMM/R8_PSI8_S3/SOLINAS3_32_17_13/twd_ifnl",
   parameter  string            TWD_PHRU_FILE_PREFIX = "memory_file/twiddle/NTT_CORE_ARCH_WMM/R8_PSI8_S3/SOLINAS3_32_17_13/twd_phru",
-  parameter  string            TWD_GF64_FILE_PREFIX = $sformatf("memory_file/twiddle/NTT_CORE_ARCH_G64/R%0d_PSI%0d/twd_phi",R,PSI),
+  parameter  string            TWD_GF64_FILE_PREFIX = $sformatf("memory_file/twiddle/NTT_CORE_ARCH_GF64/R%0d_PSI%0d/twd_phi",R,PSI),
   // Instruction FIFO depth
   parameter  int               INST_FIFO_DEPTH      = 8, // Should be >= 2
   // Regfile info
@@ -163,6 +163,39 @@ module pe_pbs_with_ntt_core_head
 
   always_ff @(posedge clk)
     br_batch_cmd_dly <= br_batch_cmd;
+
+  // NTT数据流进度监控
+  logic [31:0] ntt_input_count, ntt_output_count;
+  always_ff @(posedge clk) begin
+    if (!s_rst_n) begin
+      ntt_input_count <= '0;
+      ntt_output_count <= '0;
+    end else begin
+      // 监控输入数据流
+      if (decomp_ntt_ctrl_avail && decomp_ntt_ctrl_rdy) begin
+        ntt_input_count <= ntt_input_count + 1;
+        if ((ntt_input_count % 64) == 0) begin
+          $display("[PE_HEAD t=%0t] NTT Input: count=%0d, sog=%0d eog=%0d", 
+                   $time, ntt_input_count, decomp_ntt_sog, decomp_ntt_eog);
+        end
+      end
+      
+      // 监控输出数据流  
+      if (next_ctrl_avail && (|next_data_avail)) begin
+        ntt_output_count <= ntt_output_count + 1;
+        if ((ntt_output_count % 64) == 0) begin
+          $display("[PE_HEAD t=%0t] NTT Output: count=%0d, sos=%0d eos=%0d", 
+                   $time, ntt_output_count, next_sos, next_eos);
+        end
+      end
+      
+      // 批次命令监控
+      if (br_batch_cmd_avail) begin
+        $display("[PE_HEAD t=%0t] Batch CMD received (width=%0d bits)", 
+                 $time, BR_BATCH_CMD_W);
+      end
+    end
+  end
 
 // ============================================================================================== --
 // PBS

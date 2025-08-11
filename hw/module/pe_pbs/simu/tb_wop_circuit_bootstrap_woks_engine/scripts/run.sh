@@ -56,7 +56,7 @@ run_edalize_args=""
 GEN_STIMULI=1
 GLWE_K=2
 PBS_L=1
-R=8
+R=2
 S=8
 MOD_Q_W=64
 MOD_Q="2**32"
@@ -181,9 +181,9 @@ mkdir -p $RTL_DIR
 if [ $GEN_STIMULI -eq 1 ] ; then
   # Adjust PSI for real mode FIRST, before generating any packages
   if [ $USE_REAL -eq 1 ]; then
-    # 调整PSI参数满足NTT约束: R*PSI >= radix_block_size(32)  
-    # R=8, PSI=8 => R*PSI=64 远大于32，确保满足约束
-    PSI=8
+    # 调整PSI参数满足NTT约束: R*PSI >= radix_block_size(64)  
+    # R=2, PSI=32 => R*PSI=64 满足约束
+    PSI=32
     echo "INFO> Real mode: PSI adjusted to $PSI (R=$R) for R*PSI=$((R*PSI)) constraint"
   fi
   
@@ -306,10 +306,22 @@ OUT_LOG="${work_dir}/output/${module}_${LOG_TS}.log"
 echo "INFO> Logging simulator output to: ${OUT_LOG}"
 
 # Run simulation, save full log, and print only key lines to console
+FILTERED_LOG="${OUT_LOG%.log}.filtered.log"
+rm -f "$FILTERED_LOG"
+
 $run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -k keep $eda_args $args 2>&1 \
   | tee ${OUT_LOG} \
   | grep -v "WARNING>" \
-  | egrep -i "TEST STATUS|TEST PASSED|TEST FAILED|TIMEOUT|\\[TB_|\\[WoKS|WoKS_DEBUG|TB_DEBUG|TB_NTT_DEBUG|TB_NTT_STATE|TB_NTT_SIMPLE|TB_RST_DEBUG|TB_NTT_FORCE|Circuit bootstrap|Starting|completed|Result|SAMPLE_EXTRACT|NTT_FORWARD|State transition|^ERROR:|^FATAL:" || true
+  | grep -v "has unknown file type 'xdc'" \
+  | grep -v "has unknown file type 'cppSource'" \
+  | egrep -i "INFO>|TEST STATUS|TEST PASSED|TEST FAILED|TIMEOUT|\\[TB_|\\[TB\\]|\\[HB\\]|\\[TB_NTT\\]|\\[WoKS|WoKS_DEBUG|TB_DEBUG|TB_NTT_DEBUG|TB_NTT_STATE|TB_NTT_SIMPLE|TB_RST_DEBUG|TB_NTT_FORCE|Circuit bootstrap|Starting|completed|Result|SAMPLE_EXTRACT|NTT_FORWARD|State transition|^ERROR:|^FATAL:" \
+  | tee "$FILTERED_LOG" || true
+
+# If nothing matched, show last lines of full log to avoid silent console
+if [ ! -s "$FILTERED_LOG" ]; then
+  echo "INFO> No filtered lines matched; showing last 200 lines of full log: ${OUT_LOG}"
+  tail -n 200 "${OUT_LOG}" || true
+fi
 
 # Optional: run standalone C++ golden and compare low32 of a0-3,b
 if [ $USE_GOLDEN_COMPARE -eq 1 ]; then

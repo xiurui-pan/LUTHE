@@ -215,6 +215,9 @@ module wop_circuit_bootstrap_woks_engine
   // INTT receive aggregator counters
   logic [$clog2((K+1)*N_LVL2+1)-1:0] ntt_recv_count;
   logic [$clog2((K+1)*N_LVL2+1)-1:0] ntt_recv_count_incr;
+  // Handshake tracking for NTT forward (per beat, all lanes)
+  logic ntt_fwd_handshake_all;  // ctrl_avail & ctrl_rdy & AND_{p,r}(data_avail & data_rdy)
+  integer ntt_fwd_warn_no_hs_cnt;
   
   // ✅ TFHE标准Gadget分解参数 (tGsw64DecompH)
   // 参考: env->bgbit_lvl2 和 env->ell_lvl2
@@ -256,6 +259,7 @@ module wop_circuit_bootstrap_woks_engine
       decomp_level_counter <= '0;
       coeff_counter <= '0;
       ntt_recv_count <= '0;
+      ntt_fwd_warn_no_hs_cnt <= 0;
     end else begin
       current_state <= next_state;
       // Debug state transitions
@@ -288,29 +292,39 @@ module wop_circuit_bootstrap_woks_engine
         end
         
          NTT_FORWARD: begin
-          // Advance counters only when NTT core accepted the data for all lanes
+          // 仅在本拍所有(p,r)完成 vld&rdy 且 ctrl 握手成功时推进
           if (decomp_level_counter < _2L && coeff_counter < N_LVL2) begin
-            if (decomp_ntt_ctrl_rdy && (&decomp_ntt_data_rdy) && decomp_ntt_ctrl_avail) begin
+            if (ntt_fwd_handshake_all) begin
               if (coeff_counter < N_LVL2-1) begin
                 coeff_counter <= coeff_counter + 1;
-                if (coeff_counter % 128 == 0) begin
-                  $display("%0t: NTT_FORWARD - accepted coeff=%0d (level=%0d)", $time, coeff_counter, decomp_level_counter);
+                // 详细的进度追踪
+                if (coeff_counter == 0 || coeff_counter == 127 || coeff_counter == 255 || 
+                    coeff_counter == 383 || coeff_counter == 511) begin
+                  $display("%0t: NTT_FORWARD Progress - advanced to coeff=%0d (level=%0d)", 
+                           $time, coeff_counter+1, decomp_level_counter);
                 end
               end else begin
                 coeff_counter <= '0;
                 decomp_level_counter <= decomp_level_counter + 1;
-                $display("%0t: NTT_FORWARD - Level %0d completed, moving to level %0d", 
-                         $time, decomp_level_counter, decomp_level_counter + 1);
+                $display("%0t: NTT_FORWARD - Level %0d COMPLETED (%0d coeffs sent), moving to level %0d", 
+                         $time, decomp_level_counter, N_LVL2, decomp_level_counter + 1);
+              end
+            end else if (decomp_ntt_ctrl_avail) begin
+              // 可选：有限次告警，避免刷屏
+              if (ntt_fwd_warn_no_hs_cnt < 30) begin
+                ntt_fwd_warn_no_hs_cnt <= ntt_fwd_warn_no_hs_cnt + 1;
+                $display("%0t: WARN NTT_FORWARD - ctrl_avail=1 but no handshake (ctrl_rdy=%0b, data_rdy=%b)",
+                         $time, decomp_ntt_ctrl_rdy, decomp_ntt_data_rdy);
               end
             end
           end
-          // Reset counters for inverse NTT (external product handled inside shared NTT)
+          // 进入逆变换后，复位接收计数
           if (current_state != next_state && next_state == NTT_INVERSE) begin
             decomp_level_counter <= '0;
             coeff_counter <= '0;
             ntt_recv_count <= '0;
+            $display("%0t: NTT_FORWARD -> NTT_INVERSE transition, resetting counters", $time);
           end
-
         end
         
         NTT_INVERSE: begin
@@ -362,6 +376,7 @@ module wop_circuit_bootstrap_woks_engine
     will_complete_level = 1'b0;
     will_complete_all = 1'b0;
     ntt_recv_count_incr = '0;
+    ntt_fwd_handshake_all = 1'b0;
     
     // ✅ RegFile接口默认值设置
     regf_wr_req_vld = 1'b0;
@@ -575,60 +590,92 @@ module wop_circuit_bootstrap_woks_engine
       end
       
       NTT_FORWARD: begin
-        $display("[WoKS] Entered NTT_FORWARD state at t=%0t, level=%0d, coeff=%0d, will_complete_all=%0b", $time, decomp_level_counter, coeff_counter, will_complete_all);
-        // ✅ 真正的前向NTT实现 - 发送分解数据到共享NTT引擎
-        // 基于C++参考：IntPolynomial_ifft_lvl2(decompFFT + p, decomp + p, env)
+        // 增强的调试信息：持续监控握手信号状态
+        if ((decomp_level_counter == 0 && coeff_counter < 4) || (coeff_counter % 256 == 0)) begin
+          $display("[WoKS] NTT_FORWARD at t=%0t, level=%0d, coeff=%0d, ctrl_rdy=%0b, data_rdy_all=%0b", 
+                   $time, decomp_level_counter, coeff_counter, decomp_ntt_ctrl_rdy, (&decomp_ntt_data_rdy));
+        end
         
-        // 检查是否完成所有分解层级
+        // ✅ 仅在对端ready时，单拍推出一组(p,r)数据与控制脉冲
         will_complete_level = (coeff_counter == N_LVL2-1);
         will_complete_all = will_complete_level && (decomp_level_counter == _2L-1);
-        
-        if (!will_complete_all) begin
-          // 发送分解数据到NTT引擎进行前向变换
-          for (int p = 0; p < PSI; p++) begin
-            for (int r = 0; r < R; r++) begin
-              if (decomp_level_counter < _2L && coeff_counter < N_LVL2) begin
-                decomp_ntt_data_avail[p][r] = 1'b1;
-                // Cast gadget-decomposition output to the PBS interface width (sign-extended)
+
+        // 预装当前拍的数据（仅当我们准备发送时才发出avail）
+        for (int p = 0; p < PSI; p++) begin
+          for (int r = 0; r < R; r++) begin
+            decomp_ntt_data[p][r] = '0;
+            decomp_ntt_data_avail[p][r] = 1'b0;
+          end
+        end
+
+        if (decomp_level_counter < _2L && coeff_counter < N_LVL2) begin
+          // 当且仅当对端同时就绪，推出单拍avail与控制脉冲，实现严格单拍帧
+          if (decomp_ntt_ctrl_rdy && (&decomp_ntt_data_rdy)) begin
+            for (int p = 0; p < PSI; p++) begin
+              for (int r = 0; r < R; r++) begin
+                decomp_ntt_data_avail[p][r] = 1'b1; // 单拍
                 decomp_ntt_data[p][r] = sign_extend_to_pbsw(decomp[decomp_level_counter][coeff_counter]);
-              end else begin
-                decomp_ntt_data_avail[p][r] = 1'b0;
-                decomp_ntt_data[p][r] = '0;
               end
             end
-          end
-          
-          // 设置控制信号 - 告诉NTT引擎当前数据的位置和状态
-          decomp_ntt_sob = (coeff_counter == 0);  // Start of block
-          decomp_ntt_eob = (coeff_counter == N_LVL2-1);  // End of block
-          decomp_ntt_sol = (decomp_level_counter == 0);  // Start of level
-          decomp_ntt_eol = (decomp_level_counter == _2L-1);  // End of level
-          decomp_ntt_sog = (decomp_level_counter == 0 && coeff_counter == 0);  // Start of group
-          decomp_ntt_eog = (decomp_level_counter == _2L-1 && coeff_counter == N_LVL2-1);  // End of group
-          decomp_ntt_pbs_id = {BPBS_ID_W{1'b0}};  // PBS ID for this operation
-          decomp_ntt_last_pbs = decomp_ntt_eog;
-          decomp_ntt_full_throughput = 1'b1;
-          decomp_ntt_ctrl_avail = 1'b1;
-          
-          $display("%t: NTT_FORWARD - Sending level=%0d, coeff=%0d, data=0x%08x to NTT", 
-                   $time, decomp_level_counter, coeff_counter, decomp[decomp_level_counter][coeff_counter]);
-          
-          // 等待NTT引擎准备好接收数据
-          $display("%t: NTT_FORWARD - NTT signals: ctrl_rdy=%0b, data_rdy=%0b, ctrl_avail=%0b", $time, decomp_ntt_ctrl_rdy, (&decomp_ntt_data_rdy), decomp_ntt_ctrl_avail);
-          if (decomp_ntt_ctrl_rdy && (&decomp_ntt_data_rdy)) begin
-            // NTT引擎已接收数据，移动到下一个系数
-            next_state = NTT_FORWARD;
-            $display("%t: NTT_FORWARD - Data accepted by NTT engine", $time);
+            decomp_ntt_ctrl_avail = 1'b1; // 单拍
+            decomp_ntt_full_throughput = 1'b1;
+            // 帧脉冲：仅在该拍（握手拍）有效
+            decomp_ntt_sob = (coeff_counter == 0);
+            decomp_ntt_eob = (coeff_counter == N_LVL2-1);
+            decomp_ntt_sol = (coeff_counter == 0);
+            decomp_ntt_eol = (coeff_counter == N_LVL2-1);
+            decomp_ntt_sog = (decomp_level_counter == 0 && coeff_counter == 0);
+            decomp_ntt_eog = (decomp_level_counter == _2L-1 && coeff_counter == N_LVL2-1);
+            decomp_ntt_last_pbs = decomp_ntt_eog;
+            decomp_ntt_pbs_id = {BPBS_ID_W{1'b0}};
+
+            // 标记本拍完成握手
+            ntt_fwd_handshake_all = 1'b1;
+            
+            // 详细的进度日志
+            if (coeff_counter == 0) begin
+              $display("%t: NTT_FORWARD - Starting level %0d (sob=%b, sol=%b, sog=%b)",
+                       $time, decomp_level_counter, decomp_ntt_sob, decomp_ntt_sol, decomp_ntt_sog);
+            end
+            if ((coeff_counter % 128) == 0 || coeff_counter < 4) begin
+              $display("%t: NTT_FORWARD - Sent [%0d][%0d] data=0x%08x (handshake success)",
+                       $time, decomp_level_counter, coeff_counter, decomp[decomp_level_counter][coeff_counter]);
+            end
+            if (coeff_counter == N_LVL2-1) begin
+              $display("%t: NTT_FORWARD - Completed level %0d (eob=%b, eol=%b, eog=%b)",
+                       $time, decomp_level_counter, decomp_ntt_eob, decomp_ntt_eol, decomp_ntt_eog);
+            end
           end else begin
-            next_state = NTT_FORWARD;  // 等待NTT引擎ready
-            $display("%t: NTT_FORWARD - waiting for NTT ready (ctrl_rdy=%0b, data_rdy=%0b)", $time, decomp_ntt_ctrl_rdy, (&decomp_ntt_data_rdy));
+            // 未就绪时不拉高avail/ctrl，保持安静等待
+            decomp_ntt_ctrl_avail = 1'b0;
+            decomp_ntt_sob = 1'b0; decomp_ntt_eob = 1'b0;
+            decomp_ntt_sol = 1'b0; decomp_ntt_eol = 1'b0;
+            decomp_ntt_sog = 1'b0; decomp_ntt_eog = 1'b0;
+            ntt_fwd_handshake_all = 1'b0;
+            
+            // 调试：记录等待原因
+            if ((coeff_counter < 10) || (coeff_counter % 1000 == 0)) begin
+              $display("%t: NTT_FORWARD - Waiting at [%0d][%0d]: ctrl_rdy=%b, data_rdy=%b",
+                       $time, decomp_level_counter, coeff_counter, 
+                       decomp_ntt_ctrl_rdy, decomp_ntt_data_rdy);
+            end
           end
         end else begin
-          // 所有分解数据已发送给NTT引擎，外积在NTT核内部完成，
-          // 这里等待NTT完成整个频域乘加与逆变换，再进入 ACCUMULATE
+          // 边界保护：不应到达
+          decomp_ntt_ctrl_avail = 1'b0;
+          ntt_fwd_handshake_all = 1'b0;
+          $display("%t: WARNING: NTT_FORWARD boundary - level=%0d coeff=%0d", 
+                   $time, decomp_level_counter, coeff_counter);
+        end
+
+        // 状态保持在本态，直到最后一个拍握手完成
+        if (will_complete_all && ntt_fwd_handshake_all) begin
           ntt_forward_done = 1'b1;
           next_state = NTT_INVERSE;
-          $display("%0t: NTT_FORWARD - all decomp data sent; waiting for INTT results", $time);
+          $display("%0t: NTT_FORWARD - ALL %0d levels sent successfully, entering NTT_INVERSE", 
+                   $time, _2L);
+        end else begin
+          next_state = NTT_FORWARD;
         end
       end
       

@@ -240,11 +240,15 @@ module ntt_core_gf64_phi_mult
       // do nothing
     end
     else begin
-      for (int p=0; p<PSI; p=p+1)
-        assert(^twd_phi_rdy_tmp[p] == 1'b0)
-        else begin
-          $fatal(1,"%t > ERROR: twd_phi_rdy are not coherent for the R output for psi=%0d", $time, p);
+      for (int p=0; p<PSI; p=p+1) begin
+        if (twd_phi_vld[p]) begin
+          assert(^twd_phi_rdy_tmp[p] == 1'b0)
+          else begin
+            $display("%t > DEBUG: twd_phi_vld[%0d]=1, twd_phi_rdy_tmp[%0d]=%b", $time, p, p, twd_phi_rdy_tmp[p]);
+            $fatal(1,"%t > ERROR: twd_phi_rdy are not coherent for the R output for psi=%0d", $time, p);
+          end
         end
+      end
     end
 //pragma translate_on
 

@@ -134,6 +134,14 @@ module ntt_core_wmm_sequencer
     if (!s_rst_n) state <= DO_LOOPBACK == 0 ? ST_IN : ST_WAIT_IN;
     else          state <= next_state;
   end
+  
+  // NTT核心进度监控 - 独立的always块
+  always_ff @(posedge clk) begin
+    if (s_rst_n && state != next_state) begin
+      $display("[NTT_SEQ t=%0t] State: %s -> %s", 
+               $time, state.name(), next_state.name());
+    end
+  end
 
   always_comb begin
     next_state = ST_XXX;

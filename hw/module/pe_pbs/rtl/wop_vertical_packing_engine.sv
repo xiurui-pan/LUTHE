@@ -164,6 +164,11 @@ module wop_vertical_packing_engine
       post_process_done <= 1'b0;
       lut_request_pending <= 1'b0;
       lut_transaction_complete <= 1'b0;
+      
+      // Initialize final_lwe_result array to avoid X states
+      for (int i = 0; i < N_LVL1; i++) begin
+        final_lwe_result[i] <= '0;
+      end
     end else begin
       current_state <= next_state;
       
@@ -201,8 +206,8 @@ module wop_vertical_packing_engine
             
             lut_load_counter <= lut_load_counter + 1;
             
-            // Expand to more LUT entries for better testing
-            if (lut_load_counter >= 63) begin  // Load 64 LUT entries for comprehensive testing
+            // Load all 1024 LUT entries as per C++ algorithm
+            if (lut_load_counter >= LUT_SIZE - 1) begin  // Load all 1024 LUT entries
               lut_load_done <= 1'b1;
               $display("[VP_ENGINE] *** LUT LOADING COMPLETED *** %0d entries loaded into pools[0]", lut_load_counter + 1);
             end
@@ -239,11 +244,11 @@ module wop_vertical_packing_engine
         end
         
         CMUX_TREE_INIT: begin
-          bit_counter <= CMUX_TREE_BITS;  // Start from bit 10
-          pool_select <= 1'b0;
+          bit_counter <= 10;  // Start from bit 10 (C++ d=10)
+          pool_select <= 1'b0;  // Start with pool 0 (C++ i=1, so from=pool[0], to=pool[1])
           operation_cycle_counter <= 0;  // Reset counter for CMUX processing
           cmux_operation_done <= 1'b0;  // Reset flag
-          $display("[VP_ENGINE] CMux tree initialized, starting from bit %0d", CMUX_TREE_BITS);
+          $display("[VP_ENGINE] CMux tree initialized, starting from bit %0d", 10);
         end
         
         CMUX_TREE_PROCESS: begin
@@ -254,12 +259,12 @@ module wop_vertical_packing_engine
             $display("[VP_ENGINE] CMux bit %0d completed, pool_select=%0b", 
                      bit_counter, ~pool_select);
             
-            if (bit_counter <= 1) begin  // Check BEFORE decrementing to prevent underflow
+            if (bit_counter >= 19) begin  // Process bits 10→19 (C++ d < 20)
               cmux_tree_done <= 1'b1;
-              $display("[VP_ENGINE] *** CMUX TREE FULLY COMPLETED ***");
+              $display("[VP_ENGINE] *** CMUX TREE FULLY COMPLETED *** (processed bits 10-19)");
             end else begin
-              bit_counter <= bit_counter - 1;  // Only decrement if safe
-              $display("[VP_ENGINE] Decrementing bit_counter from %0d to %0d", bit_counter, bit_counter - 1);
+              bit_counter <= bit_counter + 1;  // Increment from 10→19
+              $display("[VP_ENGINE] Incrementing bit_counter from %0d to %0d", bit_counter, bit_counter + 1);
             end
           end
         end
@@ -534,6 +539,8 @@ module wop_vertical_packing_engine
     $display("[VP_ENGINE] LWE sample extracted: a[0]=%0h, a[1]=%0h, samples extracted from TLWE", 
              final_lwe_result[0], final_lwe_result[1]);
     $display("[VP_ENGINE]   Source TLWE: a[0][0]=%0h, a[1][0]=%0h", rotate_lut[0][0], rotate_lut[1][0]);
+    $display("[VP_ENGINE]   Final result array first 4 elements: [0]=%0h, [1]=%0h, [2]=%0h, [3]=%0h", 
+             final_lwe_result[0], final_lwe_result[1], final_lwe_result[2], final_lwe_result[3]);
   endtask
   
   // Initialize rotate_lut from CMux tree result
@@ -544,6 +551,10 @@ module wop_vertical_packing_engine
       end
     end
     $display("[VP_ENGINE] Rotate LUT initialized from pool[%0b][0]", pool_select);
+    $display("[VP_ENGINE]   Pool source: pools[%0b][0][0][0]=%0h, pools[%0b][0][1][0]=%0h", 
+             pool_select, pools[pool_select][0][0][0], pool_select, pools[pool_select][0][1][0]);
+    $display("[VP_ENGINE]   Rotate LUT result: rotate_lut[0][0]=%0h, rotate_lut[1][0]=%0h", 
+             rotate_lut[0][0], rotate_lut[1][0]);
   endtask
 
 // ==============================================================================================
@@ -650,12 +661,18 @@ module wop_vertical_packing_engine
         
         SAMPLE_EXTRACT: begin
           // Perform sample extraction
-          extract_lwe_sample();
+          if (operation_cycle_counter == 1) begin  // Execute on first cycle
+            extract_lwe_sample();
+            $display("[VP_ENGINE] Extract LWE sample task executed");
+          end
         end
         
         BLIND_ROTATION_INIT: begin
           // Initialize rotate_lut
-          init_rotate_lut();
+          if (operation_cycle_counter == 0) begin  // Execute on first cycle
+            init_rotate_lut();
+            $display("[VP_ENGINE] Rotate LUT initialization task executed");
+          end
         end
         
         default: begin

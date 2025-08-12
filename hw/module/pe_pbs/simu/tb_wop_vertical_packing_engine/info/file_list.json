@@ -1,6 +1,7 @@
 {
     "local_root_path": "${PROJECT_DIR}",
     "dep_root_path": "${PROJECT_DIR}",
+    "is_include_dir": false,
     "rtl_files": [
         {
             "name": "hw/module/pe_pbs/rtl/wop_vertical_packing_engine.sv",
@@ -17,14 +18,16 @@
             "is_include_file": false
         }
     ],
-    "c_files": [
-    ],
     "dependency_dir": [
-        "hw/simu_lib/simu_base",
         "hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/gen",
-        "hw/simu_lib/stream_lib", 
+        "hw/simu_lib/simu_base",
+        "hw/simu_lib/stream_lib",
         "hw/module/regfile",
-        "hw/module/pe_pbs"
+        "hw/module/pe_pbs",
+        "hw/module/axi_if/module/axi_if_common",
+        "hw/module/param",
+        "hw/common_lib/common_package",
+        "hw/module/top_common"
     ],
     "include_dir": []
 }

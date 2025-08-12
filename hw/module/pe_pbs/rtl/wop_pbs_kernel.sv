@@ -888,7 +888,7 @@ module wop_pbs_kernel
         pep_regf_rd_req = bit_extract_regf_rd_req;
       end
       
-      STAGE2_CIRCUIT_BOOTSTRAP: begin
+      STAGE2_CIRCUIT_BS_WOKS: begin
         // ✅ Route to circuit bootstrap engine
         pep_regf_rd_req_vld = circuit_bs_regf_rd_req_vld;
         pep_regf_rd_req = circuit_bs_regf_rd_req;
@@ -926,7 +926,7 @@ module wop_pbs_kernel
         pep_regf_wr_data = bit_extract_regf_wr_data;
       end
       
-      STAGE2_CIRCUIT_BOOTSTRAP: begin
+      STAGE2_CIRCUIT_BS_WOKS: begin
         // ✅ Route to circuit bootstrap engine
         pep_regf_wr_req_vld = circuit_bs_regf_wr_req_vld;
         pep_regf_wr_req = circuit_bs_regf_wr_req;
@@ -1196,14 +1196,16 @@ module wop_pbs_kernel
     
     // 根据当前状态仲裁BSK请求
     case (current_state)
-      WOP_PBS_STATE_STAGE2: begin
+      STAGE2_CIRCUIT_BS_WOKS: begin
         // Stage 2 - Circuit Bootstrap Engine has priority
         bsk_req_vld = circuit_bs_bsk_req_vld;
         bsk_batch_id = circuit_bs_bsk_batch_id;
       end
-      WOP_PBS_STATE_STAGE3: begin
-        // Stage 3 - Vertical Packing Engine (placeholder for future)
-        bsk_req_vld = 1'b0;  // TODO: add vertical packing BSK requests
+      STAGE3_VERTICAL_PACK_CMUX,
+      STAGE3_VERTICAL_PACK_BLIND,
+      STAGE3_VERTICAL_PACK_EXTRACT: begin
+        // Stage 3 - Vertical Packing Engine当前不使用BSK
+        bsk_req_vld = 1'b0;
         bsk_batch_id = '0;
       end
       default: begin

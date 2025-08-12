@@ -23,7 +23,6 @@ module tb_wop_vertical_packing_engine
   import param_tfhe_pkg::*;
   import regf_common_param_pkg::*;
   import axi_if_glwe_axi_pkg::*;
-  import pep_common_param_pkg::*;
   import hpu_common_instruction_pkg::*;
 #(
   parameter int MOD_Q_W = 32,
@@ -81,16 +80,13 @@ module tb_wop_vertical_packing_engine
   logic [REGF_COEF_NB-1:0] regf_wr_data_vld;
   logic [REGF_COEF_NB-1:0] regf_wr_data_rdy;
   logic [REGF_COEF_NB-1:0][MOD_Q_W-1:0] regf_wr_data;
-  
-  // PBS interface signals
+
+  // PBS service interface signals
   logic [PE_INST_W-1:0] pbs_inst;
   logic pbs_inst_vld;
   logic pbs_inst_rdy;
   logic pbs_inst_ack;
   logic pbs_inst_load_blwe_ack;
-  
-  // RegFile memory simulation
-  logic [MOD_Q_W-1:0] regfile_memory [0:65535];
 
 // ==============================================================================================
 // Test Data Storage
@@ -105,18 +101,12 @@ module tb_wop_vertical_packing_engine
   logic [N_LVL1-1:0][MOD_Q_W-1:0] expected_result_a;
   logic [MOD_Q_W-1:0] expected_result_b;
   
-  // Actual result from DUT
+  // Actual result from DUT (matching RTL structure)
   logic [N_LVL1-1:0][MOD_Q_W-1:0] actual_result_a;
   logic [MOD_Q_W-1:0] actual_result_b;
   
   // Working variables for simulators
   logic [31:0] entry_index;
-  logic [15:0] ggsw_addr;
-  logic [4:0] bit_index;
-  
-  // RegFile interface helper variables
-  regf_rd_req_t rd_req_temp;
-  regf_wr_req_t wr_req_temp;
   
   // Golden reference variables
   int golden_ggsw_bits[MAX_BIT_WIDTH];
@@ -180,6 +170,10 @@ module tb_wop_vertical_packing_engine
   );
 
 // ==============================================================================================
+// Simple PBS handshake model (will be replaced with full model after regfile_memory declaration)
+// ==============================================================================================
+
+// ==============================================================================================
 // LUT Signal Monitor
 // ==============================================================================================
   // Variables for LUT driver
@@ -199,11 +193,13 @@ module tb_wop_vertical_packing_engine
         // Calculate which LUT entry based on address
         entry_idx = (lut_addr - lut_base_addr) >> 7;
         if (entry_idx < LUT_SIZE) begin
+          // Pack TLWE data: {a[3], a[2], b[0], a[0]} - b goes in position [1]
           lut_data <= {test_lut_table[entry_idx][0][3], test_lut_table[entry_idx][0][2],
-                      test_lut_table[entry_idx][0][1], test_lut_table[entry_idx][0][0]};
-          $display("[LUT_DRIVER] Providing LUT[%0d] = 0x%0h at time %0t",
+                      test_lut_table[entry_idx][1][0], test_lut_table[entry_idx][0][0]};
+          $display("[LUT_DRIVER] Providing LUT[%0d] = 0x%0h (a[0]=%0h, b=%0h) at time %0t",
                    entry_idx, {test_lut_table[entry_idx][0][3], test_lut_table[entry_idx][0][2],
-                              test_lut_table[entry_idx][0][1], test_lut_table[entry_idx][0][0]}, $time);
+                              test_lut_table[entry_idx][1][0], test_lut_table[entry_idx][0][0]},
+                   test_lut_table[entry_idx][0][0], test_lut_table[entry_idx][1][0], $time);
         end else begin
           lut_data <= '0;
         end
@@ -271,14 +267,13 @@ module tb_wop_vertical_packing_engine
             $display("[LUT_SIM] Address calculation: addr=0x%0h, base=0x%0h, entry_index=%0d", 
                      lut_addr, lut_base_addr, entry_index);
             if (entry_index < LUT_SIZE) begin
-              // Return packed LUT data - first 4 coefficients for simplicity
-              // Format: lut_data[127:0] = {coef[3], coef[2], coef[1], coef[0]}
+              // Return packed TLWE data: {a[3], a[2], b[0], a[0]} - b in position [1]
               lut_data <= {test_lut_table[entry_index][0][3], test_lut_table[entry_index][0][2], 
-                          test_lut_table[entry_index][0][1], test_lut_table[entry_index][0][0]};
-              $display("[LUT_SIM] *** PREPARING DATA *** Returning LUT entry %0d: data=0x%0h (coef[0]=%0h)", 
+                          test_lut_table[entry_index][1][0], test_lut_table[entry_index][0][0]};
+              $display("[LUT_SIM] *** PREPARING DATA *** Returning LUT entry %0d: data=0x%0h (a[0]=%0h, b=%0h)", 
                        entry_index, {test_lut_table[entry_index][0][3], test_lut_table[entry_index][0][2], 
-                                   test_lut_table[entry_index][0][1], test_lut_table[entry_index][0][0]},
-                       test_lut_table[entry_index][0][0]);
+                                   test_lut_table[entry_index][1][0], test_lut_table[entry_index][0][0]},
+                       test_lut_table[entry_index][0][0], test_lut_table[entry_index][1][0]);
             end else begin
               lut_data <= '0;
               $display("[LUT_SIM] ERROR: Invalid LUT entry %0d (>= %0d)", entry_index, LUT_SIZE);
@@ -300,154 +295,178 @@ module tb_wop_vertical_packing_engine
   end
 
 // ==============================================================================================
-// RegFile Service Simulator
+// 精简的RegFile模拟 (参考circuit bootstrap实现)
 // ==============================================================================================
-  // RegFile read state machine
-  typedef enum logic [1:0] {
-    REGF_RD_IDLE,
-    REGF_RD_PROCESSING,
-    REGF_RD_READY
-  } regf_rd_state_t;
+  // RegFile memory model - 简单可靠的内存模型
+  logic [N_LVL1-1:0][MOD_Q_W-1:0] regfile_memory [0:65535];
   
-  regf_rd_state_t regf_rd_state;
-  logic [31:0] regf_rd_counter;
-  
-  always_ff @(posedge clk or negedge s_rst_n) begin
-    if (!s_rst_n) begin
-      regf_rd_state <= REGF_RD_IDLE;
-      regf_rd_req_rdy <= 1'b1;
-      regf_rd_data_avail <= '0;
-      regf_rd_data <= '0;
-      regf_rd_counter <= 0;
-    end else begin
-      case (regf_rd_state)
-        REGF_RD_IDLE: begin
-          regf_rd_req_rdy <= 1'b1;
-          regf_rd_data_avail <= '0;
-          
-          if (regf_rd_req_vld && regf_rd_req_rdy) begin
-            regf_rd_state <= REGF_RD_PROCESSING;
-            regf_rd_counter <= 0;
-            rd_req_temp <= regf_rd_req;
-            $display("[REGF_SIM] RegFile read request: req=0x%0h at time %0t", 
-                     regf_rd_req, $time);
-          end
-        end
-        
-        REGF_RD_PROCESSING: begin
-          regf_rd_req_rdy <= 1'b0;
-          regf_rd_counter <= regf_rd_counter + 1;
-          
-          // Simulate regfile access latency
-          if (regf_rd_counter >= 3) begin
-            regf_rd_state <= REGF_RD_READY;
-            regf_rd_data_avail[0] <= 1'b1;
-            
-            // Return test GGSW data - simplified for simulation
-            ggsw_addr = ggsw_samples_base_addr; // Use base address for now
-            bit_index = ggsw_addr - ggsw_samples_base_addr;
-            if (bit_index < MAX_BIT_WIDTH) begin
-              regf_rd_data[0] <= test_ggsw_samples[bit_index][0][0][0];  // Simplified
-              $display("[REGF_SIM] Returning GGSW bit %0d data: %0h", bit_index, test_ggsw_samples[bit_index][0][0][0]);
-            end
-          end
-        end
-        
-        REGF_RD_READY: begin
-          regf_rd_req_rdy <= 1'b1;        // Keep ready asserted for handshake completion
-          regf_rd_data_avail[0] <= 1'b1;
-          if (!regf_rd_req_vld) begin
-            regf_rd_state <= REGF_RD_IDLE;
-            regf_rd_data_avail <= '0;
-            $display("[REGF_SIM] RegFile handshake completed at time %0t", $time);
-          end
-        end
-      endcase
-    end
-  end
-  
-  // RegFile write handling (always ready for simplicity)
-  always_ff @(posedge clk or negedge s_rst_n) begin
-    if (!s_rst_n) begin
-      regf_wr_req_rdy <= 1'b1;
-      regf_wr_data_rdy <= '1;
-    end else begin
-      regf_wr_req_rdy <= 1'b1;
-      regf_wr_data_rdy <= '1;
-      
-      if (regf_wr_req_vld && regf_wr_data_vld[0]) begin
-        wr_req_temp <= regf_wr_req;
-        
-        // Write to regfile_memory
-        begin
-          automatic logic [REGF_ADDR_W-1:0] write_addr = regf_wr_req[REGF_WR_REQ_W-1 -: REGF_ADDR_W];
-          regfile_memory[write_addr] <= regf_wr_data[0];
-        end
-        
-        // Simplified: assume writing to result_addr sequentially
-        actual_result_a[0] <= regf_wr_data[0];
-        // Only show first few and last few writes
-        if (regf_wr_data[0] != 32'hxxxxxxxx) begin
-          $display("[REGF_SIM] Writing result data: %0h at time %0t", regf_wr_data[0], $time);
-        end
+  // 初始化RegFile内存 - 先清零，数据稍后加载
+  initial begin
+    for (int addr = 0; addr < 65536; addr++) begin
+      for (int coeff = 0; coeff < N_LVL1; coeff++) begin
+        regfile_memory[addr][coeff] = 32'h0;
       end
     end
+    $display("[REGF_MODEL] RegFile memory cleared to zero");
   end
+  
+  // 加载测试GGSW数据的任务 - 在generate_test_data中调用
+  task automatic load_ggsw_data_to_regfile();
+    for (int bit_idx = 0; bit_idx < MAX_BIT_WIDTH; bit_idx++) begin
+      logic [15:0] addr = ggsw_samples_base_addr + bit_idx;
+      // 存储简化的GGSW数据 - 只存第一个系数作为测试
+      for (int n = 0; n < N_LVL1; n++) begin
+        regfile_memory[addr][n] = test_ggsw_samples[bit_idx][0][0][n];
+      end
+    end
+    $display("[REGF_MODEL] GGSW test data loaded to RegFile memory");
+    $display("[REGF_MODEL] Sample data preview:");
+    $display("[REGF_MODEL]   addr[0x%0h][0] = 0x%0h (bit 0)", 
+             ggsw_samples_base_addr, regfile_memory[ggsw_samples_base_addr][0]);
+    $display("[REGF_MODEL]   addr[0x%0h][0] = 0x%0h (bit 10)", 
+             ggsw_samples_base_addr + 10, regfile_memory[ggsw_samples_base_addr + 10][0]);
+  endtask
 
 // ==============================================================================================
-// PBS Service Simulator
+// PBS Model with Sample Extract Logic
 // ==============================================================================================
-  // Simple PBS simulator that handles Sample Extract + Post-processing
-  logic [3:0] pbs_counter;
-  logic [REGF_ADDR_W-1:0] pbs_src_addr_captured;
-  logic [REGF_ADDR_W-1:0] pbs_dst_addr_captured;
+  logic [7:0] pbs_ack_cnt;
+  logic [15:0] pbs_src_addr, pbs_dst_addr;
+  logic [MOD_Q_W-1:0] tlwe_a [0:N_LVL1-1];  // TLWE a polynomial
+  logic [MOD_Q_W-1:0] tlwe_b;                // TLWE b scalar
+  logic [MOD_Q_W-1:0] lwe_a [0:N_LVL1-1];   // LWE result a
+  logic [MOD_Q_W-1:0] lwe_b;                 // LWE result b
+  logic [31:0] pbs_read_cnt;
   
   always_ff @(posedge clk or negedge s_rst_n) begin
     if (!s_rst_n) begin
       pbs_inst_rdy <= 1'b1;
       pbs_inst_ack <= 1'b0;
       pbs_inst_load_blwe_ack <= 1'b0;
-      pbs_counter <= 0;
-      pbs_src_addr_captured <= '0;
-      pbs_dst_addr_captured <= '0;
+      pbs_ack_cnt <= '0;
+      pbs_read_cnt <= '0;
+      pbs_src_addr <= '0;
+      pbs_dst_addr <= '0;
     end else begin
-      if (pbs_inst_vld && pbs_inst_rdy && pbs_counter == 0) begin
-        // Start PBS processing
-        pbs_inst_rdy <= 1'b0;
-        pbs_counter <= 1;
+      pbs_inst_ack <= 1'b0;
+      pbs_inst_load_blwe_ack <= 1'b0;
+      
+      if (pbs_inst_vld && pbs_inst_rdy) begin
+        // Capture PBS instruction and start processing
+        pbs_src_addr <= u_dut.vp_src_blwe_addr;
+        pbs_dst_addr <= u_dut.vp_dst_result_addr;
+        pbs_ack_cnt <= 8'd1; // Start processing
+        pbs_read_cnt <= 0;
+        pbs_inst_rdy <= 1'b0;  // Deassert ready while processing
+        $display("[PBS_MODEL] Captured PBS instruction: src=0x%0h dst=0x%0h at time %0t", 
+                 u_dut.vp_src_blwe_addr, u_dut.vp_dst_result_addr, $time);
+      end else if (pbs_ack_cnt > 0) begin
+        if (pbs_ack_cnt <= N_LVL1 + 1) begin
+          // Read TLWE data from RegFile
+          if (pbs_read_cnt < N_LVL1) begin
+            // Read a[i] coefficients
+            tlwe_a[pbs_read_cnt] <= regfile_memory[pbs_src_addr + pbs_read_cnt][0];
+            $display("[PBS_MODEL] Read TLWE a[%0d] = 0x%0h from addr 0x%0h", 
+                     pbs_read_cnt, regfile_memory[pbs_src_addr + pbs_read_cnt][0], pbs_src_addr + pbs_read_cnt);
+          end else if (pbs_read_cnt == N_LVL1) begin
+            // Read b scalar
+            tlwe_b <= regfile_memory[pbs_src_addr + pbs_read_cnt][0];
+            $display("[PBS_MODEL] Read TLWE b = 0x%0h from addr 0x%0h", 
+                     regfile_memory[pbs_src_addr + pbs_read_cnt][0], pbs_src_addr + pbs_read_cnt);
+          end
+          pbs_read_cnt <= pbs_read_cnt + 1;
+        end else if (pbs_ack_cnt == N_LVL1 + 2) begin
+          // Perform Sample Extract: tLwe32ExtractSample_lvl1
+          lwe_b = tlwe_b;
+          lwe_a[0] = tlwe_a[0];
+          for (int j = 1; j < N_LVL1; j++) begin
+            lwe_a[j] = -tlwe_a[N_LVL1 - j];  // Modular negation
+          end
+          $display("[PBS_MODEL] Sample Extract completed: lwe_b=0x%0h, lwe_a[0]=0x%0h", lwe_b, lwe_a[0]);
+        end else if (pbs_ack_cnt >= N_LVL1 + 3 && pbs_ack_cnt <= 2*N_LVL1 + 3) begin
+          // Write LWE result back to RegFile
+          int write_idx = pbs_ack_cnt - (N_LVL1 + 3);
+          if (write_idx < N_LVL1) begin
+            regfile_memory[pbs_dst_addr + write_idx][0] = lwe_a[write_idx];
+            $display("[PBS_MODEL] Write LWE a[%0d] = 0x%0h to addr 0x%0h", 
+                     write_idx, lwe_a[write_idx], pbs_dst_addr + write_idx);
+          end else if (write_idx == N_LVL1) begin
+            regfile_memory[pbs_dst_addr + write_idx][0] = lwe_b;
+            $display("[PBS_MODEL] Write LWE b = 0x%0h to addr 0x%0h", 
+                     lwe_b, pbs_dst_addr + write_idx);
+          end
+        end else if (pbs_ack_cnt == 2*N_LVL1 + 4) begin
+          // Processing complete, assert ACK
+          pbs_inst_ack <= 1'b1;
+          pbs_inst_load_blwe_ack <= 1'b1;
+          pbs_inst_rdy <= 1'b1;  // Ready for next instruction
+          $display("[PBS_MODEL] Sample Extract and write completed, ACK asserted at time %0t", $time);
+        end
+        pbs_ack_cnt <= pbs_ack_cnt + 1;
+      end else begin
+        // Reset for next instruction
+        pbs_ack_cnt <= '0;
+        pbs_inst_rdy <= 1'b1;
+      end
+    end
+  end
+
+  // RegFile读写状态机 - 参考circuit bootstrap的实现
+  int read_counter = 0;
+  logic reading_in_progress = 1'b0;
+  logic [REGF_ADDR_W-1:0] current_read_addr;
+  logic [31:0] write_index = 0;
+  
+  always_ff @(posedge clk or negedge s_rst_n) begin
+    if (!s_rst_n) begin
+      regf_rd_req_rdy <= 1'b1;
+      regf_wr_req_rdy <= 1'b1;
+      regf_wr_data_rdy <= '1;
+      regf_rd_data_avail <= '0;
+      regf_rd_data <= '0;
+      read_counter <= 0;
+      reading_in_progress <= 1'b0;
+      write_index <= 0;
+      // Initialize actual results
+      for (int i = 0; i < N_LVL1; i++) begin
+        actual_result_a[i] <= '0;
+      end
+      actual_result_b <= '0;
+    end else begin
+      // 简化的RegFile读取 - 立即返回数据
+      if (regf_rd_req_vld && regf_rd_req_rdy) begin
+        automatic logic [REGF_ADDR_W-1:0] read_addr = regf_rd_req[REGF_RD_REQ_W-1 -: REGF_ADDR_W];
         
-        // Extract source and destination addresses from PBS instruction
-        // This is a simplified extraction - real implementation would decode the instruction
-        pbs_src_addr_captured <= u_dut.pbs_src_addr;
-        pbs_dst_addr_captured <= u_dut.pbs_dst_addr;
+        // 立即提供数据 - 简化的单拍响应
+        regf_rd_data_avail[0] <= 1'b1;
+        regf_rd_data[0] <= regfile_memory[read_addr][0];
+        $display("[REGF_MODEL] Single-cycle read from addr=0x%0h, data=0x%0h", 
+                 read_addr, regfile_memory[read_addr][0]);
+      end else begin
+        regf_rd_data_avail[0] <= 1'b0;
+      end
+      
+      // Handle write requests - 捕获结果用于验证
+      if (regf_wr_req_vld && regf_wr_data_vld[0]) begin
+        automatic logic [REGF_ADDR_W-1:0] write_addr = regf_wr_req[REGF_WR_REQ_W-1 -: REGF_ADDR_W];
         
-        $display("[PBS_SIM] PBS instruction received: inst=0x%0h, src=0x%0h, dst=0x%0h at time %0t", 
-                 pbs_inst, u_dut.pbs_src_addr, u_dut.pbs_dst_addr, $time);
-      end else if (pbs_counter > 0 && pbs_counter < 10) begin
-        // Simulate PBS processing delay
-        pbs_counter <= pbs_counter + 1;
-        $display("[PBS_SIM] Processing... counter=%0d", pbs_counter);
-      end else if (pbs_counter == 10) begin
-        // Complete PBS processing - perform simple Sample Extract simulation
-        pbs_inst_ack <= 1'b1;
-        pbs_inst_load_blwe_ack <= 1'b1;
-        pbs_counter <= pbs_counter + 1;
+        // Store to memory
+        regfile_memory[write_addr][0] <= regf_wr_data[0];
         
-        // Simple Sample Extract: copy from source to destination with transformation
-        // This simulates tLwe32ExtractSample_lvl1 + post-processing
-        for (int i = 0; i < N_LVL1; i++) begin
-          regfile_memory[pbs_dst_addr_captured + i] <= regfile_memory[pbs_src_addr_captured + ((i == 0) ? 0 : (N_LVL1 - i))];
+        // Capture for verification: first N are a[], last one is b
+        if (write_index < N_LVL1) begin
+          actual_result_a[write_index] <= regf_wr_data[0];
+          $display("[REGF_MODEL] Writing result_a[%0d] = 0x%0h to addr=0x%0h", 
+                   write_index, regf_wr_data[0], write_addr);
+        end else if (write_index == N_LVL1) begin
+          actual_result_b <= regf_wr_data[0];
+          $display("[REGF_MODEL] Writing result_b = 0x%0h to addr=0x%0h", 
+                   regf_wr_data[0], write_addr);
         end
         
-        $display("[PBS_SIM] Sample Extract completed: src=0x%0h -> dst=0x%0h", 
-                 pbs_src_addr_captured, pbs_dst_addr_captured);
-      end else if (pbs_counter == 12) begin
-        // Reset for next instruction
-        pbs_inst_ack <= 1'b0;
-        pbs_inst_load_blwe_ack <= 1'b0;
-        pbs_inst_rdy <= 1'b1;
-        pbs_counter <= 0;
-        $display("[PBS_SIM] PBS processing complete, ready for next instruction");
+        if (write_index <= N_LVL1) begin
+          write_index <= write_index + 1;
+        end
       end
     end
   end
@@ -477,24 +496,25 @@ module tb_wop_vertical_packing_engine
     end
     
     // Generate meaningful LUT table matching typical use case
+    // Important: fill ALL coefficients to avoid nearly-all-zero extractions
     for (int i = 0; i < LUT_SIZE; i++) begin
-      // Create a function that maps 10-bit input to meaningful output
-      // Example: f(x) = x * 100 + popcount(x) for distinguishable results
       int popcount = $countones(i);
       int base_value = i * 100 + popcount;
       
-      for (int k = 0; k <= K; k++) begin
-        for (int n = 0; n < N_LVL1; n++) begin
-          if (n == 0) begin
-            test_lut_table[i][k][n] = base_value;  // Main coefficient
-          end else if (n == 1) begin
-            test_lut_table[i][k][n] = base_value + 1;  // Second coefficient (for b part)
-          end else begin
-            test_lut_table[i][k][n] = 0;  // Zero padding for simulation
-          end
-        end
+      // k=0: TLWE a polynomial (all coefficients)
+      for (int n = 0; n < N_LVL1; n++) begin
+        test_lut_table[i][0][n] = base_value + n;
+      end
+
+      // k=1: TLWE b scalar (only first coefficient is meaningful, rest should be 0)
+      test_lut_table[i][1][0] = base_value + 1000;  // Different value for b
+      for (int n = 1; n < N_LVL1; n++) begin
+        test_lut_table[i][1][n] = 0;  // b is scalar, other coefficients are 0
       end
     end
+    
+    // 加载GGSW数据到RegFile模型
+    load_ggsw_data_to_regfile();
     
     $display("[TB] Test data generation completed");
     $display("[TB] GGSW patterns:");
@@ -579,10 +599,13 @@ module tb_wop_vertical_packing_engine
     s_rst_n = 0;
     start = 0;
     bit_width = MAX_BIT_WIDTH;
-    ggsw_samples_base_addr = 16'h1000;
+    ggsw_samples_base_addr = 16'h1000;  // Set before generate_test_data
     ggsw_samples_ready = 0;
     result_addr = 16'h2000;
     lut_base_addr = 32'h10000000;
+    
+    $display("[TB] Signal initialization completed");
+    $display("[TB] ggsw_samples_base_addr = 0x%0h", ggsw_samples_base_addr);
     
     // Reset sequence
     repeat(10) @(posedge clk);
@@ -643,13 +666,34 @@ module tb_wop_vertical_packing_engine
     
     generate_expected_results();
     
-    // Compare results
+    // Show first few RTL vs Golden results for debugging
+    $display("[TB] *** RESULT COMPARISON ***");
+    $display("[TB] b comparison: RTL=0x%0h, Golden=0x%0h %s", 
+             actual_result_b, golden_result_b, 
+             (actual_result_b == golden_result_b) ? "✓" : "❌");
+    $display("[TB] First 10 a[] RTL vs Golden results:");
+    for (int i = 0; i < 10 && i < N_LVL1; i++) begin
+      $display("[TB]   a[%0d]: RTL=0x%0h, Golden=0x%0h %s", 
+               i, actual_result_a[i], golden_result_a[i], 
+               (actual_result_a[i] == golden_result_a[i]) ? "✓" : "❌");
+    end
+    
+    // Compare results (both a[] and b)
     error_count = 0;
+    
+    // Check b first
+    if (actual_result_b != golden_result_b) begin
+      error_count++;
+      $display("[TB] Mismatch at b: RTL=0x%0h, Golden=0x%0h", 
+               actual_result_b, golden_result_b);
+    end
+    
+    // Check a[] array
     for (int i = 0; i < N_LVL1; i++) begin
       if (actual_result_a[i] != golden_result_a[i]) begin
         error_count++;
         if (error_count <= 10) begin  // Show first 10 errors
-          $display("[TB] Mismatch at a[%0d]: RTL=%0h, Golden=%0h", 
+          $display("[TB] Mismatch at a[%0d]: RTL=0x%0h, Golden=0x%0h", 
                    i, actual_result_a[i], golden_result_a[i]);
         end
       end

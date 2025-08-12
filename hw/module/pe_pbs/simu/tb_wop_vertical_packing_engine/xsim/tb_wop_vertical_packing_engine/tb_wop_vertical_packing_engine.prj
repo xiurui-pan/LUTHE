@@ -1,11 +1,12 @@
+sv work /home/pxr/workspace/hpu_fpga/hw/common_lib/common_package/rtl/common_definition_pkg.sv
+sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/gen/rtl/param_tfhe_definition_pkg.sv
+sv work /home/pxr/workspace/hpu_fpga/hw/module/regfile/module/regf_common/rtl/REGF_STRUCT/REGF_STRUCT_reg64_coef32_seq4/regf_common_definition_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/simu_lib/simu_base/rtl/mod_arith.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/simu_lib/stream_lib/rtl/random_handler_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/simu_lib/stream_lib/rtl/file_handler_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/simu_lib/stream_lib/rtl/stream_source.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/simu_lib/stream_lib/rtl/stream_spy.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/simu_lib/stream_lib/rtl/stream_sink.sv
-sv work /home/pxr/workspace/hpu_fpga/hw/common_lib/common_package/rtl/common_definition_pkg.sv
-sv work /home/pxr/workspace/hpu_fpga/hw/module/param/module/param_msg2_carry2_pfail64_132b_tuniform_7e47d8c/rtl/param_tfhe_definition_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/param/rtl/NTT_MOD/NTT_MOD_goldilocks/param_ntt_definition_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/param/rtl/param_tfhe_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/param/rtl/param_ntt_pkg.sv
@@ -24,7 +25,6 @@ sv work /home/pxr/workspace/hpu_fpga/hw/common_lib/fifo/rtl/fifo_reg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/common_lib/fifo/rtl/fifo_ram_rdy_vld.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/common_lib/fifo/rtl/xpm_fifo_sync_wrapper.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/common_lib/fifo/rtl/fifo_delay.sv
-sv work /home/pxr/workspace/hpu_fpga/hw/module/regfile/module/regf_common/rtl/REGF_STRUCT/REGF_STRUCT_reg64_coef32_seq4/regf_common_definition_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/regfile/module/regf_common/rtl/regf_common_param_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/regfile/rtl/regf_read_arbiter.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/regfile/rtl/regf_write_arbiter.sv

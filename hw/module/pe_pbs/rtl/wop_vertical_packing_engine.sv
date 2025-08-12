@@ -25,6 +25,8 @@ module wop_vertical_packing_engine
   import param_tfhe_pkg::*;
   import regf_common_param_pkg::*;
   import axi_if_glwe_axi_pkg::*;
+  import pep_common_param_pkg::*;
+  import hpu_common_instruction_pkg::*;
 #(
   parameter int MOD_Q_W = 32,
   parameter int MAX_BIT_WIDTH = 20,
@@ -71,7 +73,14 @@ module wop_vertical_packing_engine
   output logic [REGF_WR_REQ_W-1:0] regf_wr_req,
   output logic [REGF_COEF_NB-1:0] regf_wr_data_vld,
   input  logic [REGF_COEF_NB-1:0] regf_wr_data_rdy,
-  output logic [REGF_COEF_NB-1:0][MOD_Q_W-1:0] regf_wr_data
+  output logic [REGF_COEF_NB-1:0][MOD_Q_W-1:0] regf_wr_data,
+  
+  // PBS Service Interface (client-side)
+  output logic [PE_INST_W-1:0] pbs_inst,
+  output logic                  pbs_inst_vld,
+  input  logic                  pbs_inst_rdy,
+  input  logic                  pbs_inst_ack,
+  input  logic                  pbs_inst_load_blwe_ack
 );
 
 // ==============================================================================================
@@ -84,7 +93,7 @@ module wop_vertical_packing_engine
 // ==============================================================================================
 // State Machine
 // ==============================================================================================
-  typedef enum logic [3:0] {
+  typedef enum logic [4:0] {
     IDLE,
     LOAD_LUT_ENTRIES,         // Load initial LUT entries into pools[0]
     LOAD_GGSW_SAMPLES,        // Load GGSW bit samples
@@ -92,8 +101,10 @@ module wop_vertical_packing_engine
     CMUX_TREE_PROCESS,        // Process CMux tree (bits 10-19)
     BLIND_ROTATION_INIT,      // Initialize blind rotation
     BLIND_ROTATION_PROCESS,   // Process blind rotation (bits 0-9)
-    SAMPLE_EXTRACT,           // Extract LWE sample from final TLWE
-    POST_PROCESS,             // Post-processing bootstrapping
+    PBS_WRITE_TLWE,           // Write TLWE to RegFile for PBS processing
+    PBS_SEND_REQUEST,         // Send PBS instruction
+    PBS_WAIT_COMPLETION,      // Wait for PBS completion
+    PBS_READ_RESULT,          // Read result from PBS
     WRITE_RESULT,             // Write final result
     DONE
   } state_e;
@@ -120,6 +131,13 @@ module wop_vertical_packing_engine
   logic [MAX_POOL_ENTRIES-1:0] entry_counter;
   logic [31:0] lut_load_counter;
   logic pool_select;  // 0 or 1 for ping-pong
+  
+  // PBS-related control signals
+  logic [REGF_ADDR_W-1:0] pbs_src_addr;     // Source address for PBS input
+  logic [REGF_ADDR_W-1:0] pbs_dst_addr;     // Destination address for PBS output
+  logic [31:0] pbs_write_counter;           // Counter for writing TLWE to RegFile
+  logic pbs_request_sent;                   // Flag indicating PBS request was sent
+  logic pbs_processing_done;                // Flag indicating PBS processing is complete
   
   // Temporary variables for combinational logic
   logic current_bit_value;
@@ -165,6 +183,13 @@ module wop_vertical_packing_engine
       lut_request_pending <= 1'b0;
       lut_transaction_complete <= 1'b0;
       
+      // Initialize PBS-related signals
+      pbs_src_addr <= '0;
+      pbs_dst_addr <= '0;
+      pbs_write_counter <= '0;
+      pbs_request_sent <= 1'b0;
+      pbs_processing_done <= 1'b0;
+      
       // Initialize final_lwe_result array to avoid X states
       for (int i = 0; i < N_LVL1; i++) begin
         final_lwe_result[i] <= '0;
@@ -178,9 +203,20 @@ module wop_vertical_packing_engine
                  current_state.name(), next_state.name(), $time);
         
         // Reset operation_cycle_counter when entering processing states
-        if (next_state == SAMPLE_EXTRACT || next_state == POST_PROCESS) begin
+        if (next_state == PBS_WRITE_TLWE || next_state == PBS_SEND_REQUEST) begin
           operation_cycle_counter <= 0;
           $display("[VP_ENGINE] Resetting operation_cycle_counter for new state");
+        end
+        
+        // Reset PBS-related flags when entering PBS states
+        if (next_state == PBS_WRITE_TLWE) begin
+          pbs_src_addr <= result_addr;           // Use result_addr as PBS input location
+          pbs_dst_addr <= result_addr + 16'h400; // Use offset address for PBS output
+          pbs_write_counter <= 0;
+          pbs_request_sent <= 1'b0;
+          pbs_processing_done <= 1'b0;
+          $display("[VP_ENGINE] Initializing PBS: src_addr=0x%0h, dst_addr=0x%0h", 
+                   result_addr, result_addr + 16'h400);
         end
       end
       
@@ -291,31 +327,7 @@ module wop_vertical_packing_engine
           end
         end
         
-        SAMPLE_EXTRACT: begin
-          // Use a simpler approach: complete immediately with some delay
-          operation_cycle_counter <= operation_cycle_counter + 1;
-          
-          if (operation_cycle_counter == 0) begin
-            sample_extract_done <= 1'b0;  // Reset flag
-            $display("[VP_ENGINE] Starting sample extraction processing");
-          end else if (operation_cycle_counter >= 3) begin  // 3 cycles for sample extraction
-            sample_extract_done <= 1'b1;
-            $display("[VP_ENGINE] Sample extraction completed after %0d cycles", operation_cycle_counter);
-          end
-        end
-        
-        POST_PROCESS: begin
-          // Use a simpler approach: complete immediately with some delay  
-          operation_cycle_counter <= operation_cycle_counter + 1;
-          
-          if (operation_cycle_counter == 0) begin
-            post_process_done <= 1'b0;  // Reset flag
-            $display("[VP_ENGINE] Starting post-processing");
-          end else if (operation_cycle_counter >= 5) begin  // 5 cycles for post-processing
-            post_process_done <= 1'b1;
-            $display("[VP_ENGINE] Post-processing completed after %0d cycles", operation_cycle_counter);
-          end
-        end
+
         
         WRITE_RESULT: begin
           if (regf_wr_req_rdy && regf_wr_data_rdy[0]) begin
@@ -342,6 +354,10 @@ module wop_vertical_packing_engine
     regf_wr_req = '0;
     regf_wr_data_vld = '0;
     regf_wr_data = '0;
+    
+    // PBS interface defaults
+    pbs_inst = '0;
+    pbs_inst_vld = 1'b0;
     
     // Debug: Show current state periodically
     if ($time % 500000 == 0 && $time > 500000) begin  // Every 500000 time units after startup
@@ -428,30 +444,64 @@ module wop_vertical_packing_engine
         // Blind Rotation: Use operation_done flag from sequential logic
         if (blind_rot_operation_done) begin
           if (blind_rotation_done) begin
-            next_state = SAMPLE_EXTRACT;
-            $display("[VP_ENGINE] *** STATE TRANSITION *** BLIND_ROTATION_PROCESS -> SAMPLE_EXTRACT at time %0t", $time);
+            next_state = PBS_WRITE_TLWE;
+            $display("[VP_ENGINE] *** STATE TRANSITION *** BLIND_ROTATION_PROCESS -> PBS_WRITE_TLWE at time %0t", $time);
           end
         end
       end
       
-      SAMPLE_EXTRACT: begin
-        // Extract LWE sample from final TLWE (rotate_lut)
-        // This implements tLwe32ExtractSample_lvl1
-        // The actual extraction will be done in always_ff
+      PBS_WRITE_TLWE: begin
+        // Write TLWE (rotate_lut) to RegFile for PBS processing
+        if (pbs_write_counter <= N_LVL1) begin
+          regf_wr_req_vld = 1'b1;
+          regf_wr_req = {pbs_src_addr + pbs_write_counter, 16'h0000};
+          regf_wr_data_vld[0] = 1'b1;
+          
+          if (pbs_write_counter < N_LVL1) begin
+            // Write a[0] coefficients (simplified to first polynomial)
+            regf_wr_data[0] = rotate_lut[0][pbs_write_counter];
+          end else begin
+            // Write b part (scalar)
+            regf_wr_data[0] = rotate_lut[K][0];  // b is at rotate_lut[K][0]
+          end
+        end
         
-        if (sample_extract_done) begin
-          next_state = POST_PROCESS;
-          $display("[VP_ENGINE] *** STATE TRANSITION *** SAMPLE_EXTRACT -> POST_PROCESS at time %0t", $time);
+        if (pbs_write_counter > N_LVL1) begin  // Written all coefficients + b part
+          next_state = PBS_SEND_REQUEST;
+          $display("[VP_ENGINE] *** STATE TRANSITION *** PBS_WRITE_TLWE -> PBS_SEND_REQUEST at time %0t", $time);
         end
       end
       
-      POST_PROCESS: begin
-        // Post-processing: extract high bits using additional bootstrapping
-        // For now, we'll skip this complex step and go directly to result writing
+      PBS_SEND_REQUEST: begin
+        // Send PBS instruction to pe_pbs module
+        // Create PBS instruction (simplified)
+        pbs_inst_vld = 1'b1;
+        // Note: PBS instruction format needs to be defined properly
+        // For now, using placeholder values
+        pbs_inst = 32'h12345678;  // Placeholder PBS instruction
         
-        if (post_process_done) begin
+        if (pbs_request_sent) begin
+          next_state = PBS_WAIT_COMPLETION;
+          $display("[VP_ENGINE] *** STATE TRANSITION *** PBS_SEND_REQUEST -> PBS_WAIT_COMPLETION at time %0t", $time);
+        end
+      end
+      
+      PBS_WAIT_COMPLETION: begin
+        // Wait for PBS processing to complete
+        if (pbs_inst_ack) begin
+          next_state = PBS_READ_RESULT;
+          $display("[VP_ENGINE] *** STATE TRANSITION *** PBS_WAIT_COMPLETION -> PBS_READ_RESULT at time %0t", $time);
+        end
+      end
+      
+      PBS_READ_RESULT: begin
+        // Read processed result from RegFile
+        regf_rd_req_vld = 1'b1;
+        regf_rd_req = {pbs_dst_addr, 16'h0000};
+        
+        if (pbs_processing_done) begin
           next_state = WRITE_RESULT;
-          $display("[VP_ENGINE] *** STATE TRANSITION *** POST_PROCESS -> WRITE_RESULT at time %0t", $time);
+          $display("[VP_ENGINE] *** STATE TRANSITION *** PBS_READ_RESULT -> WRITE_RESULT at time %0t", $time);
         end
       end
       
@@ -659,13 +709,56 @@ module wop_vertical_packing_engine
           // Note: Keep blind_rot_operation_done=1 until state machine resets it
         end
         
-        SAMPLE_EXTRACT: begin
-          // Perform sample extraction
-          if (operation_cycle_counter == 1) begin  // Execute on first cycle
-            extract_lwe_sample();
-            $display("[VP_ENGINE] Extract LWE sample task executed");
+        PBS_WRITE_TLWE: begin
+          // Write TLWE (rotate_lut) to RegFile for PBS processing
+          if (pbs_write_counter <= N_LVL1) begin  // Write all coefficients + b part
+            // Handle RegFile write handshake
+            if (regf_wr_req_rdy && regf_wr_data_rdy[0]) begin
+              if (pbs_write_counter < N_LVL1) begin
+                // Write a[k] coefficients
+                for (int k = 0; k <= K; k++) begin
+                  // Simplified: write one coefficient at a time
+                  // In practice, you might need to write multiple coefficients
+                  // RegFile write will be handled in the combinational logic
+                end
+              end else if (pbs_write_counter == N_LVL1) begin
+                // Write b part (scalar)
+                // RegFile write will be handled in the combinational logic
+              end
+              pbs_write_counter <= pbs_write_counter + 1;
+              $display("[VP_ENGINE] PBS_WRITE_TLWE: Writing coefficient %0d to addr 0x%0h", 
+                       pbs_write_counter, pbs_src_addr + pbs_write_counter);
+            end
           end
         end
+        
+        PBS_SEND_REQUEST: begin
+          // PBS instruction will be handled in combinational logic
+          // Just set the flag when instruction is sent
+          if (pbs_inst_vld && pbs_inst_rdy) begin
+            pbs_request_sent <= 1'b1;
+            $display("[VP_ENGINE] PBS_SEND_REQUEST: PBS instruction sent successfully");
+          end
+        end
+        
+        PBS_WAIT_COMPLETION: begin
+          // Wait for PBS processing acknowledgment
+          // pbs_inst_ack will be monitored in combinational logic
+        end
+        
+        PBS_READ_RESULT: begin
+          // Read PBS result from RegFile
+          if (regf_rd_req_rdy && regf_rd_data_avail[0]) begin
+            // Store result in final_lwe_result
+            for (int i = 0; i < N_LVL1; i++) begin
+              final_lwe_result[i] <= regf_rd_data[0][(i*MOD_Q_W) +: MOD_Q_W];
+            end
+            pbs_processing_done <= 1'b1;
+            $display("[VP_ENGINE] PBS_READ_RESULT: Result read from addr 0x%0h", pbs_dst_addr);
+          end
+        end
+
+
         
         BLIND_ROTATION_INIT: begin
           // Initialize rotate_lut

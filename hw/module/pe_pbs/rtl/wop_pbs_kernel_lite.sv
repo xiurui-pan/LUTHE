@@ -546,7 +546,7 @@ end
 // 当前使用接口兼容的实现，为真实模块集成做准备
 
 // 🔧 策略A重大发现：接口维度不匹配，需要修正BSK接口声明
-// 暂时回到简化实现，逐步修正接口匹配问题
+// 🚧 暂时注释真实模块，先解决part-select错误
 /*
 pe_pbs_with_bsk #(
   .MOD_MULT_TYPE(MOD_MULT_TYPE),
@@ -679,11 +679,11 @@ pe_pbs_with_ksk #(
 
 // 🔧 策略A接口修正：使用新的正确维度BSK接口，简化实现进行验证
 
-// 简化的BSK/KSK驱动（使用正确的接口维度）
-assign bsk_req_rdy = 1'b1;     // BSK简化驱动
+// 🚧 简化的BSK/KSK驱动（临时恢复简化实现调试part-select错误）
+assign bsk_req_rdy = 1'b1;     // 🚧 BSK简化驱动
 assign ksk_req_rdy = 1'b1;     // KSK简化驱动
 
-// BSK/KSK简化实现（使用修正后的接口维度）
+// 🚧 BSK/KSK简化实现（临时恢复调试part-select错误）
 always_ff @(posedge clk or negedge s_rst_n) begin
   if (!s_rst_n) begin
     bsk_data_avail <= '0;
@@ -691,7 +691,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     bsk_data <= '0;
     ksk_data <= '0;
   end else begin
-    // BSK简化实现（使用新的多维接口）
+    // BSK简化实现（使用修正后的多维接口）
     if (bsk_req_vld) begin
       bsk_data_avail <= '1;  // 全部valid
       // 为所有维度生成测试数据
@@ -702,7 +702,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
           end
         end
       end
-      $display("[PBS_LITE] 🔧 BSK interface corrected: PSI=%0d, R=%0d, GLWE_K_P1=%0d", PSI, R, GLWE_K_P1);
+      $display("[PBS_LITE] 🚧 BSK interface corrected (simplified): PSI=%0d, R=%0d, GLWE_K_P1=%0d", PSI, R, GLWE_K_P1);
     end else begin
       bsk_data_avail <= '0;
     end

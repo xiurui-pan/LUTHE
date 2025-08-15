@@ -26,6 +26,7 @@ module tb_wop_vertical_packing_engine
   import pep_common_param_pkg::*;
   import hpu_common_instruction_pkg::*;
   import vp_pbs_inst_pkg::*;
+  // 🎯 策略A解决方案：通过构建配置强制使用BSK_PC=1
 #(
   parameter int MOD_Q_W = 32,
   parameter int MAX_BIT_WIDTH = 20,
@@ -786,7 +787,7 @@ module tb_wop_vertical_packing_engine
     // External golden path
     dump_lut_and_bits_to_files("output_lut.txt", "output_bits.txt");
     $display("[TB] Running external golden generator...");
-    void'($system($sformatf("./big_lut_golden %s %s %s %0d %0d", "output_lut.txt", "output_bits.txt", "output_golden.txt", N_LVL1, LUT_SIZE)));
+    void'($system($sformatf("../big_lut_simplified %s %s %s %0d %0d", "output_lut.txt", "output_bits.txt", "output_golden.txt", N_LVL1, LUT_SIZE)));
     if (!load_golden_from_file("output_golden.txt")) begin
       $fatal("[TB] Failed to load external golden results");
     end

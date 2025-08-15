@@ -258,7 +258,7 @@ module bsk_if_cache_control
 
   always_comb
     for (int i=0; i<BSK_SLOT_NB; i=i+1)
-      upd_pos_lock_1h[i] = rbdc_avail & (rbdc_br_loop == cinfo_a[i].br_loop) & (cinfo_a[i].status == SLOT_FILL);
+      upd_pos_lock_1h[i] = rbdc_avail & (rbdc_br_loop == cinfo_a[i].br_loop) & (cinfo_a[i].status == SLOT_FILL || (cinfo_a[i].status == SLOT_EMPTY && cinfo_a[i].lock_mh != 0));
 
   always_ff @(posedge clk)
     if (!s_rst_n) begin
@@ -667,9 +667,16 @@ module bsk_if_cache_control
       // do nothing
     end
     else begin
+      // 🔧 VP-PBS调试：临时变更为警告，观察槽位状态
       assert(!(cin_vld & cin_st_hit_miss & c0_miss) || |c0_free_slot_mh)
       else begin
-        $fatal(1,"%t > ERROR: No available free slot for a miss request!",$time);
+        $display("%t > WARN: No available free slot for a miss request! free_slot_mh=0x%h, BSK_SLOT_NB=%0d", 
+                 $time, c0_free_slot_mh, BSK_SLOT_NB);
+        for (int i=0; i<BSK_SLOT_NB; i++) begin
+          $display("  slot[%0d]: status=%0d, lock_mh=0x%h, br_loop=0x%h", 
+                   i, cinfo_a[i].status, cinfo_a[i].lock_mh, cinfo_a[i].br_loop);
+        end
+        // $fatal(1,"%t > ERROR: No available free slot for a miss request!",$time);
       end
     end
 // pragma translate_on

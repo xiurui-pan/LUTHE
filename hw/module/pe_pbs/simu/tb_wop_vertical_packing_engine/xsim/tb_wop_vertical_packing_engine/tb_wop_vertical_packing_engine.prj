@@ -58,7 +58,7 @@ sv work /home/pxr/workspace/hpu_fpga/hw/module/bsk/module/bsk_if/module/bsk_if_c
 sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/module/pep_common/rtl/PEP_MSPLIT/PEP_MSPLIT_main2_subs2/pep_msplit_definition_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/module/pep_common/rtl/PEP_BATCH/PEP_BATCH_bpbs8_tpbs16/pep_batch_definition_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/module/pep_common/rtl/pep_common_param_pkg.sv
-sv work /home/pxr/workspace/hpu_fpga/hw/module/pep_key_switch/module/pep_ks_common/rtl/KSLB/KSLB_x4y16z3/pep_ks_common_definition_pkg.sv
+sv work /home/pxr/workspace/hpu_fpga/hw/module/pep_key_switch/module/pep_ks_common/rtl/KSLB/KSLB_x2y32z3/pep_ks_common_definition_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/pep_key_switch/module/pep_ks_common/rtl/pep_ks_common_param_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/common_lib/common/rtl/common_lib_bin_to_one_hot.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/common_lib/common/rtl/common_lib_one_hot_to_bin.sv

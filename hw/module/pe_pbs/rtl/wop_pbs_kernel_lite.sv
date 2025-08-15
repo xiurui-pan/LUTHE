@@ -503,8 +503,8 @@ end
 // 🚧 阶段性开发：先确保接口架构正确，后续逐步集成真实模块
 // 当前使用接口兼容的实现，为真实模块集成做准备
 
-// 🚧 阶段1再次暂停：part-select错误仍存在，系统使用BSK_CUT_16不兼容
-// 需要在编译级别解决BSK_CUT配置选择问题
+// 🚧 阶段1.1：虽然BSK_PC参数传递成功，但内部仍有BSK_CUT兼容性问题
+// 需要进一步研究BSK_CUT_NB与BSK_PC的正确组合配置
 /*
 pe_pbs_with_bsk #(
   .MOD_MULT_TYPE(MOD_MULT_TYPE),
@@ -635,11 +635,13 @@ pe_pbs_with_ksk #(
 );
 */
 
-// 🚧 阶段1暂停：BSK参数配置问题待解决，暂时回退到简化实现
-assign bsk_req_rdy = 1'b1;     // BSK暂时回退到简化实现
+// 🚧 阶段1.1：虽然BSK_PC参数传递成功，但BSK_CUT兼容性仍需解决
+// 暂时回到简化实现，继续研究正确的BSK_CUT_NB与BSK_PC组合
+
+assign bsk_req_rdy = 1'b1;     // BSK暂时回到简化实现
 assign ksk_req_rdy = 1'b1;     // KSK保持简化实现
 
-// 🚧 阶段1暂停：BSK/KSK都使用简化实现，研究编译级别BSK_CUT配置
+// BSK/KSK简化实现（等待BSK_CUT兼容性问题解决）
 always_ff @(posedge clk or negedge s_rst_n) begin
   if (!s_rst_n) begin
     bsk_data_avail <= 1'b0;
@@ -647,12 +649,12 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     bsk_data <= '0;
     ksk_data <= '0;
   end else begin
-    // BSK简化实现（research: 需要编译级别控制BSK_CUT配置）
+    // BSK简化实现（策略A: BSK_PC参数传递成功，但仍需解决BSK_CUT兼容性）
     if (bsk_req_vld) begin
       bsk_data_avail <= 1'b1;
       bsk_data[0] <= 32'hDEADBEEF + (bsk_batch_id << 8);
       bsk_data[1] <= 32'hCAFEBABE + (bsk_batch_id << 12);
-      $display("[PBS_LITE] 🔧 BSK research: compile-level BSK_CUT config needed");
+      $display("[PBS_LITE] 🔧 BSK Strategy A progress: param passing OK, BSK_CUT compatibility pending");
     end else begin
       bsk_data_avail <= 1'b0;
     end
@@ -661,7 +663,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       ksk_data_avail <= 1'b1;
       ksk_data[0] <= extract_result[0] ^ 32'h5A5A5A5A;
       ksk_data[1] <= extract_result[1] ^ 32'hA5A5A5A5;
-      $display("[PBS_LITE] 🔧 KSK research: real integration after BSK resolved");
+      $display("[PBS_LITE] 🔧 KSK simplified: real integration pending BSK completion");
     end else begin
       ksk_data_avail <= 1'b0;
     end

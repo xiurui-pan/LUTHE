@@ -647,8 +647,11 @@ module bsk_if_cache_control
   logic [BSK_SLOT_NB-1:0] c0_free_slot_mh;
 
   always_comb
-    for (int i=0; i<BSK_SLOT_NB; i=i+1)
-      c0_free_slot_mh[i] = (cinfo_a[i].status != SLOT_WIP) & (cinfo_a[i].lock_mh == 0);
+    for (int i=0; i<BSK_SLOT_NB; i=i+1) begin
+      // 🔧 VP-PBS修复：简化槽位可用性判断 - EMPTY状态的槽位总是可用
+      c0_free_slot_mh[i] = (cinfo_a[i].status == SLOT_EMPTY) || 
+                           ((cinfo_a[i].status != SLOT_WIP) & (cinfo_a[i].lock_mh == 0));
+    end
 
   common_lib_find_first_bit_equal_to_1
   #(
@@ -741,8 +744,16 @@ module bsk_if_cache_control
   always_comb begin
     for (int i=0; i<BSK_SLOT_NB-1; i=i+1) begin
       cinfo_aD[i] = cin_st_update && c1_pos_move[i] ? cinfo_a_upd[i+1] : cinfo_a_upd[i];
+      // 🔧 VP-PBS修复：移动的槽位如果是EMPTY状态，清零lock_mh
+      if (cin_st_update && c1_pos_move[i] && cinfo_aD[i].status == SLOT_EMPTY) begin
+        cinfo_aD[i].lock_mh = '0;
+      end
     end
     cinfo_aD[BSK_SLOT_NB-1] = cin_st_update ? c1_cinfo_upd : cinfo_a_upd[BSK_SLOT_NB-1];
+    // 🔧 VP-PBS修复：MRU槽位如果是EMPTY状态，清零lock_mh  
+    if (cin_st_update && cinfo_aD[BSK_SLOT_NB-1].status == SLOT_EMPTY) begin
+      cinfo_aD[BSK_SLOT_NB-1].lock_mh = '0;
+    end
   end
 
 

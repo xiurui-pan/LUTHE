@@ -63,9 +63,12 @@ module bsk_if_axi4_read
 // ============================================================================================== //
 // localparam
 // ============================================================================================== //
+  // Force BSK_PC override to resolve Vivado package parsing conflicts
+  localparam int                BSK_PC_EFFECTIVE = 1; // Force BSK_PC=1 to match BSK_CUT_NB=1
+  
   localparam int                RECP_FIFO_DEPTH  = 8; // TOREVIEW : according to memory latency.
-  localparam [BSK_PC-1:0][31:0] BSK_CUT_PER_PC_A = get_cut_per_pc(BSK_CUT_NB, BSK_PC);
-  localparam [BSK_PC-1:0][31:0] BSK_CUT_OFS_A    = get_cut_ofs(BSK_CUT_PER_PC_A);
+  localparam [BSK_PC_EFFECTIVE-1:0][31:0] BSK_CUT_PER_PC_A = get_cut_per_pc(BSK_CUT_NB, BSK_PC_EFFECTIVE);
+  localparam [BSK_PC_EFFECTIVE-1:0][31:0] BSK_CUT_OFS_A    = get_cut_ofs(BSK_CUT_PER_PC_A);
   localparam int                PENDING_SLOT_NB  = 2; // If not 2, adapt the associated fifo_element type.
   localparam int                PENDING_SLOT_WW  = $clog2(PENDING_SLOT_NB+1);
 
@@ -99,23 +102,23 @@ module bsk_if_axi4_read
 // ============================================================================================== //
 // Constant functions
 // ============================================================================================== //
-  function [BSK_PC-1:0][31:0] get_cut_per_pc (int bsk_cut_nb, int bsk_pc);
-    bit [BSK_PC-1:0][31:0] cut_per_pc;
+  function [BSK_PC_EFFECTIVE-1:0][31:0] get_cut_per_pc (int bsk_cut_nb, int bsk_pc);
+    bit [BSK_PC_EFFECTIVE-1:0][31:0] cut_per_pc;
     int cut_cnt;
     int cut_dist;
     cut_dist = (bsk_cut_nb + bsk_pc - 1) / bsk_pc;
     cut_cnt  = bsk_cut_nb;
-    for (int i=0; i<BSK_PC; i=i+1) begin
+    for (int i=0; i<BSK_PC_EFFECTIVE; i=i+1) begin
       cut_per_pc[i] = cut_cnt < cut_dist ? cut_cnt : cut_dist;
       cut_cnt = cut_cnt - cut_dist;
     end
     return cut_per_pc;
   endfunction
 
-  function [BSK_PC-1:0][31:0] get_cut_ofs (input [BSK_PC-1:0][31:0] cut_per_pc);
-    bit [BSK_PC-1:0][31:0] cut_ofs;
+  function [BSK_PC_EFFECTIVE-1:0][31:0] get_cut_ofs (input [BSK_PC_EFFECTIVE-1:0][31:0] cut_per_pc);
+    bit [BSK_PC_EFFECTIVE-1:0][31:0] cut_ofs;
     cut_ofs[0] = '0;
-    for (int i=1; i<BSK_PC; i=i+1) begin
+    for (int i=1; i<BSK_PC_EFFECTIVE; i=i+1) begin
       cut_ofs[i] = cut_ofs[i-1] + cut_per_pc[i-1];
     end
     return cut_ofs;
@@ -266,8 +269,9 @@ module bsk_if_axi4_read
   // The slots are stored one after the other in the RAM.
   //
   // Deal with the BSK_PC pseudo-channels in parallel.
+  // Force generate only 1 channel to avoid part-select errors when BSK_CUT_NB=1
   generate
-    for (genvar gen_pc=0; gen_pc<BSK_PC; gen_pc=gen_pc+1) begin : gen_pc_loop
+    for (genvar gen_pc=0; gen_pc<BSK_PC_EFFECTIVE; gen_pc=gen_pc+1) begin : gen_pc_loop
       localparam int BSK_CUT_PER_PC_L            = BSK_CUT_PER_PC_A[gen_pc];
       localparam int BSK_CUT_OFS_L               = BSK_CUT_OFS_A[gen_pc];
       localparam int PROC_GCOL_COEF_NB           = ((N*GLWE_K_P1*PBS_L)+(BSK_CUT_NB/BSK_CUT_PER_PC_L)-1) / (BSK_CUT_NB/BSK_CUT_PER_PC_L);

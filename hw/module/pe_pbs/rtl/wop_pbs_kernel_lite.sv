@@ -366,6 +366,7 @@ always_comb begin
     IDLE: begin
       vp_pbs_inst_rdy = 1'b1;
       vp_response.current_state = VP_PBS_IDLE;
+      bsk_data_ready = '0;  // IDLE状态下不准备接收BSK数据
       
       // 简化状态监控：每当有请求时才打印
       if (vp_pbs_inst_vld && $time > 100000) begin
@@ -397,6 +398,7 @@ always_comb begin
     
     LOAD_CMUX_RESULT: begin
       // 从RegFile加载CMux结果
+      bsk_data_ready = '0;  // CMux加载阶段不需要BSK数据
       pep_regf_rd_req_vld = 1'b1;
       pep_regf_rd_req = {cmux_result_addr + process_counter[15:0], 16'h0000};
       
@@ -427,6 +429,7 @@ always_comb begin
       // 触发真实的BSK处理
       bsk_req_vld = 1'b1;
       bsk_batch_id = ggsw_bit_counter;
+      bsk_data_ready = '1;  // VP Engine准备好接收BSK数据
       
       if (bsk_req_rdy && bsk_data_avail) begin
         // 使用真实BSK模块的计算结果，不自己算
@@ -446,6 +449,7 @@ always_comb begin
       // 真实的Sample Extract实现 (基于C++ tLwe32ExtractSample_lvl1)
       // 对应C++: tLwe32ExtractSample_lvl1(result, rotate_lut, env)
       
+      bsk_data_ready = '0;  // Extract阶段不需要BSK数据
       vp_response.current_state = VP_PBS_EXTRACTING;
       
       if (!extract_done) begin
@@ -507,6 +511,7 @@ always_comb begin
     
     WRITE_RESULT: begin
       // 将最终结果写入RegFile
+      bsk_data_ready = '0;  // 写入结果阶段不需要BSK数据
       pep_regf_wr_req_vld = 1'b1;
       pep_regf_wr_req = {output_addr, 16'h0000};
       pep_regf_wr_data_vld[0] = 1'b1;
@@ -546,8 +551,7 @@ end
 // 当前使用接口兼容的实现，为真实模块集成做准备
 
 // 🔧 策略A重大发现：接口维度不匹配，需要修正BSK接口声明
-// 🚧 暂时注释真实模块，先解决part-select错误
-/*
+// ✅ Phase 2: 启用真实的pe_pbs_with_bsk模块，part-select错误已解决
 pe_pbs_with_bsk #(
   .MOD_MULT_TYPE(MOD_MULT_TYPE),
   .REDUCT_TYPE(REDUCT_TYPE),
@@ -602,14 +606,13 @@ pe_pbs_with_bsk #(
   //== BSK coefficients - 真实BSK输出
   .bsk(bsk_data),
   .bsk_vld(bsk_data_avail),
-  .bsk_rdy(bsk_req_rdy),
+  .bsk_rdy(bsk_data_ready),
 
   //== To rif
   .pep_error(),
   .pep_rif_counter_inc(),
   .pep_rif_info()
 );
-*/
 
 // 🚧 阶段1：暂时保持KSK模块注释，专注BSK集成
 /*
@@ -679,19 +682,20 @@ pe_pbs_with_ksk #(
 
 // 🔧 策略A接口修正：使用新的正确维度BSK接口，简化实现进行验证
 
-// 🚧 简化的BSK/KSK驱动（临时恢复简化实现调试part-select错误）
-assign bsk_req_rdy = 1'b1;     // 🚧 BSK简化驱动
-assign ksk_req_rdy = 1'b1;     // KSK简化驱动
+// ✅ Phase 2: 真实BSK模块已启用，简化KSK驱动保留
+// assign bsk_req_rdy = 1'b1;     // ✅ 现在使用真实pe_pbs_with_bsk模块
+assign ksk_req_rdy = 1'b1;     // KSK简化驱动（待Phase 2.2集成）
 
-// 🚧 BSK/KSK简化实现（临时恢复调试part-select错误）
+// ✅ Phase 2: 真实BSK模块已启用，仅保留KSK简化实现
 always_ff @(posedge clk or negedge s_rst_n) begin
   if (!s_rst_n) begin
-    bsk_data_avail <= '0;
+    // bsk_data_avail <= '0;   // ✅ 现在由真实pe_pbs_with_bsk模块处理
     ksk_data_avail <= 1'b0;
-    bsk_data <= '0;
+    // bsk_data <= '0;         // ✅ 现在由真实pe_pbs_with_bsk模块处理
     ksk_data <= '0;
   end else begin
-    // BSK简化实现（使用修正后的多维接口）
+    // ✅ BSK简化实现已删除，现在使用真实pe_pbs_with_bsk模块
+    /*
     if (bsk_req_vld) begin
       bsk_data_avail <= '1;  // 全部valid
       // 为所有维度生成测试数据
@@ -706,6 +710,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     end else begin
       bsk_data_avail <= '0;
     end
+    */
     
     // KSK简化实现
     if (ksk_req_vld && extract_done) begin

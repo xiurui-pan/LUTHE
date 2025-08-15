@@ -34,6 +34,8 @@ module wop_pbs_kernel_lite
   import hpu_common_instruction_pkg::*;
   import vp_pbs_inst_pkg::*;
 #(
+  // BSK_PC是localparam，不能覆盖，需要通过编译配置选择正确的BSK_CUT
+  
   // 基础参数
   parameter int MOD_Q_W = 32,
   parameter int MAX_BIT_WIDTH = 20,
@@ -48,9 +50,9 @@ module wop_pbs_kernel_lite
   parameter  mod_reduct_type_e REDUCT_TYPE         = set_mod_reduct_type(MOD_NTT_TYPE),
   parameter  arith_mult_type_e MULT_TYPE           = MULT_CORE,
   
-  // KSK相关参数修复
-  parameter int KS_BLOCK_COL_W = 4, // 增加到4位，满足要求
-  parameter int KS_BLOCK_ROW_W = 4,
+  // KSK相关参数修复: 强制设置最小值以满足要求
+  parameter int KS_BLOCK_COL_W_MIN = 2,  // 强制最小2位
+  // 其他KS参数通过pep_ks_common_param_pkg导入
   parameter  arith_mult_type_e PHI_MULT_TYPE       = set_ntt_mult_type(MOD_NTT_W,MOD_NTT_TYPE),
   parameter  mod_mult_type_e   PP_MOD_MULT_TYPE    = MOD_MULT_TYPE,
   parameter  arith_mult_type_e PP_MULT_TYPE        = MULT_TYPE,
@@ -494,10 +496,12 @@ end
 // 真实pe_pbs模块实例化 - 从wop_pbs_kernel.sv复制真实的实例化
 // ==============================================================================================
 
-// 临时禁用真实模块实例化，避免参数配置问题
-// 后续在testbench中外部实例化这些模块
+// 🚧 阶段性开发：先确保接口架构正确，后续逐步集成真实模块
+// 当前使用接口兼容的实现，为真实模块集成做准备
+
+// 🚧 阶段1再次暂停：part-select错误仍存在，系统使用BSK_CUT_16不兼容
+// 需要在编译级别解决BSK_CUT配置选择问题
 /*
-// 1. 实例化真实的pe_pbs_with_bsk - 完全按照wop_pbs_kernel.sv的方式
 pe_pbs_with_bsk #(
   .MOD_MULT_TYPE(MOD_MULT_TYPE),
   .REDUCT_TYPE(REDUCT_TYPE),
@@ -559,7 +563,10 @@ pe_pbs_with_bsk #(
   .pep_rif_counter_inc(),
   .pep_rif_info()
 );
+*/
 
+// 🚧 阶段1：暂时保持KSK模块注释，专注BSK集成
+/*
 // 2. 实例化真实的pe_pbs_with_ksk
 pe_pbs_with_ksk #(
   .MOD_MULT_TYPE(MOD_MULT_TYPE),
@@ -624,11 +631,11 @@ pe_pbs_with_ksk #(
 );
 */
 
-// 简化：直接连接接口，真实模块在外部实例化
-assign bsk_req_rdy = 1'b1;
-assign ksk_req_rdy = 1'b1;
+// 🚧 阶段1暂停：BSK参数配置问题待解决，暂时回退到简化实现
+assign bsk_req_rdy = 1'b1;     // BSK暂时回退到简化实现
+assign ksk_req_rdy = 1'b1;     // KSK保持简化实现
 
-// 简化的数据驱动，确保测试能运行
+// 🚧 阶段1暂停：BSK/KSK都使用简化实现，研究编译级别BSK_CUT配置
 always_ff @(posedge clk or negedge s_rst_n) begin
   if (!s_rst_n) begin
     bsk_data_avail <= 1'b0;
@@ -636,20 +643,21 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     bsk_data <= '0;
     ksk_data <= '0;
   end else begin
+    // BSK简化实现（research: 需要编译级别控制BSK_CUT配置）
     if (bsk_req_vld) begin
       bsk_data_avail <= 1'b1;
       bsk_data[0] <= 32'hDEADBEEF + (bsk_batch_id << 8);
       bsk_data[1] <= 32'hCAFEBABE + (bsk_batch_id << 12);
-      $display("[PBS_LITE] ✅ Real BSK interface for bit %0d", bsk_batch_id);
+      $display("[PBS_LITE] 🔧 BSK research: compile-level BSK_CUT config needed");
     end else begin
       bsk_data_avail <= 1'b0;
     end
-    
+    // KSK简化实现
     if (ksk_req_vld && extract_done) begin
       ksk_data_avail <= 1'b1;
       ksk_data[0] <= extract_result[0] ^ 32'h5A5A5A5A;
       ksk_data[1] <= extract_result[1] ^ 32'hA5A5A5A5;
-      $display("[PBS_LITE] ✅ Real KSK interface completed");
+      $display("[PBS_LITE] 🔧 KSK research: real integration after BSK resolved");
     end else begin
       ksk_data_avail <= 1'b0;
     end

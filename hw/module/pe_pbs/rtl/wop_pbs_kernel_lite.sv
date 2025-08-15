@@ -33,6 +33,7 @@ module wop_pbs_kernel_lite
   import axi_if_ksk_axi_pkg::*;
   import hpu_common_instruction_pkg::*;
   import vp_pbs_inst_pkg::*;
+  // 🧪 策略A变体：调试当前BSK_CUT_NB配置
 #(
   // BSK_PC是localparam，不能覆盖，需要通过编译配置选择正确的BSK_CUT
   
@@ -166,6 +167,42 @@ logic cmux_result_loaded;
 logic [9:0][ELL_LVL1-1:0][K:0][N_LVL1-1:0][MOD_Q_W-1:0] ggsw_samples;
 logic [3:0] ggsw_bit_counter;
 
+// 🔬 策略A深度分析：编译时BSK参数详细检查
+initial begin
+  $display("=== Deep BSK Configuration Analysis ===");
+  $display("BSK_PC = %0d", BSK_PC);
+  $display("BSK_CUT_NB = %0d", bsk_mgr_common_param_pkg::BSK_CUT_NB);
+  
+  // 模拟get_cut_per_pc计算
+  $display("--- Cut Distribution Calculation ---");
+  $display("cut_dist = (BSK_CUT_NB + BSK_PC - 1) / BSK_PC = (%0d + %0d - 1) / %0d = %0d", 
+           bsk_mgr_common_param_pkg::BSK_CUT_NB, BSK_PC, BSK_PC, 
+           (bsk_mgr_common_param_pkg::BSK_CUT_NB + BSK_PC - 1) / BSK_PC);
+  
+  // 检查可能的其他影响因素
+  $display("--- Other Relevant Parameters ---");
+  $display("N_LVL1 = %0d", N_LVL1); 
+  $display("GLWE_K = %0d", param_tfhe_pkg::GLWE_K);
+  $display("PBS_L = %0d", param_tfhe_pkg::PBS_L);
+  $display("ELL_LVL1 = %0d", ELL_LVL1);
+  
+  // 检查BSK相关的其他参数
+  if ($test$plusargs("DEEP_BSK_DEBUG")) begin
+    $display("--- BSK Interface Parameters ---");
+    $display("BSK_CUT_FCOEF_NB = %0d", bsk_mgr_common_param_pkg::BSK_CUT_FCOEF_NB);
+    // $display("BSK_ACS_W = %0d", bsk_mgr_common_param_pkg::BSK_ACS_W);  // 参数可能不存在
+  end
+  
+  if (bsk_mgr_common_param_pkg::BSK_CUT_NB < BSK_PC) begin
+    $error("🚨 BSK_CUT_NB (%0d) < BSK_PC (%0d) - This WILL cause part-select errors!", 
+           bsk_mgr_common_param_pkg::BSK_CUT_NB, BSK_PC);
+  end else begin
+    $display("✅ BSK Configuration OK: BSK_CUT_NB (%0d) >= BSK_PC (%0d)", 
+             bsk_mgr_common_param_pkg::BSK_CUT_NB, BSK_PC);
+  end
+  $display("==========================================");
+end
+
 // Blind Rotation结果
 logic [K:0][N_LVL1-1:0][MOD_Q_W-1:0] blind_rot_result;
 logic blind_rot_done;
@@ -197,12 +234,17 @@ logic [7:0] ntt_core_batch_id;
 logic ntt_core_result_avail;
 logic [K:0][N_LVL1-1:0][MOD_Q_W-1:0] ntt_core_result_data;
 
-// BSK模块接口信号 (复用pe_pbs_with_bsk)
+// BSK模块接口信号 (匹配pe_pbs_with_bsk真实接口)
 logic bsk_req_vld;
 logic bsk_req_rdy;
 logic [7:0] bsk_batch_id;
-logic bsk_data_avail;
-logic [1:0][7:0][MOD_Q_W-1:0] bsk_data;
+
+// 🔧 修正BSK接口匹配真实的pe_pbs_with_bsk模块
+// 实际接口：[PSI-1:0][R-1:0][GLWE_K_P1-1:0][MOD_NTT_W-1:0]
+// 使用参数：PSI, R, GLWE_K_P1, MOD_NTT_W
+logic [PSI-1:0][R-1:0][GLWE_K_P1-1:0][MOD_NTT_W-1:0] bsk_data;
+logic [PSI-1:0][R-1:0][GLWE_K_P1-1:0] bsk_data_avail;
+logic [PSI-1:0][R-1:0][GLWE_K_P1-1:0] bsk_data_ready;
 
 // KSK模块接口信号 (复用pe_pbs_with_ksk)
 logic ksk_req_vld;
@@ -503,8 +545,8 @@ end
 // 🚧 阶段性开发：先确保接口架构正确，后续逐步集成真实模块
 // 当前使用接口兼容的实现，为真实模块集成做准备
 
-// 🚧 阶段1.1：虽然BSK_PC参数传递成功，但内部仍有BSK_CUT兼容性问题
-// 需要进一步研究BSK_CUT_NB与BSK_PC的正确组合配置
+// 🔧 策略A重大发现：接口维度不匹配，需要修正BSK接口声明
+// 暂时回到简化实现，逐步修正接口匹配问题
 /*
 pe_pbs_with_bsk #(
   .MOD_MULT_TYPE(MOD_MULT_TYPE),
@@ -635,35 +677,42 @@ pe_pbs_with_ksk #(
 );
 */
 
-// 🚧 阶段1.1：虽然BSK_PC参数传递成功，但BSK_CUT兼容性仍需解决
-// 暂时回到简化实现，继续研究正确的BSK_CUT_NB与BSK_PC组合
+// 🔧 策略A接口修正：使用新的正确维度BSK接口，简化实现进行验证
 
-assign bsk_req_rdy = 1'b1;     // BSK暂时回到简化实现
-assign ksk_req_rdy = 1'b1;     // KSK保持简化实现
+// 简化的BSK/KSK驱动（使用正确的接口维度）
+assign bsk_req_rdy = 1'b1;     // BSK简化驱动
+assign ksk_req_rdy = 1'b1;     // KSK简化驱动
 
-// BSK/KSK简化实现（等待BSK_CUT兼容性问题解决）
+// BSK/KSK简化实现（使用修正后的接口维度）
 always_ff @(posedge clk or negedge s_rst_n) begin
   if (!s_rst_n) begin
-    bsk_data_avail <= 1'b0;
+    bsk_data_avail <= '0;
     ksk_data_avail <= 1'b0;
     bsk_data <= '0;
     ksk_data <= '0;
   end else begin
-    // BSK简化实现（策略A: BSK_PC参数传递成功，但仍需解决BSK_CUT兼容性）
+    // BSK简化实现（使用新的多维接口）
     if (bsk_req_vld) begin
-      bsk_data_avail <= 1'b1;
-      bsk_data[0] <= 32'hDEADBEEF + (bsk_batch_id << 8);
-      bsk_data[1] <= 32'hCAFEBABE + (bsk_batch_id << 12);
-      $display("[PBS_LITE] 🔧 BSK Strategy A progress: param passing OK, BSK_CUT compatibility pending");
+      bsk_data_avail <= '1;  // 全部valid
+      // 为所有维度生成测试数据
+      for (int psi_idx = 0; psi_idx < PSI; psi_idx++) begin
+        for (int r_idx = 0; r_idx < R; r_idx++) begin
+          for (int glwe_idx = 0; glwe_idx < GLWE_K_P1; glwe_idx++) begin
+            bsk_data[psi_idx][r_idx][glwe_idx] <= 32'hDEADBEEF + (psi_idx << 16) + (r_idx << 8) + glwe_idx;
+          end
+        end
+      end
+      $display("[PBS_LITE] 🔧 BSK interface corrected: PSI=%0d, R=%0d, GLWE_K_P1=%0d", PSI, R, GLWE_K_P1);
     end else begin
-      bsk_data_avail <= 1'b0;
+      bsk_data_avail <= '0;
     end
+    
     // KSK简化实现
     if (ksk_req_vld && extract_done) begin
       ksk_data_avail <= 1'b1;
       ksk_data[0] <= extract_result[0] ^ 32'h5A5A5A5A;
       ksk_data[1] <= extract_result[1] ^ 32'hA5A5A5A5;
-      $display("[PBS_LITE] 🔧 KSK simplified: real integration pending BSK completion");
+      $display("[PBS_LITE] 🔧 KSK simplified: BSK interface corrected");
     end else begin
       ksk_data_avail <= 1'b0;
     end

@@ -4,10 +4,10 @@ TOPLEVEL      = tb_wop_vertical_packing_engine
 
 VLOG_DEFINES  = 
 VLOG_INCLUDES = -i /home/pxr/workspace/hpu_fpga/hw/module/top_common/rtl/inc -i /home/pxr/workspace/hpu_fpga/hw/module/number_theoretic_transform/module/ntt_core_common/rtl/inc -i /home/pxr/workspace/hpu_fpga/hw/module/pep_mono_mult_acc/module/pep_mmacc_splitc/module/pep_mmacc_splitc_sxt/rtl/inc -i /home/pxr/workspace/hpu_fpga/hw/common_lib/mod_arithmetic/module/mod_reduct/module/mod_reduct_barrett/rtl/coverage -i /home/pxr/workspace/hpu_fpga/hw/module/number_theoretic_transform/module/ntt_core_gf64/module/ntt_core_gf64_network/rtl/inc
-GEN_PARAMS    = --generic_top "MOD_Q_W=32" --generic_top "MAX_BIT_WIDTH=20" --generic_top "N_LVL1=1024" --generic_top "ELL_LVL1=3"
+GEN_PARAMS    = --generic_top "MOD_Q_W=32" --generic_top "MAX_BIT_WIDTH=20" --generic_top "N_LVL1=1024" --generic_top "ELL_LVL1=3" --generic_top "BSK_PC=1" --generic_top "KSK_PC=1"
 
 XELAB_OPTIONS =	-debug typical
-XSIM_OPTIONS  = -sv_seed 110788949835776 -ignore_coverage
+XSIM_OPTIONS  = -sv_seed 233481133096960 -ignore_coverage
 
 XSIM_WAVE_TCL = /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/xsim/tb_wop_vertical_packing_engine/dump_wave.tcl
 XSIM_WDB      = /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/xsim/tb_wop_vertical_packing_engine/wave.wdb

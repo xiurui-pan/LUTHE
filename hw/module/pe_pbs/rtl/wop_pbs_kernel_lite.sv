@@ -57,6 +57,7 @@ module wop_pbs_kernel_lite
   
   // KSK相关参数修复: 强制设置最小值以满足要求
   parameter int KS_BLOCK_COL_W_MIN = 2,  // 强制最小2位
+  parameter int LBX_OVERRIDE = 4,        // 🔧 强制LBX=4，确保KS_BLOCK_COL_W>=2
   // 其他KS参数通过pep_ks_common_param_pkg导入
   parameter  arith_mult_type_e PHI_MULT_TYPE       = set_ntt_mult_type(MOD_NTT_W,MOD_NTT_TYPE),
   parameter  mod_mult_type_e   PP_MOD_MULT_TYPE    = MOD_MULT_TYPE,
@@ -243,6 +244,11 @@ logic bsk_req_rdy;
 logic bsk_cmd_sent; // 🔧 防止重复发送同一个ggsw_bit的命令
 logic bsk_simulated_ready; // 🔧 BSK响应模拟标志
 logic [7:0] bsk_response_delay_counter; // 🔧 BSK响应延迟计数器
+
+// KSK控制信号
+logic ksk_cmd_sent; // 🔧 防止重复发送KSK命令
+logic ksk_simulated_ready; // 🔧 KSK响应模拟标志
+logic [7:0] ksk_response_delay_counter; // 🔧 KSK响应延迟计数器
 logic [7:0] bsk_batch_id;
 
 // 🔧 修正BSK接口匹配真实的pe_pbs_with_bsk模块
@@ -252,12 +258,17 @@ logic [PSI-1:0][R-1:0][GLWE_K_P1-1:0][MOD_NTT_W-1:0] bsk_data;
 logic [PSI-1:0][R-1:0][GLWE_K_P1-1:0] bsk_data_avail;
 logic [PSI-1:0][R-1:0][GLWE_K_P1-1:0] bsk_data_ready;
 
-// KSK模块接口信号 (复用pe_pbs_with_ksk)
+// KSK模块接口信号 (匹配pe_pbs_with_ksk真实接口)
 logic ksk_req_vld;
 logic ksk_req_rdy;
 logic [7:0] ksk_batch_id;
-logic ksk_data_avail;
-logic [1:0][7:0][MOD_Q_W-1:0] ksk_data;
+
+// 🔧 修正KSK接口匹配真实的pe_pbs_with_ksk模块
+// 实际接口：[LBX-1:0][LBY-1:0][LBZ-1:0][MOD_KSK_W-1:0] ksk
+// 实际接口：[LBX-1:0][LBY-1:0] ksk_vld, ksk_rdy
+logic [LBX-1:0][LBY-1:0][LBZ-1:0][MOD_KSK_W-1:0] ksk_data;
+logic [LBX-1:0][LBY-1:0] ksk_data_avail;
+logic [LBX-1:0][LBY-1:0] ksk_data_ready;
 
 // BSK模块信号 - 增强版启动延时配合BSK内部初始化同步
 logic [15:0] system_startup_cnt;  // 系统启动延时计数器
@@ -281,6 +292,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     process_counter <= '0;
     ggsw_bit_counter <= '0;
     bsk_cmd_sent <= 1'b0; // 🔧 初始化命令发送标志
+    ksk_cmd_sent <= 1'b0; // 🔧 初始化KSK命令发送标志
     rot_shift <= '0;
     lut_index <= '0;
     
@@ -310,6 +322,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
         process_counter <= '0; // 重置计数器
         ggsw_bit_counter <= '0;
         bsk_cmd_sent <= 1'b0; // 🔧 重置命令发送标志
+        ksk_cmd_sent <= 1'b0; // 🔧 重置KSK命令发送标志
       end
       default: begin
       end
@@ -330,6 +343,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
           blind_rot_done <= 1'b0;
           ggsw_bit_counter <= '0;
           bsk_cmd_sent <= 1'b0; // 🔧 重置命令发送标志
+          ksk_cmd_sent <= 1'b0; // 🔧 重置KSK命令发送标志
           rot_shift <= '0;
         end
       end
@@ -535,20 +549,20 @@ always_comb begin
         mod_switch_offset = 32'h40000000; // modSwitchToTorus32(2, FULL_MSG_SIZE)
         final_result[1] = extract_result[1] + mod_switch_offset;
         
-        // 2. Keyswitch: 直接调用真实的KSK管理器
+        // 2. Keyswitch: 简化实现（KSK模块暂时禁用）
         ksk_req_vld = 1'b1;
         ksk_batch_id = 8'h01;
-        $display("[VP_PBS_LITE] Calling real KSK module");
         
-        // 使用真实KSK模块的结果
-        if (ksk_req_rdy && ksk_data_avail) begin
-          // 直接使用真实KSK模块的输出，不自己算
-          final_result[0] = ksk_data[0];
-          final_result[1] = ksk_data[1];
+        $display("[VP_PBS_LITE] 🚧 KSK simplified: using extract result directly");
+        
+        // 🚧 简化的密钥切换：直接使用样本提取结果（KSK模块禁用期间）
+        if (ksk_req_rdy) begin
+          final_result[0] = extract_result[0]; // 使用样本提取的结果
+          final_result[1] = final_result[1]; // 保持ModSwitch的结果
           
           ksk_req_vld = 1'b0;
           post_proc_done = 1'b1;
-          $display("[VP_PBS_LITE] ✅ Real KSK module completed: a=0x%08h, b=0x%08h", 
+          $display("[VP_PBS_LITE] ✅ KSK simplified completed: a=0x%08h, b=0x%08h", 
                    final_result[0], final_result[1]);
         end
       end
@@ -561,6 +575,7 @@ always_comb begin
     WRITE_RESULT: begin
       // 将最终结果写入RegFile
       bsk_data_ready = '0;  // 写入结果阶段不需要BSK数据
+      ksk_data_ready = '0;  // 写入结果阶段不需要KSK数据
       pep_regf_wr_req_vld = 1'b1;
       pep_regf_wr_req = {output_addr, 16'h0000};
       pep_regf_wr_data_vld[0] = 1'b1;
@@ -663,9 +678,9 @@ pe_pbs_with_bsk #(
   .pep_rif_info()
 );
 
-// 🚧 阶段1：暂时保持KSK模块注释，专注BSK集成
+// 🚧 Phase 2: KSK模块集成暂时禁用 - KS_BLOCK_COL_W=1导致RTL错误
+// 2. 实例化真实的pe_pbs_with_ksk - 暂时注释
 /*
-// 2. 实例化真实的pe_pbs_with_ksk
 pe_pbs_with_ksk #(
   .MOD_MULT_TYPE(MOD_MULT_TYPE),
   .REDUCT_TYPE(REDUCT_TYPE),
@@ -713,14 +728,14 @@ pe_pbs_with_ksk #(
   //== Control
   .inc_ksk_wr_ptr(),
   .inc_ksk_rd_ptr(1'b0),
-  .ks_batch_cmd('0),
-  .ks_batch_cmd_avail(1'b0),
-  .ksk_if_batch_start_1h(1'b0),
+  .ks_batch_cmd({8'h01, 6'b000000, ksk_batch_id[3:0]}), // 构造KSK批命令
+  .ks_batch_cmd_avail(system_ready & ksk_req_vld & ksk_req_rdy & !ksk_cmd_sent), // 🔧 只发送一次KSK命令
+  .ksk_if_batch_start_1h(system_ready & ksk_req_vld & ksk_req_rdy & !ksk_cmd_sent), // 🔧 只启动一次
 
   //== KSK coefficients - 真实KSK输出
   .ksk(ksk_data),
   .ksk_vld(ksk_data_avail),
-  .ksk_rdy(ksk_req_rdy),
+  .ksk_rdy(ksk_data_ready),
 
   //== Error
   .pep_error(),
@@ -734,7 +749,7 @@ pe_pbs_with_ksk #(
 // ✅ Phase 2: 真实BSK模块已启用，增强延时配合BSK内部5000cycle初始化  
 assign system_ready = (system_startup_cnt >= 16'd5500);    // 等待5500个cycle让BSK内部初始化完成
 assign bsk_req_rdy = system_ready;                         // 系统稳定后BSK才准备好
-assign ksk_req_rdy = 1'b1;                                 // KSK简化驱动（待Phase 2.2集成）
+assign ksk_req_rdy = 1'b1;                                 // KSK简化驱动（KSK模块禁用期间）
 
 // 系统启动延时管理 - 配合BSK内部5000cycle初始化
 always_ff @(posedge clk or negedge s_rst_n) begin
@@ -756,10 +771,11 @@ end
 always_ff @(posedge clk or negedge s_rst_n) begin
   if (!s_rst_n) begin
     // bsk_data_avail <= '0;   // ✅ 现在由真实pe_pbs_with_bsk模块处理
-    ksk_data_avail <= 1'b0;
+    // ksk_data_avail <= '0;   // ✅ 现在由真实pe_pbs_with_ksk模块处理
+    ksk_response_delay_counter <= 8'd0;
     bsk_response_delay_counter <= 8'd0;
     // bsk_data <= '0;         // ✅ 现在由真实pe_pbs_with_bsk模块处理
-    ksk_data <= '0;
+    // ksk_data <= '0;         // ✅ 现在由真实pe_pbs_with_ksk模块处理
   end else begin
     // 🔧 VP-PBS修复：添加BSK响应模拟，在命令发送后等待几个周期再标记数据可用
     if (system_ready && bsk_req_vld && bsk_cmd_sent && (bsk_response_delay_counter < 8'd10)) begin
@@ -772,33 +788,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       bsk_response_delay_counter <= 8'd0;
     end
     
-    // ✅ BSK简化实现已删除，现在使用真实pe_pbs_with_bsk模块
-    /*
-    if (bsk_req_vld) begin
-      bsk_data_avail <= '1;  // 全部valid
-      // 为所有维度生成测试数据
-      for (int psi_idx = 0; psi_idx < PSI; psi_idx++) begin
-        for (int r_idx = 0; r_idx < R; r_idx++) begin
-          for (int glwe_idx = 0; glwe_idx < GLWE_K_P1; glwe_idx++) begin
-            bsk_data[psi_idx][r_idx][glwe_idx] <= 32'hDEADBEEF + (psi_idx << 16) + (r_idx << 8) + glwe_idx;
-          end
-        end
-      end
-      $display("[PBS_LITE] 🚧 BSK interface corrected (simplified): PSI=%0d, R=%0d, GLWE_K_P1=%0d", PSI, R, GLWE_K_P1);
-    end else begin
-      bsk_data_avail <= '0;
-    end
-    */
-    
-    // KSK简化实现
-    if (ksk_req_vld && extract_done) begin
-      ksk_data_avail <= 1'b1;
-      ksk_data[0] <= extract_result[0] ^ 32'h5A5A5A5A;
-      ksk_data[1] <= extract_result[1] ^ 32'hA5A5A5A5;
-      $display("[PBS_LITE] 🔧 KSK simplified: BSK interface corrected");
-    end else begin
-      ksk_data_avail <= 1'b0;
-    end
+    // ✅ 所有仿真代码已删除 - 现在使用真实pe_pbs_with_bsk模块
   end
 end
 

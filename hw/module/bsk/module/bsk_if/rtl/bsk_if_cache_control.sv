@@ -54,7 +54,7 @@ module bsk_if_cache_control
   localparam int PREFETCH_MAX     = LWE_K < PREFETCH_MAX_TMP ? LWE_K : PREFETCH_MAX_TMP;
   localparam int PREFETCH_WW      = $clog2(PREFETCH_MAX+1) == 0 ? 1 : $clog2(PREFETCH_MAX+1); // Count from 0 to PREFETCH_MAX included
 
-  localparam int RFIFO_DEPTH      = 4; // TOREVIEW
+  localparam int RFIFO_DEPTH      = 16; // 🔧 VP-PBS修复：增加FIFO深度避免溢出
 
 // ============================================================================================== //
 // type

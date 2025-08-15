@@ -165,8 +165,8 @@ if [ $GEN_STIMULI -eq 1 ] ; then
   echo "INFO> Running : $pkg_cmd"
   $pkg_cmd || exit 1
 
-  # Optionally ensure vp_pbs_inst_pkg.sv is available under gen/rtl tree for edalize
-  if [ "${USE_VP_PBS_INST_PKG:-0}" -eq 1 ]; then
+  # Ensure vp_pbs_inst_pkg.sv is available under gen/rtl tree for edalize
+if [ "${USE_VP_PBS_INST_PKG:-1}" -eq 1 ]; then
     VP_PKG_SRC="${PROJECT_DIR}/hw/module/pe_pbs/rtl/vp_pbs_inst_pkg.sv"
     VP_PKG_DST_DIR="${RTL_DIR}/hw/module/pe_pbs/rtl"
     VP_PKG_DST="${VP_PKG_DST_DIR}/vp_pbs_inst_pkg.sv"
@@ -184,8 +184,8 @@ if [ $GEN_STIMULI -eq 1 ] ; then
   echo "INFO> Running : $file_list_cmd"
   $file_list_cmd || exit 1
 
-  # Optionally inject vp_pbs_inst_pkg.sv into file_list.json
-  if [ "${USE_VP_PBS_INST_PKG:-0}" -eq 1 ]; then
+  # Inject vp_pbs_inst_pkg.sv into file_list.json 
+if [ "${USE_VP_PBS_INST_PKG:-1}" -eq 1 ]; then
     python3 - "$INFO_DIR/file_list.json" <<'PY'
 import json,sys
 path=sys.argv[1]

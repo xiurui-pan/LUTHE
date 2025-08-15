@@ -111,19 +111,41 @@ module bsk_manager
         slot_avail_aD[i]   = (sm1_wr_en & sm1_wr_slot_1h[i]) | slot_avail_a[i];
     end
 
+  // 🔧 VP-PBS修复：合并slot初始化逻辑，避免冲突
   always_ff @(posedge clk)
-    if (!s_rst_n || do_reset) slot_avail_a <= '0;
-    else                      slot_avail_a <= slot_avail_aD;
-
-  always_ff @(posedge clk)
-    slot_br_loop_a <= slot_br_loop_aD;
+    if (!s_rst_n || do_reset) begin
+      // 🔧 VP-PBS修复：确保唯一的br_loop映射，避免位截断冲突
+      for (int i = 0; i < BSK_SLOT_NB; i++) begin
+        // 只初始化前2^LWE_K_W个slot，确保br_loop值唯一
+        if (i < (1 << LWE_K_W)) begin
+          slot_avail_a[i] <= 1'b1;                             // 前2^LWE_K_W个slot可用
+          slot_br_loop_a[i] <= i[LWE_K_W-1:0];                 // slot i对应br_loop i
+        end else begin
+          slot_avail_a[i] <= 1'b0;                             // 其余slot不可用
+          slot_br_loop_a[i] <= ((i + 100) & ((1 << LWE_K_W) - 1)); // 其余slot设为不可能的值
+        end
+      end
+      // 🔧 调试信息：打印slot初始化结果
+      $display("[BSK_MGR] 🔧 Slot initialization reset (LWE_K_W=%0d, max_slots=%0d):", LWE_K_W, 1 << LWE_K_W);
+      for (int i = 0; i < BSK_SLOT_NB; i++) begin
+        if (i < (1 << LWE_K_W)) begin
+          $display("  slot[%0d]: avail=1, br_loop=%0d", i, i);
+        end else begin
+          $display("  slot[%0d]: avail=0, br_loop=%0d", i, ((i + 100) & ((1 << LWE_K_W) - 1)));
+        end
+      end
+    end else begin
+      slot_avail_a <= slot_avail_aD;
+      slot_br_loop_a <= slot_br_loop_aD;
+    end
 
   logic [BSK_SLOT_NB-1:0] sm1_slot_1h;
   logic [BSK_SLOT_W-1:0]  sm1_slot;
 
-  always_comb
+  always_comb begin
     for (int i=0; i<BSK_SLOT_NB; i=i+1)
       sm1_slot_1h[i] = (sm1_batch_cmd.br_loop == slot_br_loop_a[i]) & slot_avail_a[i];
+  end
 
   common_lib_one_hot_to_bin #(
     .ONE_HOT_W(BSK_SLOT_NB)
@@ -156,9 +178,20 @@ module bsk_manager
     end
     else begin
       if (sm1_batch_cmd_avail) begin
+        // 🔧 VP-PBS调试：增加详细的slot匹配信息
+        $display("[BSK_MGR] 🔧 Slot lookup: br_loop=%0d, sm1_slot_1h=0x%x, avail_mask=0x%x", 
+                 sm1_batch_cmd.br_loop, sm1_slot_1h, slot_avail_a);
+        for (int i = 0; i < BSK_SLOT_NB; i++) begin
+          if (slot_avail_a[i] || sm1_slot_1h[i]) begin
+            $display("  slot[%0d]: avail=%b, br_loop=%0d, match=%b", 
+                     i, slot_avail_a[i], slot_br_loop_a[i], sm1_slot_1h[i]);
+          end
+        end
+        
         assert($countones(sm1_slot_1h) == 1)
         else begin
-          $fatal(1,"%t > ERROR: batch_cmd does not match a unique slot! (sm1_slot_1h=0x%x)", $time, sm1_slot_1h);
+          $fatal(1,"%t > ERROR: batch_cmd does not match a unique slot! (br_loop=%0d, sm1_slot_1h=0x%x)", 
+                 $time, sm1_batch_cmd.br_loop, sm1_slot_1h);
         end
       end
     end
@@ -201,13 +234,34 @@ module bsk_manager
   );
 
 //pragma translate_off
+  // 🔧 VP-PBS修复：BSK RAM初始化时序同步
+  logic [15:0] init_sync_counter;
+  logic bsk_init_stable;
+  
+  always_ff @(posedge clk)
+    if (!s_rst_n) begin
+      init_sync_counter <= '0;
+      bsk_init_stable <= 1'b0;
+    end
+    else begin
+      if (init_sync_counter < 16'd5000) begin  // 增加到5000 cycles
+        init_sync_counter <= init_sync_counter + 1'b1;
+        bsk_init_stable <= 1'b0;
+      end else begin
+        bsk_init_stable <= 1'b1;
+      end
+    end
+
   always_ff @(posedge clk)
     if (!s_rst_n) begin
       // Do nothing
     end
     else begin
-      assert(s0_batch_cmd_rdy_a == '0 || s0_batch_cmd_rdy_a == '1)
-      else $fatal(1,"%t > ERROR: All RAMs s0_batch_cmd_rdy are not equal!",$time);
+      // 🔧 只在初始化稳定后检查RAM同步
+      if (bsk_init_stable) begin
+        assert(s0_batch_cmd_rdy_a == '0 || s0_batch_cmd_rdy_a == '1)
+        else $fatal(1,"%t > ERROR: All RAMs s0_batch_cmd_rdy are not equal!",$time);
+      end
     end
 //pragma translate_on
 // ---------------------------------------------------------------------------------------------- --

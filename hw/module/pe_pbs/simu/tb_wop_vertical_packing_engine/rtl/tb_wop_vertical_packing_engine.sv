@@ -25,6 +25,7 @@ module tb_wop_vertical_packing_engine
   import axi_if_glwe_axi_pkg::*;
   import pep_common_param_pkg::*;
   import hpu_common_instruction_pkg::*;
+  import vp_pbs_inst_pkg::*;
 #(
   parameter int MOD_Q_W = 32,
   parameter int MAX_BIT_WIDTH = 20,
@@ -68,7 +69,7 @@ module tb_wop_vertical_packing_engine
   logic lut_data_avail;
   logic [axi_if_glwe_axi_pkg::AXI4_DATA_W-1:0] lut_data;
   
-  // RegFile interface
+  // 共享RegFile接口信号
   logic regf_rd_req_vld;
   logic regf_rd_req_rdy;
   logic [REGF_RD_REQ_W-1:0] regf_rd_req;
@@ -82,15 +83,36 @@ module tb_wop_vertical_packing_engine
   logic [REGF_COEF_NB-1:0] regf_wr_data_rdy;
   logic [REGF_COEF_NB-1:0][MOD_Q_W-1:0] regf_wr_data;
   
-  // PBS interface signals
-  logic [PE_INST_W-1:0] pbs_inst;
-  logic pbs_inst_vld;
-  logic pbs_inst_rdy;
-  logic pbs_inst_ack;
-  logic pbs_inst_load_blwe_ack;
+  // VP Engine独立RegFile信号
+  logic vp_regf_rd_req_vld;
+  logic [REGF_RD_REQ_W-1:0] vp_regf_rd_req;
+  logic vp_regf_wr_req_vld;
+  logic [REGF_WR_REQ_W-1:0] vp_regf_wr_req;
+  logic [REGF_COEF_NB-1:0] vp_regf_wr_data_vld;
+  logic [REGF_COEF_NB-1:0][MOD_Q_W-1:0] vp_regf_wr_data;
+  
+  // PBS Kernel Lite独立RegFile信号
+  logic pbs_regf_rd_req_vld;
+  logic [REGF_RD_REQ_W-1:0] pbs_regf_rd_req;
+  logic pbs_regf_wr_req_vld;
+  logic [REGF_WR_REQ_W-1:0] pbs_regf_wr_req;
+  logic [REGF_COEF_NB-1:0] pbs_regf_wr_data_vld;
+  logic [REGF_COEF_NB-1:0][MOD_Q_W-1:0] pbs_regf_wr_data;
+  
+  // VP-PBS interface signals (new protocol)
+  vp_pbs_inst_t vp_pbs_inst;
+  logic vp_pbs_inst_vld;
+  logic vp_pbs_inst_rdy;
+  logic vp_pbs_inst_ack;
+  vp_pbs_response_t vp_pbs_response;
+  
+
   
   // RegFile memory simulation
   logic [MOD_Q_W-1:0] regfile_memory [0:65535];
+  
+  // Track captured result write index
+  int actual_write_index;
 
 // ==============================================================================================
 // Test Data Storage
@@ -160,24 +182,133 @@ module tb_wop_vertical_packing_engine
     .lut_req_rdy(lut_req_rdy),
     .lut_data_avail(lut_data_avail),
     .lut_data(lut_data),
-    .regf_rd_req_vld(regf_rd_req_vld),
+    .regf_rd_req_vld(vp_regf_rd_req_vld),
     .regf_rd_req_rdy(regf_rd_req_rdy),
-    .regf_rd_req(regf_rd_req),
+    .regf_rd_req(vp_regf_rd_req),
     .regf_rd_data_avail(regf_rd_data_avail),
     .regf_rd_data(regf_rd_data),
-    .regf_wr_req_vld(regf_wr_req_vld),
+    .regf_wr_req_vld(vp_regf_wr_req_vld),
     .regf_wr_req_rdy(regf_wr_req_rdy),
-    .regf_wr_req(regf_wr_req),
-    .regf_wr_data_vld(regf_wr_data_vld),
+    .regf_wr_req(vp_regf_wr_req),
+    .regf_wr_data_vld(vp_regf_wr_data_vld),
     .regf_wr_data_rdy(regf_wr_data_rdy),
-    .regf_wr_data(regf_wr_data),
-    // PBS service interface
-    .pbs_inst(pbs_inst),
-    .pbs_inst_vld(pbs_inst_vld),
-    .pbs_inst_rdy(pbs_inst_rdy),
-    .pbs_inst_ack(pbs_inst_ack),
-    .pbs_inst_load_blwe_ack(pbs_inst_load_blwe_ack)
+    .regf_wr_data(vp_regf_wr_data),
+    // VP-PBS service interface (connected to wop_pbs_kernel)
+    .vp_pbs_inst(vp_pbs_inst),
+    .vp_pbs_inst_vld(vp_pbs_inst_vld),
+    .vp_pbs_inst_rdy(vp_pbs_inst_rdy),
+    .vp_pbs_inst_ack(vp_pbs_inst_ack),
+    .vp_pbs_response(vp_pbs_response)
   );
+
+// ==============================================================================================
+// Real wop_pbs_kernel Integration (VP-PBS Protocol)  
+// ==============================================================================================
+
+  // WOP PBS Kernel接口信号
+  logic [PE_INST_W-1:0] wop_pbs_inst;
+  logic wop_pbs_inst_vld;
+  logic wop_pbs_inst_rdy;
+  logic wop_pbs_inst_ack;
+  
+  // 简化的共享接口信号 (测试用)
+  logic reset_bsk_cache = 1'b0;
+  logic reset_bsk_cache_done;
+  logic bsk_mem_avail = 1'b1;
+  logic [1:0][axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] bsk_mem_addr = '0;
+  logic reset_ksk_cache = 1'b0;
+  logic reset_ksk_cache_done;
+  logic ksk_mem_avail = 1'b1;
+  logic [1:0][axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] ksk_mem_addr = '0;
+  logic reset_cache = 1'b0;
+  logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] gid_offset = '0;
+  logic [1:0][7:0][MOD_Q_W-1:0] twd_omg_ru_r_pow = '0;
+  
+  // Real wop_pbs_kernel_lite实例化 (精简版，专为VP服务)
+  wop_pbs_kernel_lite #(
+    .MOD_Q_W(MOD_Q_W),
+    .MAX_BIT_WIDTH(MAX_BIT_WIDTH),
+    .N_LVL1(N_LVL1),
+    .ELL_LVL1(ELL_LVL1),
+    .K(K),
+    .REGF_ADDR_W(REGF_ADDR_W)
+  ) u_wop_pbs_kernel_lite (
+    .clk(clk),
+    .s_rst_n(s_rst_n),
+    
+    // VP-PBS专用接口 (连接到VP Engine) - 精简版只有VP接口
+    .vp_pbs_inst(vp_pbs_inst),
+    .vp_pbs_inst_vld(vp_pbs_inst_vld),
+    .vp_pbs_inst_rdy(vp_pbs_inst_rdy),
+    .vp_pbs_inst_ack(vp_pbs_inst_ack),
+    .vp_pbs_response(vp_pbs_response),
+    
+    // RegFile接口 (简化，只连接关键信号)
+    .pep_regf_wr_req_vld(pbs_regf_wr_req_vld),
+    .pep_regf_wr_req_rdy(regf_wr_req_rdy),
+    .pep_regf_wr_req(pbs_regf_wr_req),
+    .pep_regf_wr_data_vld(pbs_regf_wr_data_vld),
+    .pep_regf_wr_data_rdy(regf_wr_data_rdy),
+    .pep_regf_wr_data(pbs_regf_wr_data),
+    .regf_pep_wr_ack(1'b1), // 简化应答
+    
+    .pep_regf_rd_req_vld(pbs_regf_rd_req_vld),
+    .pep_regf_rd_req_rdy(regf_rd_req_rdy),
+    .pep_regf_rd_req(pbs_regf_rd_req),
+    .regf_pep_rd_data_avail(regf_rd_data_avail),
+    .regf_pep_rd_data(regf_rd_data),
+    .regf_pep_rd_last_word(1'b1),
+    
+    // AXI接口 (简化，连接到LUT模拟器)
+    .m_axi4_glwe_arid(),
+    .m_axi4_glwe_araddr(),
+    .m_axi4_glwe_arlen(),
+    .m_axi4_glwe_arsize(),
+    .m_axi4_glwe_arburst(),
+    .m_axi4_glwe_arvalid(),
+    .m_axi4_glwe_arready(lut_req_rdy),
+    .m_axi4_glwe_rid('0),
+    .m_axi4_glwe_rdata(lut_data),
+    .m_axi4_glwe_rresp('0),
+    .m_axi4_glwe_rlast(1'b1),
+    .m_axi4_glwe_rvalid(lut_data_avail),
+    .m_axi4_glwe_rready()
+  );
+  
+  // ==============================================================================================
+  // RegFile接口仲裁器 (VP Engine vs PBS Kernel Lite)
+  // ==============================================================================================
+  
+  // 简单优先级仲裁：VP优先，PBS其次
+  always_comb begin
+    // 默认分配给VP Engine
+    regf_rd_req_vld = vp_regf_rd_req_vld;
+    regf_rd_req = vp_regf_rd_req;
+    regf_wr_req_vld = vp_regf_wr_req_vld;
+    regf_wr_req = vp_regf_wr_req;
+    regf_wr_data_vld = vp_regf_wr_data_vld;
+    regf_wr_data = vp_regf_wr_data;
+    
+    // 如果VP不活跃，分配给PBS
+    if (!vp_regf_rd_req_vld && !vp_regf_wr_req_vld) begin
+      regf_rd_req_vld = pbs_regf_rd_req_vld;
+      regf_rd_req = pbs_regf_rd_req;
+      regf_wr_req_vld = pbs_regf_wr_req_vld;
+      regf_wr_req = pbs_regf_wr_req;
+      regf_wr_data_vld = pbs_regf_wr_data_vld;
+      regf_wr_data = pbs_regf_wr_data;
+    end
+  end
+  
+  // 初始化共享接口信号
+  initial begin
+    wop_pbs_inst_vld = 1'b0;
+    wop_pbs_inst = '0;
+  end
+  
+  // 旧的简化PBS逻辑已删除，现在使用真实的wop_pbs_kernel
+
+
 
 // ==============================================================================================
 // LUT Signal Monitor
@@ -299,6 +430,32 @@ module tb_wop_vertical_packing_engine
     end
   end
 
+  // ==============================================================================================
+  // PBS Instruction Monitor (format sanity check against kernel decode slices)
+  // ==============================================================================================
+  // 原有的PBS监控逻辑已移除，现在使用VP-PBS接口
+  always_ff @(posedge clk or negedge s_rst_n) begin
+    if (!s_rst_n) begin
+      // do nothing
+    end else begin
+      if (vp_pbs_inst_vld && vp_pbs_inst_rdy) begin
+        $display("[TB][VP_PBS_MON] VP-PBS request: operation=%0d, cmux_addr=0x%0h, output_addr=0x%0h", 
+                 vp_pbs_inst.operation_type, vp_pbs_inst.cmux_result_addr, vp_pbs_inst.output_addr);
+      end
+      
+      if (vp_pbs_inst_ack) begin
+        $display("[TB][VP_PBS_MON] VP-PBS response ACK: state=%0d, success=%b", 
+                 vp_pbs_response.current_state, vp_pbs_response.success);
+      end
+      
+      // 定期检查VP-PBS握手信号状态
+      if ($time % 100000 == 0) begin
+        $display("[TB][VP_PBS_STATUS] at time %0t: vld=%b, rdy=%b, ack=%b, response_state=%0d, vp_state=%s", 
+                 $time, vp_pbs_inst_vld, vp_pbs_inst_rdy, vp_pbs_inst_ack, vp_pbs_response.current_state, u_dut.current_state.name());
+      end
+    end
+  end
+
 // ==============================================================================================
 // RegFile Service Simulator
 // ==============================================================================================
@@ -319,6 +476,10 @@ module tb_wop_vertical_packing_engine
       regf_rd_data_avail <= '0;
       regf_rd_data <= '0;
       regf_rd_counter <= 0;
+      // Initialize regfile_memory to zero to avoid X propagation
+      for (int i = 0; i < 65536; i++) begin
+        regfile_memory[i] <= '0;
+      end
     end else begin
       case (regf_rd_state)
         REGF_RD_IDLE: begin
@@ -343,12 +504,12 @@ module tb_wop_vertical_packing_engine
             regf_rd_state <= REGF_RD_READY;
             regf_rd_data_avail[0] <= 1'b1;
             
-            // Return test GGSW data - simplified for simulation
-            ggsw_addr = ggsw_samples_base_addr; // Use base address for now
-            bit_index = ggsw_addr - ggsw_samples_base_addr;
-            if (bit_index < MAX_BIT_WIDTH) begin
-              regf_rd_data[0] <= test_ggsw_samples[bit_index][0][0][0];  // Simplified
-              $display("[REGF_SIM] Returning GGSW bit %0d data: %0h", bit_index, test_ggsw_samples[bit_index][0][0][0]);
+            // Generic read-back: return regfile_memory at requested address
+            begin
+              logic [REGF_ADDR_W-1:0] read_addr;
+              read_addr = rd_req_temp[REGF_RD_REQ_W-1 -: REGF_ADDR_W];
+              regf_rd_data[0] <= regfile_memory[read_addr];
+              $display("[REGF_SIM] Returning data from addr=0x%0h: %0h", read_addr, regfile_memory[read_addr]);
             end
           end
         end
@@ -371,6 +532,7 @@ module tb_wop_vertical_packing_engine
     if (!s_rst_n) begin
       regf_wr_req_rdy <= 1'b1;
       regf_wr_data_rdy <= '1;
+      actual_write_index <= 0;
     end else begin
       regf_wr_req_rdy <= 1'b1;
       regf_wr_data_rdy <= '1;
@@ -384,73 +546,16 @@ module tb_wop_vertical_packing_engine
           regfile_memory[write_addr] <= regf_wr_data[0];
         end
         
-        // Simplified: assume writing to result_addr sequentially
-        actual_result_a[0] <= regf_wr_data[0];
-        // Only show first few and last few writes
-        if (regf_wr_data[0] != 32'hxxxxxxxx) begin
-          $display("[REGF_SIM] Writing result data: %0h at time %0t", regf_wr_data[0], $time);
+        // Capture full result vector sequentially
+        if (actual_write_index < N_LVL1) begin
+          actual_result_a[actual_write_index] <= regf_wr_data[0];
+          actual_write_index <= actual_write_index + 1;
         end
       end
     end
   end
 
-// ==============================================================================================
-// PBS Service Simulator
-// ==============================================================================================
-  // Simple PBS simulator that handles Sample Extract + Post-processing
-  logic [3:0] pbs_counter;
-  logic [REGF_ADDR_W-1:0] pbs_src_addr_captured;
-  logic [REGF_ADDR_W-1:0] pbs_dst_addr_captured;
-  
-  always_ff @(posedge clk or negedge s_rst_n) begin
-    if (!s_rst_n) begin
-      pbs_inst_rdy <= 1'b1;
-      pbs_inst_ack <= 1'b0;
-      pbs_inst_load_blwe_ack <= 1'b0;
-      pbs_counter <= 0;
-      pbs_src_addr_captured <= '0;
-      pbs_dst_addr_captured <= '0;
-    end else begin
-      if (pbs_inst_vld && pbs_inst_rdy && pbs_counter == 0) begin
-        // Start PBS processing
-        pbs_inst_rdy <= 1'b0;
-        pbs_counter <= 1;
-        
-        // Extract source and destination addresses from PBS instruction
-        // This is a simplified extraction - real implementation would decode the instruction
-        pbs_src_addr_captured <= u_dut.pbs_src_addr;
-        pbs_dst_addr_captured <= u_dut.pbs_dst_addr;
-        
-        $display("[PBS_SIM] PBS instruction received: inst=0x%0h, src=0x%0h, dst=0x%0h at time %0t", 
-                 pbs_inst, u_dut.pbs_src_addr, u_dut.pbs_dst_addr, $time);
-      end else if (pbs_counter > 0 && pbs_counter < 10) begin
-        // Simulate PBS processing delay
-        pbs_counter <= pbs_counter + 1;
-        $display("[PBS_SIM] Processing... counter=%0d", pbs_counter);
-      end else if (pbs_counter == 10) begin
-        // Complete PBS processing - perform simple Sample Extract simulation
-        pbs_inst_ack <= 1'b1;
-        pbs_inst_load_blwe_ack <= 1'b1;
-        pbs_counter <= pbs_counter + 1;
-        
-        // Simple Sample Extract: copy from source to destination with transformation
-        // This simulates tLwe32ExtractSample_lvl1 + post-processing
-        for (int i = 0; i < N_LVL1; i++) begin
-          regfile_memory[pbs_dst_addr_captured + i] <= regfile_memory[pbs_src_addr_captured + ((i == 0) ? 0 : (N_LVL1 - i))];
-        end
-        
-        $display("[PBS_SIM] Sample Extract completed: src=0x%0h -> dst=0x%0h", 
-                 pbs_src_addr_captured, pbs_dst_addr_captured);
-      end else if (pbs_counter == 12) begin
-        // Reset for next instruction
-        pbs_inst_ack <= 1'b0;
-        pbs_inst_load_blwe_ack <= 1'b0;
-        pbs_inst_rdy <= 1'b1;
-        pbs_counter <= 0;
-        $display("[PBS_SIM] PBS processing complete, ready for next instruction");
-      end
-    end
-  end
+
 
 // ==============================================================================================
 // Test Data Generation
@@ -485,13 +590,8 @@ module tb_wop_vertical_packing_engine
       
       for (int k = 0; k <= K; k++) begin
         for (int n = 0; n < N_LVL1; n++) begin
-          if (n == 0) begin
-            test_lut_table[i][k][n] = base_value;  // Main coefficient
-          end else if (n == 1) begin
-            test_lut_table[i][k][n] = base_value + 1;  // Second coefficient (for b part)
-          end else begin
-            test_lut_table[i][k][n] = 0;  // Zero padding for simulation
-          end
+          // Fill entire polynomial with distinct non-zero values
+          test_lut_table[i][k][n] = base_value + n + (k * 100000);
         end
       end
     end
@@ -508,63 +608,94 @@ module tb_wop_vertical_packing_engine
     $display("[TB]   LUT[511] = %0h (f(511) = %0d)", test_lut_table[511][0][0], 511*100 + $countones(511));
   endtask
 
+  task automatic dump_lut_and_bits_to_files(string lut_path, string bits_path);
+    int fh_lut, fh_bits;
+    fh_lut = $fopen(lut_path, "w");
+    if (fh_lut == 0) $fatal("[TB] Failed to open %s", lut_path);
+    for (int i = 0; i < LUT_SIZE; i++) begin
+      for (int n = 0; n < N_LVL1; n++) begin
+        $fwrite(fh_lut, "%0d ", int'(test_lut_table[i][0][n]));
+      end
+      $fwrite(fh_lut, "\n");
+    end
+    $fclose(fh_lut);
+
+    fh_bits = $fopen(bits_path, "w");
+    if (fh_bits == 0) $fatal("[TB] Failed to open %s", bits_path);
+    for (int d = 0; d < 20; d++) begin
+      $fwrite(fh_bits, "%0d\n", golden_ggsw_bits[d] & 1);
+    end
+    $fclose(fh_bits);
+  endtask
+
+  function automatic int load_golden_from_file(string out_path);
+    int fh;
+    fh = $fopen(out_path, "r");
+    if (fh == 0) begin
+      $display("[TB] Failed to open golden output %s", out_path);
+      return 0;
+    end
+    for (int i = 0; i < N_LVL1; i++) begin
+      int val;
+      if ($fscanf(fh, "%d\n", val) != 1) begin
+        $display("[TB] Error reading golden at line %0d", i);
+        $fclose(fh);
+        return 0;
+      end
+      golden_result_a[i] = val;
+    end
+    $fclose(fh);
+    return 1;
+  endfunction
+
 // ==============================================================================================
 // Golden Reference - SystemVerilog Implementation (no DPI-C needed)
 // ==============================================================================================
   
   // No DPI-C functions needed - using simple SystemVerilog logic
-  // This follows the pattern from bit_extract and circuit_bootstrap testbenches
   
   // Simplified vertical packing golden reference
   function automatic void generate_expected_results();
-    // Variable declarations
-    int base_lut_index;
-    int selected_lut_value; 
-    int rotation_factor;
+    // Baseline-like golden using simplified semantics consistent with test data
+    int selected_index;
+    int rotation_shift;
     int bit_value;
-    
-    // Simplified implementation for initial verification
-    // Focus on basic CMux tree and blind rotation behavior
-    
-    $display("[GOLDEN] Starting simplified Vertical Packing Engine golden reference");
-    $display("[GOLDEN] TGSW control bits[0:19]: %0b %0b %0b %0b ... %0b %0b %0b %0b", 
-             golden_ggsw_bits[0], golden_ggsw_bits[1], golden_ggsw_bits[2], golden_ggsw_bits[3],
-             golden_ggsw_bits[16], golden_ggsw_bits[17], golden_ggsw_bits[18], golden_ggsw_bits[19]);
-    
-    // Simplified algorithm: 
-    // 1. Start with base LUT value
-    base_lut_index = 0;
-    
-    // 2. Apply CMux tree selection (bits 10-19)
+    int src_idx;
+    int poly_val;
+
+    // 1) CMux tree selection index from bits 10..19 (MSB first)
+    selected_index = 0;
     for (int d = 10; d < 20; d++) begin
       bit_value = golden_ggsw_bits[d] & 1;
-      base_lut_index = (base_lut_index * 2) + bit_value;  // Build LUT index
-      $display("[GOLDEN] CMux bit %0d: control=%0b, index=0x%0h", d, bit_value, base_lut_index);
+      selected_index = (selected_index << 1) | bit_value;
     end
-    
-    // Use final LUT index to get base result
-    selected_lut_value = golden_lut_table[base_lut_index % LUT_SIZE];
-    $display("[GOLDEN] Selected LUT[%0d] = 0x%0h", base_lut_index % LUT_SIZE, selected_lut_value);
-    
-    // 3. Apply blind rotation transformation (bits 0-9)
-    rotation_factor = 0;
+
+    // 2) Rotation shift from bits 0..9: sum of 2^d where bit is 1
+    rotation_shift = 0;
     for (int d = 0; d < 10; d++) begin
-      bit_value = golden_ggsw_bits[d] & 1;
-      if (bit_value) begin
-        rotation_factor += (1 << d);  // Accumulate rotation
+      if (golden_ggsw_bits[d]) begin
+        rotation_shift += (1 << d);
       end
-      $display("[GOLDEN] Rotation bit %0d: control=%0b, factor=%0d", d, bit_value, rotation_factor);
     end
-    
-    // 4. Generate final results
+    rotation_shift = rotation_shift % N_LVL1;
+
+    // 3) Sample extract directly from rotated polynomial
+    // a[0] = poly[(0 + rotation_shift) % N]
+    // a[i] = -poly[(N - i + rotation_shift) % N] for i>=1
     for (int i = 0; i < N_LVL1; i++) begin
-      golden_result_a[i] = selected_lut_value + rotation_factor + i;
+      if (i == 0) begin
+        src_idx = (0 + rotation_shift) % N_LVL1;
+        poly_val = int'(test_lut_table[selected_index][0][src_idx]);
+        golden_result_a[i] = poly_val;
+      end else begin
+        src_idx = (N_LVL1 - i + rotation_shift) % N_LVL1;
+        poly_val = int'(test_lut_table[selected_index][0][src_idx]);
+        golden_result_a[i] = -poly_val;
+      end
     end
-    golden_result_b = selected_lut_value + rotation_factor + 32'h80000000;  // Add signature
-    
-    $display("[GOLDEN] Final results: a[0]=0x%0h, a[1]=0x%0h, b=0x%0h", 
-             golden_result_a[0], golden_result_a[1], golden_result_b);
-    $display("[GOLDEN] Simplified golden reference completed");
+
+    $display("[GOLDEN] Baseline-like: index=%0d, rot=%0d, a0=%0h, a1=%0h", selected_index, rotation_shift,
+             golden_result_a[0], golden_result_a[1]);
   endfunction
 
 // ==============================================================================================
@@ -586,8 +717,11 @@ module tb_wop_vertical_packing_engine
     
     // Reset sequence
     repeat(10) @(posedge clk);
+    $display("[TB] Releasing reset at time %0t", $time);
     s_rst_n = 1;
+    $display("[TB] Reset released, s_rst_n=%b at time %0t", s_rst_n, $time);
     repeat(5) @(posedge clk);
+    $display("[TB] Reset sequence completed, s_rst_n=%b at time %0t", s_rst_n, $time);
     
     // Generate test data
     generate_test_data();
@@ -614,7 +748,7 @@ module tb_wop_vertical_packing_engine
         repeat(50) begin
           repeat(1000) @(posedge clk);
           $display("[TB] Status check: current_state=%s, regf_rd_req_vld=%b, regf_rd_req_rdy=%b, regf_rd_data_avail=%b, ggsw_load_done=%b at time %0t", 
-                   u_dut.current_state.name(), regf_rd_req_vld, regf_rd_req_rdy, regf_rd_data_avail[0], u_dut.ggsw_load_done, $time);
+                   u_dut.current_state.name(), regf_rd_req_vld, regf_rd_req_rdy, regf_rd_data_avail[0], u_dut.done, $time);
         end
         $error("[TB] Test timeout!");
         $finish;
@@ -622,35 +756,67 @@ module tb_wop_vertical_packing_engine
     join_any
     disable fork;
     
+    // After done, pull actual results from PBS dst region in regfile_memory
+    // to avoid relying on write-capture path.
+    $display("[TB] Captured %0d coefficients via write path", actual_write_index);
+    if (actual_write_index < N_LVL1) begin
+      $display("[TB] WARNING: Only %0d/%0d coefficients captured from write path", actual_write_index, N_LVL1);
+    end
+
+    // Build actual_result_a from VP-PBS output region (authoritative)
+    for (int i = 0; i < N_LVL1; i++) begin
+      actual_result_a[i] = regfile_memory[result_addr + i];
+    end
+    
     // Call golden reference for comparison
     
     // Prepare golden reference inputs - extract control bits from GGSW samples
     for (int i = 0; i < MAX_BIT_WIDTH; i++) begin
-      // Extract control bit from GGSW sample (simulate circuit bootstrapping result)
-      // The control bit is determined by the sign/magnitude of the GGSW sample
       int ggsw_value = int'(test_ggsw_samples[i][0][0][0]);
       golden_ggsw_bits[i] = (ggsw_value % 1000) > 500 ? 1 : 0;  // Extract control bit
     end
     for (int i = 0; i < LUT_SIZE; i++) begin
       golden_lut_table[i] = int'(test_lut_table[i][0][0]);  // Type conversion
     end
-    
-    $display("[TB] Extracted GGSW control bits from samples:");
-    for (int i = 0; i < MAX_BIT_WIDTH; i++) begin
-      $display("[TB]   Bit %0d: sample=%0h -> control_bit=%0b", 
-               i, test_ggsw_samples[i][0][0][0], golden_ggsw_bits[i]);
+
+    // External golden path
+    dump_lut_and_bits_to_files("output_lut.txt", "output_bits.txt");
+    $display("[TB] Running external golden generator...");
+    void'($system($sformatf("./big_lut_golden %s %s %s %0d %0d", "output_lut.txt", "output_bits.txt", "output_golden.txt", N_LVL1, LUT_SIZE)));
+    if (!load_golden_from_file("output_golden.txt")) begin
+      $fatal("[TB] Failed to load external golden results");
     end
-    
+
+    // SV internal golden for cross-check (can be removed later)
     generate_expected_results();
-    
+
+    // Sanity: detect X in actual/golden vectors
+    begin
+      int x_count;
+      x_count = 0;
+      for (int i = 0; i < N_LVL1; i++) begin
+        if ($isunknown(actual_result_a[i])) begin
+          x_count++;
+          if (x_count <= 8) $display("[TB] X detected at actual_result_a[%0d]=%0h", i, actual_result_a[i]);
+        end
+        if ($isunknown(golden_result_a[i])) begin
+          x_count++;
+          if (x_count <= 8) $display("[TB] X detected at golden_result_a[%0d]=%0h", i, golden_result_a[i]);
+        end
+      end
+      if (x_count > 0) begin
+        $display("[TB] ❌ FAILURE: %0d X values detected in results, aborting compare", x_count);
+        $finish;
+      end
+    end
+
     // Compare results
     error_count = 0;
     for (int i = 0; i < N_LVL1; i++) begin
       if (actual_result_a[i] != golden_result_a[i]) begin
         error_count++;
-        if (error_count <= 10) begin  // Show first 10 errors
-          $display("[TB] Mismatch at a[%0d]: RTL=%0h, Golden=%0h", 
-                   i, actual_result_a[i], golden_result_a[i]);
+        if (error_count <= 16) begin
+          $display("[TB] Mismatch at a[%0d]: RTL=%0h, Golden=%0h", i, actual_result_a[i], golden_result_a[i]);
         end
       end
     end

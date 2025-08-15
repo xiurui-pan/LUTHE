@@ -5,6 +5,22 @@
 cli="$*"
 
 ###################################################################################################
+# Environment check - ensure setup.sh has been sourced
+###################################################################################################
+if [ -z "${PROJECT_DIR}" ] || [ -z "${PROJECT_SIMU_TOOL}" ] || [ -z "${XILINX_VIVADO}" ]; then
+    echo "ERROR: Environment not properly set. Required variables missing:"
+    echo "  PROJECT_DIR: ${PROJECT_DIR:-<not set>}"
+    echo "  PROJECT_SIMU_TOOL: ${PROJECT_SIMU_TOOL:-<not set>}"
+    echo "  XILINX_VIVADO: ${XILINX_VIVADO:-<not set>}"
+    echo ""
+    echo "Please use the proper way to run this script:"
+    echo "  cd <project_root> && bash -lc 'source setup.sh >/dev/null 2>&1 && cd $(pwd) && ./run.sh [options]'"
+    echo ""
+    echo "Or use quick_run.sh which handles environment setup automatically."
+    exit 1
+fi
+
+###################################################################################################
 # This script deals with the testbench run for WoP-PBS Vertical Packing Engine.
 # This testbench has specificities that cannot be handled by run_edalize alone.
 # They are handled here.
@@ -139,10 +155,48 @@ if [ $GEN_STIMULI -eq 1 ] ; then
   echo "INFO> Running : $pkg_cmd"
   $pkg_cmd || exit 1
 
+  # Optionally ensure vp_pbs_inst_pkg.sv is available under gen/rtl tree for edalize
+  if [ "${USE_VP_PBS_INST_PKG:-0}" -eq 1 ]; then
+    VP_PKG_SRC="${PROJECT_DIR}/hw/module/pe_pbs/rtl/vp_pbs_inst_pkg.sv"
+    VP_PKG_DST_DIR="${RTL_DIR}/hw/module/pe_pbs/rtl"
+    VP_PKG_DST="${VP_PKG_DST_DIR}/vp_pbs_inst_pkg.sv"
+    if [ -f "$VP_PKG_SRC" ]; then
+      mkdir -p "$VP_PKG_DST_DIR"
+      cp "$VP_PKG_SRC" "$VP_PKG_DST"
+      echo "INFO> Copied vp_pbs_inst_pkg.sv into gen RTL tree: $VP_PKG_DST"
+    else
+      echo "WARN> vp_pbs_inst_pkg.sv not found at $VP_PKG_SRC"
+    fi
+  fi
+
   echo "INFO> Generating file_list.json"
   file_list_cmd="${PROJECT_DIR}/hw/scripts/create_module/create_file_list.py -o ${INFO_DIR}/file_list.json -p ${RTL_DIR} -R param_tfhe_definition_pkg.sv simu 0 1 -R regf_common_definition_pkg.sv simu 0 1 -F param_tfhe_definition_pkg.sv APPLICATION APPLI_simu -F regf_common_definition_pkg.sv REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ}"
   echo "INFO> Running : $file_list_cmd"
   $file_list_cmd || exit 1
+
+  # Optionally inject vp_pbs_inst_pkg.sv into file_list.json
+  if [ "${USE_VP_PBS_INST_PKG:-0}" -eq 1 ]; then
+    python3 - "$INFO_DIR/file_list.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+with open(path,'r') as f:
+    data=json.load(f)
+rtl=data.get('rtl_files',[])
+entry={
+    "name":"hw/module/pe_pbs/rtl/vp_pbs_inst_pkg.sv",
+    "library":"work",
+    "env":["simu"],
+    "target":["all"],
+    "is_include_file":False
+}
+if not any(x.get('name')==entry['name'] for x in rtl):
+    rtl.insert(0,entry)
+    data['rtl_files']=rtl
+    with open(path,'w') as w:
+        json.dump(data,w,indent=4)
+print("INFO> Injected vp_pbs_inst_pkg.sv into file_list.json")
+PY
+  fi
 else
   echo "INFO> Using existing ${RTL_DIR}/param_tfhe_definition_pkg.sv"
   echo "INFO> Using existing ${RTL_DIR}/regf_common_definition_pkg.sv"
@@ -183,6 +237,15 @@ echo "INFO> Creating output dir : ${work_dir}/output"
 mkdir -p  ${work_dir}/output
 echo $cli > ${work_dir}/cli.log
 
+# Copy external golden tool into work dir
+if [ -f ./tools/big_lut_golden ]; then
+  echo "INFO> Copy golden tool to work dir"
+  cp ./tools/big_lut_golden ${work_dir}/big_lut_golden || true
+  chmod +x ${work_dir}/big_lut_golden || true
+else
+  echo "WARN> golden tool ./tools/big_lut_golden not found; external golden will fail"
+fi
+
 echo "INFO> Running simulation (keep work) via edalize"
 $run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -d $(pwd) -k keep \
   -P MOD_Q_W int $MOD_Q_W \
@@ -191,6 +254,6 @@ $run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -d $(pwd) -k keep \
   -P ELL_LVL1 int $ELL_LVL1 \
   -F APPLICATION APPLI_simu \
   -F REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ} \
-  $run_edalize_args 2>&1 | egrep -i "\[VP_ENGINE\].*State transition|\[VP_ENGINE\].*COMPLETED|\[VP_ENGINE\].*Loading LUT entry (0|1|2|3|[0-9]*[2579])|\[TB\]|\[REGF_SIM\].*0x[0-9a-f]{8}|\[GOLDEN\]|^ERROR:|^FATAL:|SUCCESS|FAILED|TEST (PASSED|FAILED)|TIMEOUT" || echo "Simulation completed"
+  $run_edalize_args 2>&1  || echo "Simulation completed"
 
 exit $?

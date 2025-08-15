@@ -1,4 +1,5 @@
 sv work /home/pxr/workspace/hpu_fpga/hw/common_lib/common_package/rtl/common_definition_pkg.sv
+sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/gen/rtl/hw/module/pe_pbs/rtl/vp_pbs_inst_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/gen/rtl/param_tfhe_definition_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/regfile/module/regf_common/rtl/REGF_STRUCT/REGF_STRUCT_reg64_coef32_seq4/regf_common_definition_pkg.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/simu_lib/simu_base/rtl/mod_arith.sv
@@ -289,5 +290,6 @@ sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/rtl/pe_pbs_with_ntt_core_h
 sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/rtl/pe_pbs_with_ntt_core_middle.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/rtl/pe_pbs_with_ntt_core_tail.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/rtl/pe_pbs.sv
+sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/rtl/wop_pbs_kernel_lite.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/rtl/wop_vertical_packing_engine.sv
 sv work /home/pxr/workspace/hpu_fpga/hw/module/pe_pbs/simu/tb_wop_vertical_packing_engine/rtl/tb_wop_vertical_packing_engine.sv

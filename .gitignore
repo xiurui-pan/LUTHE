@@ -39,3 +39,4 @@ hpu_fpga/pyvenv.cfg
 edalize
 *log*
 xsim/*
+*.pb

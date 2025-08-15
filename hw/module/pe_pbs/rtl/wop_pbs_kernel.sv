@@ -36,6 +36,7 @@ module wop_pbs_kernel
   import axi_if_glwe_axi_pkg::*;
   import regf_common_param_pkg::*;
   import hpu_common_instruction_pkg::*;
+  import vp_pbs_inst_pkg::*;
 #(
   // Parameters matching pe_pbs architecture
   parameter  mod_mult_type_e   MOD_MULT_TYPE       = set_mod_mult_type(MOD_NTT_TYPE),
@@ -73,7 +74,15 @@ module wop_pbs_kernel
   parameter  int               N_LVL1               = 1024, // Level 1 dimension  
   parameter  int               N_LVL2               = 2048, // Level 2 dimension
   parameter  int               ELL_LVL1             = 3,    // Decomposition parameter level 1
-  parameter  int               ELL_LVL2             = 8     // Decomposition parameter level 2
+  parameter  int               ELL_LVL2             = 8,    // Decomposition parameter level 2
+  parameter  int               REGF_ADDR_W          = 16,   // RegFile address width
+  parameter  int               K                    = 1,    // TLWE secret key length
+  parameter  int               BSK_BATCH_ID_W       = 8,    // BSK batch ID width
+  parameter  int               KSK_BATCH_ID_W       = 8,    // KSK batch ID width
+  parameter  int               BPBS_ID_W            = 4,    // Batch PBS ID width
+  parameter  int               NTT_OP_W             = 32,   // NTT operand width
+  parameter  int               PBS_B_W              = 32,   // PBS coefficient width
+  parameter  int               BSK_PC               = 2     // BSK port count
 )
 (
   input  logic clk,
@@ -84,6 +93,13 @@ module wop_pbs_kernel
   input  logic                                                         wop_pbs_inst_vld,
   output logic                                                         wop_pbs_inst_rdy,
   output logic                                                         wop_pbs_inst_ack,
+
+  // == VP Client Instruction Interface (VP-PBS Protocol) ==
+  input  vp_pbs_inst_t                                                 vp_pbs_inst,
+  input  logic                                                         vp_pbs_inst_vld,
+  output logic                                                         vp_pbs_inst_rdy,
+  output logic                                                         vp_pbs_inst_ack,
+  output vp_pbs_response_t                                             vp_pbs_response,
 
   // == RegFile Interface ==
   // Write interface
@@ -189,8 +205,13 @@ module wop_pbs_kernel
     STAGE3_VERTICAL_PACK_CMUX,  // Stage 3a: CMux tree construction
     STAGE3_VERTICAL_PACK_BLIND, // Stage 3b: Blind rotation
     STAGE3_VERTICAL_PACK_EXTRACT, // Stage 3c: Sample extraction
+    VP_BLIND_ROT_EXTRACT,       // VP Mode: Blind rotation + Extract + Post-process only
     DONE
   } wop_pbs_state_e;
+  // Track which client issued the current instruction
+  typedef enum logic [0:0] {SRC_WOP=1'b0, SRC_VP=1'b1} inst_src_e;
+  inst_src_e current_inst_src;
+
 
   wop_pbs_state_e current_state, next_state;
 
@@ -203,6 +224,11 @@ module wop_pbs_kernel
   logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] bit_extract_lut_addr;
   logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] vertical_pack_lut_addr;
   logic [MAX_BIT_WIDTH-1:0] bit_width;
+  
+  // VP-PBS specific decoding
+  vp_pbs_inst_t vp_inst_decoded;
+  vp_pbs_response_t vp_response;
+  logic vp_mode_active;
   
   // Loop control
   logic [MAX_BIT_WIDTH-1:0] bit_counter;
@@ -489,7 +515,6 @@ module wop_pbs_kernel
   logic [REGF_COEF_NB-1:0] bit_extract_regf_wr_data_vld;
   logic [REGF_COEF_NB-1:0][MOD_Q_W-1:0] bit_extract_regf_wr_data;
   logic bit_extract_lut_req_vld;
-  logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] bit_extract_lut_addr;
 
   wop_bit_extract_engine #(
     .MOD_Q_W(MOD_Q_W),
@@ -567,6 +592,36 @@ module wop_pbs_kernel
   // ✅ Circuit Bootstrap Engine现在完全集成NTT接口
   // 通过共享的NTT引擎进行前向/反向NTT和外部积计算
   
+  // NTT Interface signals for pe_pbs_with_ntt_core_head
+  logic [PSI-1:0][R-1:0][NTT_OP_W-1:0] ntt_next_data;
+  logic [PSI-1:0][R-1:0] ntt_next_data_avail;
+  logic [PSI-1:0][R-1:0] ntt_next_data_rdy;
+  logic ntt_next_ctrl_avail;
+  logic ntt_next_ctrl_rdy;
+  
+  // Circuit Bootstrap到NTT的接口信号
+  logic [PSI-1:0][R-1:0] circuit_bs_decomp_ntt_data_avail;
+  logic [PSI-1:0][R-1:0][PBS_B_W:0] circuit_bs_decomp_ntt_data;
+  logic circuit_bs_decomp_ntt_sob, circuit_bs_decomp_ntt_eob;
+  logic circuit_bs_decomp_ntt_sog, circuit_bs_decomp_ntt_eog;
+  logic circuit_bs_decomp_ntt_sol, circuit_bs_decomp_ntt_eol;
+  logic [BPBS_ID_W-1:0] circuit_bs_decomp_ntt_pbs_id;
+  logic circuit_bs_decomp_ntt_last_pbs;
+  logic circuit_bs_decomp_ntt_full_throughput;
+  logic circuit_bs_decomp_ntt_ctrl_avail;
+  logic [PSI-1:0][R-1:0] circuit_bs_decomp_ntt_data_rdy;
+  logic circuit_bs_decomp_ntt_ctrl_rdy;
+  
+  // Pre-ModSwitch Engine signals
+  logic premodswitch_start;
+  logic premodswitch_done;
+  logic [N_LVL0:0][63:0] premodswitch_result;
+  
+  // Private KeySwitch Engine signals
+  logic private_keyswitch_start;
+  logic private_keyswitch_done;
+  logic [N_LVL1:0][MOD_Q_W-1:0] private_keyswitch_result;
+
   wop_circuit_bootstrap_woks_engine #(
     .MOD_Q_W(64),
     .N_LVL0(N_LVL0),
@@ -655,7 +710,6 @@ module wop_pbs_kernel
   logic [REGF_COEF_NB-1:0] vertical_pack_regf_wr_data_vld;
   logic [REGF_COEF_NB-1:0][MOD_Q_W-1:0] vertical_pack_regf_wr_data;
   logic vertical_pack_lut_req_vld;
-  logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] vertical_pack_lut_addr;
   
   wop_vertical_packing_engine #(
     .MOD_Q_W(MOD_Q_W),
@@ -718,13 +772,13 @@ module wop_pbs_kernel
       // Update counters based on state
       case (current_state)
         STAGE1_BIT_EXTRACT: begin
-          if (/* bit extraction done for current bit */) begin
+          if (bit_extract_done) begin
             bit_counter <= bit_counter + 1;
           end
         end
         
         STAGE2_CIRCUIT_BS_PRIVKS: begin
-          if (/* private keyswitch done for current ell */) begin
+          if (circuit_bs_done) begin
             ell_counter <= ell_counter + 1;
             if (ell_counter == ELL_LVL1 - 1) begin
               ell_counter <= '0;
@@ -743,6 +797,8 @@ module wop_pbs_kernel
     next_state = current_state;
     wop_pbs_inst_rdy = 1'b0;
     wop_pbs_inst_ack = 1'b0;
+    vp_inst_rdy = 1'b0;
+    vp_inst_ack = 1'b0;
     
     // Engine control signals
     bit_extract_start = 1'b0;
@@ -756,22 +812,57 @@ module wop_pbs_kernel
     
     case (current_state)
       IDLE: begin
-        wop_pbs_inst_rdy = 1'b1;
-        if (wop_pbs_inst_vld) begin
-          // Decode WoP-PBS instruction
-          input_lwe_addr = wop_pbs_inst[REGF_ADDR_W-1:0];
-          output_lwe_addr = wop_pbs_inst[2*REGF_ADDR_W-1:REGF_ADDR_W];
-          bit_width = wop_pbs_inst[2*REGF_ADDR_W+MAX_BIT_WIDTH-1:2*REGF_ADDR_W];
-          bit_extract_lut_addr = wop_pbs_inst[2*REGF_ADDR_W+MAX_BIT_WIDTH+axi_if_glwe_axi_pkg::AXI4_ADD_W-1:2*REGF_ADDR_W+MAX_BIT_WIDTH];
-          vertical_pack_lut_addr = wop_pbs_inst[2*REGF_ADDR_W+MAX_BIT_WIDTH+2*axi_if_glwe_axi_pkg::AXI4_ADD_W-1:2*REGF_ADDR_W+MAX_BIT_WIDTH+axi_if_glwe_axi_pkg::AXI4_ADD_W];
+        // VP-PBS优先级仲裁：VP-PBS接口优先级高于通用WoP-PBS
+        if (vp_pbs_inst_vld) begin
+          vp_pbs_inst_rdy = 1'b1;
+          current_inst_src = SRC_VP;
+          vp_mode_active = 1'b1;
           
-          // Initialize intermediate result addresses
-          for (int i = 0; i < MAX_BIT_WIDTH; i++) begin
-            bit_extract_results_addr[i] = temp_storage_base_addr + i;
-            circuit_bs_results_addr[i] = temp_storage_base_addr + MAX_BIT_WIDTH + i;
+          // 解码VP-PBS指令
+          vp_inst_decoded = vp_pbs_inst;
+          
+          // 根据VP操作类型决定处理流程
+          case (vp_pbs_inst.operation_type)
+            VP_OP_BLIND_ROT_EXTRACT: begin
+              // VP已完成CMux Tree，直接处理Blind Rotation + Extract + Post-process
+              input_lwe_addr = vp_pbs_inst.cmux_result_addr;  // CMux结果作为输入
+              output_lwe_addr = vp_pbs_inst.output_addr;      // 最终输出地址
+              vertical_pack_lut_addr = vp_pbs_inst.lut_base_addr; // LUT地址
+              bit_width = vp_pbs_inst.bit_range_end - vp_pbs_inst.bit_range_start + 1; // bits 0-9
+              
+              // 跳过Stage 1和Stage 2，直接进入Blind Rotation处理
+              next_state = VP_BLIND_ROT_EXTRACT;
+            end
+            default: begin
+              // 不支持的VP操作类型，返回错误
+              vp_response.current_state = VP_PBS_ERROR;
+              vp_response.success = 1'b0;
+              vp_response.error = 1'b1;
+              next_state = DONE;
+            end
+          endcase
+        end else begin
+          // 通用WoP-PBS接口（完整流程）
+          wop_pbs_inst_rdy = 1'b1;
+          if (wop_pbs_inst_vld) begin
+            current_inst_src = SRC_WOP;
+            vp_mode_active = 1'b0;
+            
+            // Decode WoP-PBS instruction
+            input_lwe_addr = wop_pbs_inst[REGF_ADDR_W-1:0];
+            output_lwe_addr = wop_pbs_inst[2*REGF_ADDR_W-1:REGF_ADDR_W];
+            bit_width = wop_pbs_inst[2*REGF_ADDR_W+MAX_BIT_WIDTH-1:2*REGF_ADDR_W];
+            bit_extract_lut_addr = wop_pbs_inst[2*REGF_ADDR_W+MAX_BIT_WIDTH+axi_if_glwe_axi_pkg::AXI4_ADD_W-1:2*REGF_ADDR_W+MAX_BIT_WIDTH];
+            vertical_pack_lut_addr = wop_pbs_inst[2*REGF_ADDR_W+MAX_BIT_WIDTH+2*axi_if_glwe_axi_pkg::AXI4_ADD_W-1:2*REGF_ADDR_W+MAX_BIT_WIDTH+axi_if_glwe_axi_pkg::AXI4_ADD_W];
+              
+              // Initialize intermediate result addresses
+            for (int i = 0; i < MAX_BIT_WIDTH; i++) begin
+              bit_extract_results_addr[i] = temp_storage_base_addr + i;
+              circuit_bs_results_addr[i] = temp_storage_base_addr + MAX_BIT_WIDTH + i;
+            end
+              
+              next_state = STAGE1_BIT_EXTRACT;
           end
-          
-          next_state = STAGE1_BIT_EXTRACT;
         end
       end
       
@@ -864,8 +955,41 @@ module wop_pbs_kernel
         end
       end
       
+      VP_BLIND_ROT_EXTRACT: begin
+        // VP模式：仅执行Blind Rotation + Sample Extract + Post-processing
+        // 这里复用现有的vertical packing engine，但配置为仅处理后半部分
+        vertical_pack_start = 1'b1;
+        
+        // 更新VP状态
+        vp_response.current_state = VP_PBS_BLIND_ROT;
+        vp_response.progress_counter = bit_counter;
+        
+        if (vertical_pack_done) begin
+          // VP操作完成，准备应答
+          vp_response.current_state = VP_PBS_DONE;
+          vp_response.result_addr = output_lwe_addr;
+          vp_response.result_size = N_LVL1 + 1; // TLWE size
+          vp_response.success = 1'b1;
+          vp_response.error = 1'b0;
+          
+          stage3_done = 1'b1;
+          next_state = DONE;
+        end
+      end
+      
       DONE: begin
-        wop_pbs_inst_ack = 1'b1;
+        // Ack back to the source client
+        if (current_inst_src == SRC_VP) begin
+          vp_pbs_inst_ack = 1'b1;
+          vp_pbs_response = vp_response; // 发送VP响应
+        end else begin
+          wop_pbs_inst_ack = 1'b1;
+        end
+        
+        // 重置VP模式状态
+        vp_mode_active = 1'b0;
+        vp_response = '0;
+        
         next_state = IDLE;
       end
     endcase
@@ -998,9 +1122,6 @@ module wop_pbs_kernel
   
   // Pre-ModSwitch: Convert LWE sample from level 1 to level 0 format
   // Based on preModSwitch() function in circuit_bootstrapping.cpp
-  logic premodswitch_start;
-  logic premodswitch_done;
-  logic [N_LVL0:0][63:0] premodswitch_result;
   
   wop_premodswitch_engine #(
     .N_LVL0(N_LVL0),
@@ -1027,8 +1148,6 @@ module wop_pbs_kernel
   
   // Private KeySwitch: Convert LWE level 2 to GGSW level 1
   // Based on circuitPrivKS() function in circuit_bootstrapping.cpp
-  logic private_keyswitch_start;
-  logic private_keyswitch_done;
   logic [ELL_LVL1-1:0][K:0][N_LVL1-1:0][MOD_Q_W-1:0] private_ks_result;
   logic private_ks_result_valid;
   
@@ -1067,26 +1186,6 @@ module wop_pbs_kernel
 // ==============================================================================================
 // NTT Engine for Circuit Bootstrap
 // ==============================================================================================
-  
-  // NTT Interface signals for pe_pbs_with_ntt_core_head
-  logic [PSI-1:0][R-1:0][NTT_OP_W-1:0] ntt_next_data;
-  logic [PSI-1:0][R-1:0] ntt_next_data_avail;
-  logic [PSI-1:0][R-1:0] ntt_next_data_rdy;
-  logic ntt_next_ctrl_avail;
-  logic ntt_next_ctrl_rdy;
-  
-  // ✅ Circuit Bootstrap到NTT的接口信号
-  logic [PSI-1:0][R-1:0] circuit_bs_decomp_ntt_data_avail;
-  logic [PSI-1:0][R-1:0][PBS_B_W:0] circuit_bs_decomp_ntt_data;
-  logic circuit_bs_decomp_ntt_sob, circuit_bs_decomp_ntt_eob;
-  logic circuit_bs_decomp_ntt_sog, circuit_bs_decomp_ntt_eog;
-  logic circuit_bs_decomp_ntt_sol, circuit_bs_decomp_ntt_eol;
-  logic [BPBS_ID_W-1:0] circuit_bs_decomp_ntt_pbs_id;
-  logic circuit_bs_decomp_ntt_last_pbs;
-  logic circuit_bs_decomp_ntt_full_throughput;
-  logic circuit_bs_decomp_ntt_ctrl_avail;
-  logic [PSI-1:0][R-1:0] circuit_bs_decomp_ntt_data_rdy;
-  logic circuit_bs_decomp_ntt_ctrl_rdy;
   
   pe_pbs_with_ntt_core_head #(
     .MOD_MULT_TYPE(MOD_MULT_TYPE),

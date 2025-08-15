@@ -30,7 +30,9 @@ module tb_wop_vertical_packing_engine
   parameter int MOD_Q_W = 32,
   parameter int MAX_BIT_WIDTH = 20,
   parameter int N_LVL1 = 1024,
-  parameter int ELL_LVL1 = 3
+  parameter int ELL_LVL1 = 3,
+  parameter int BSK_PC = 2,     // BSK port count
+  parameter int KSK_PC = 2      // KSK port count
 )();
 
 // ==============================================================================================
@@ -231,7 +233,9 @@ module tb_wop_vertical_packing_engine
     .N_LVL1(N_LVL1),
     .ELL_LVL1(ELL_LVL1),
     .K(K),
-    .REGF_ADDR_W(REGF_ADDR_W)
+    .REGF_ADDR_W(REGF_ADDR_W),
+    .BSK_PC(BSK_PC),
+    .KSK_PC(KSK_PC)
   ) u_wop_pbs_kernel_lite (
     .clk(clk),
     .s_rst_n(s_rst_n),

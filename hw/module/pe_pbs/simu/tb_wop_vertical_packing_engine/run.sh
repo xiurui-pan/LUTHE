@@ -45,6 +45,8 @@ echo "-q                       : MOD_Q: modulo (default 2**32)"
 echo "-B                       : MAX_BIT_WIDTH: Maximum bit width (default 20)"
 echo "-N                       : N_LVL1: LWE dimension level 1 (default 1024)"
 echo "-L                       : ELL_LVL1: GGSW decomposition level (default 3)"
+echo "-b                       : BSK_PC: BSK parameter count (default 2)"
+echo "-s                       : KSK_PC: KSK parameter count (default 2)"
 echo "-i                       : Regfile number of registers (default 64)"
 echo "-j                       : Regfile number of coefficients (default 32)"
 echo "-k                       : Regfile number of sequences (default 4)"
@@ -67,6 +69,8 @@ MOD_Q_W=32
 MOD_Q="2**32"
 N_LVL1=1024
 ELL_LVL1=3
+BSK_PC=2
+KSK_PC=2
 REGF_REG_NB=64
 REGF_COEF_NB=32
 REGF_SEQ=4
@@ -76,7 +80,7 @@ R=2
 S=8
 
 # Initialize your own variables here:
-while getopts "hg:W:q:B:N:L:i:j:k:" opt; do
+while getopts "hg:W:q:B:N:L:b:s:i:j:k:" opt; do
   case "$opt" in
     h)
       usage
@@ -99,6 +103,12 @@ while getopts "hg:W:q:B:N:L:i:j:k:" opt; do
       ;;
     L)
       ELL_LVL1=$OPTARG
+      ;;
+    b)
+      BSK_PC=$OPTARG
+      ;;
+    s)
+      KSK_PC=$OPTARG
       ;;
     i)
       REGF_REG_NB=$OPTARG
@@ -226,6 +236,8 @@ $run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -d $(pwd) -y run \
   -P MAX_BIT_WIDTH int $MAX_BIT_WIDTH \
   -P N_LVL1 int $N_LVL1 \
   -P ELL_LVL1 int $ELL_LVL1 \
+  -P BSK_PC int $BSK_PC \
+  -P KSK_PC int $KSK_PC \
   -F APPLICATION APPLI_simu \
   -F REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ} \
   $run_edalize_args | tee >(grep "Work directory :" >> $TMP_FILE)
@@ -252,6 +264,8 @@ $run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -d $(pwd) -k keep \
   -P MAX_BIT_WIDTH int $MAX_BIT_WIDTH \
   -P N_LVL1 int $N_LVL1 \
   -P ELL_LVL1 int $ELL_LVL1 \
+  -P BSK_PC int $BSK_PC \
+  -P KSK_PC int $KSK_PC \
   -F APPLICATION APPLI_simu \
   -F REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ} \
   $run_edalize_args 2>&1  || echo "Simulation completed"

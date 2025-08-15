@@ -45,6 +45,10 @@ module wop_pbs_kernel_lite
   parameter int REGF_ADDR_W = 16,
   parameter int LUT_SIZE = 1024,
   
+  // BSK/KSK端口配置参数 (可通过命令行配置)
+  parameter int BSK_PC = 2,     // BSK port count - 必须与BSK_CUT_NB兼容
+  parameter int KSK_PC = 2,     // KSK port count
+  
   // 集成真实模块所需的参数 (从wop_pbs_kernel.sv复制)
   parameter  mod_mult_type_e   MOD_MULT_TYPE       = set_mod_mult_type(MOD_NTT_TYPE),
   parameter  mod_reduct_type_e REDUCT_TYPE         = set_mod_reduct_type(MOD_NTT_TYPE),

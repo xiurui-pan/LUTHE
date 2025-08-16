@@ -113,6 +113,7 @@ logic [REGF_ADDR_W-1:0] cmux_result_addr; // CMux结果存储地址
 logic [4:0] cmux_bit_counter;  // 10-19
 logic [9:0] cmux_entry_counter; // 0-1023
 logic [31:0] lut_load_counter;
+logic [31:0] lut_data_index;  // 修复管道延迟：跟踪接收数据的实际索引
 logic cmux_pool_select;  // ping-pong选择
 
 // CMux Tree状态机 - 移到前面声明
@@ -124,7 +125,7 @@ typedef enum logic [2:0] {
 } cmux_tree_state_e;
 
 cmux_tree_state_e cmux_tree_state;
-logic [3:0] cmux_round;          // 当前轮次 (10-19)
+logic [4:0] cmux_round;          // 当前轮次 (10-19)
 logic [9:0] cmux_process_idx;    // 当前处理的索引
 logic [9:0] cmux_entries_count;  // 当前轮的条目数
 logic cmux_pool_ping_pong;       // ping-pong选择 (0/1)
@@ -153,13 +154,14 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     cmux_bit_counter <= 10;  // CMux从bit 10开始
     cmux_entry_counter <= '0;
     lut_load_counter <= '0;
+    lut_data_index <= '0;  // 初始化数据索引
     cmux_pool_select <= 1'b0;
     
     // CMux Tree状态机初始化
     cmux_tree_state <= CMUX_IDLE;
-    cmux_round <= 4'd10;
+    cmux_round <= 5'd12;
     cmux_process_idx <= '0;
-    cmux_entries_count <= 10'd1024;
+    cmux_entries_count <= 10'd0;
     cmux_pool_ping_pong <= 1'b0;
     
     // 初始化完成标志
@@ -195,10 +197,24 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     case (current_state)
       LOAD_LUT_ENTRIES: begin
         if (lut_req_rdy && lut_data_avail) begin
-          lut_load_counter <= lut_load_counter + 1;
+          // 修复：处理AXI4数据流水线延迟
+          lut_data_index <= lut_load_counter;  // 数据索引跟踪当前接收的数据
+          lut_load_counter <= lut_load_counter + 1;  // 计数器为下一次请求做准备
+          
+          // Debug: 显示加载进度（减少频率）
+          if (lut_load_counter % 200 == 0 || lut_load_counter > 1020) begin
+            $display("[VP_ENGINE] LUT loading progress: %0d/%0d", lut_load_counter, LUT_SIZE-1);
+          end
+          
           if (lut_load_counter >= LUT_SIZE - 1) begin
             lut_load_done <= 1'b1;
             $display("[VP_ENGINE] LUT loading completed: %0d entries", LUT_SIZE);
+          end
+        end else begin
+          // Debug: 显示等待状态
+          if (lut_load_counter > 300 && lut_load_counter % 10 == 0) begin
+            $display("[VP_ENGINE] LUT loading stalled: counter=%0d, req_rdy=%0d, data_avail=%0d", 
+                     lut_load_counter, lut_req_rdy, lut_data_avail);
           end
         end
       end
@@ -387,9 +403,9 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       CMUX_IDLE: begin
         if (current_state == CMUX_TREE_PROCESS) begin
           cmux_tree_state <= CMUX_INIT_POOLS;
-          cmux_round <= 4'd10;
+          cmux_round <= 5'd10;
           cmux_process_idx <= '0;
-          cmux_entries_count <= 10'd1023; // 修复位宽问题
+          cmux_entries_count <= 10'd1024; // 修复位宽问题
           cmux_pool_ping_pong <= 1'b0;
         end
       end
@@ -397,7 +413,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       CMUX_INIT_POOLS: begin
         // 初始化已通过LOAD_LUT_ENTRIES完成，直接进入CMux处理
         cmux_tree_state <= CMUX_TREE_EXEC;
-        cmux_round <= 4'd10;
+        cmux_round <= 5'd12;
         cmux_entries_count <= 10'd512; // 第一轮输出512个
         cmux_pool_ping_pong <= 1'b1;   // 输出到pools[1]
       end
@@ -406,17 +422,31 @@ always_ff @(posedge clk or negedge s_rst_n) begin
         // 处理当前轮的所有条目
         if (cmux_process_idx < cmux_entries_count) begin
           cmux_process_idx <= cmux_process_idx + 1;
+          // 减少调试频率，只在特定条目时显示
+          if (cmux_process_idx == 0 || cmux_process_idx == cmux_entries_count-1) begin
+            $display("[VP_ENGINE] CMux processing: round %0d, idx %0d/%0d", 
+                     cmux_round-9, cmux_process_idx, cmux_entries_count-1);
+          end
         end else begin
           // 当前轮完成，准备下一轮
-          if (cmux_round >= 4'd19) begin // 修复：绝对轮次19 (10-19的最后一轮)
+          $display("[VP_ENGINE] Round %0d completed: processed %0d entries", 
+                   cmux_round-9, cmux_entries_count);
+          $display("[VP_ENGINE] DEBUG: cmux_round=%0d, condition (>= 19) = %0d", 
+                   cmux_round, (cmux_round >= 5'd19));
+          
+          if (cmux_round >= 5'd19) begin // 绝对轮次19 (bit 19是最后一轮)
             // 所有轮次完成
+            $display("[VP_ENGINE] All 10 CMux rounds completed! (cmux_round=%0d)", cmux_round);
             cmux_tree_state <= CMUX_EXTRACT_RESULT;
           end else begin
             // 进入下一轮
+            $display("[VP_ENGINE] Advancing to next round: %0d -> %0d", cmux_round, cmux_round+1);
             cmux_round <= cmux_round + 1;
             cmux_process_idx <= '0;
             cmux_entries_count <= cmux_entries_count >> 1; // 减半
             cmux_pool_ping_pong <= ~cmux_pool_ping_pong;   // 切换ping-pong
+            $display("[VP_ENGINE] Starting round %0d: %0d entries, ping_pong=%0d", 
+                     cmux_round-8, cmux_entries_count >> 1, ~cmux_pool_ping_pong);
           end
         end
       end
@@ -431,27 +461,39 @@ end
 
 // CMux Tree数据路径
 always_ff @(posedge clk) begin
-  // 1. 加载LUT数据到pools[0] (初始化) - FIXED
+  // 1. 加载LUT数据到pools[0] (初始化) - PIPELINE DELAY FIXED  
   if (current_state == LOAD_LUT_ENTRIES && lut_req_rdy && lut_data_avail) begin
     // AXI4数据格式: lut_data[127:0] = {coef3[31:0], coef2[31:0], coef1[31:0], coef0[31:0]}
-    // 修复：正确解析128位AXI4数据到4个32位系数
-    cmux_pools[0][lut_load_counter][0][0] <= lut_data[31:0];   // coef0 -> a[0][0]
-    cmux_pools[0][lut_load_counter][0][1] <= lut_data[63:32];  // coef1 -> a[0][1]  
-    cmux_pools[0][lut_load_counter][0][2] <= lut_data[95:64];  // coef2 -> a[0][2]
-    cmux_pools[0][lut_load_counter][0][3] <= lut_data[127:96]; // coef3 -> a[0][3]
+    // 修复：使用lut_data_index确保数据存储到正确位置
+    cmux_pools[0][lut_data_index][0][0] <= lut_data[31:0];   // coef0 -> a[0][0]
+    cmux_pools[0][lut_data_index][0][1] <= lut_data[63:32];  // coef1 -> a[0][1]  
+    cmux_pools[0][lut_data_index][0][2] <= lut_data[95:64];  // coef2 -> a[0][2]
+    cmux_pools[0][lut_data_index][0][3] <= lut_data[127:96]; // coef3 -> a[0][3]
     
     // K=1, so we need a[1][0-3] too, but AXI4 only gives us 4 coefficients per transfer
     // For now, replicate pattern (need to check testbench LUT data format)
-    cmux_pools[0][lut_load_counter][1][0] <= lut_data[31:0] + 32'h8;   // offset pattern
-    cmux_pools[0][lut_load_counter][1][1] <= lut_data[63:32] + 32'h8;
-    cmux_pools[0][lut_load_counter][1][2] <= lut_data[95:64] + 32'h8;
-    cmux_pools[0][lut_load_counter][1][3] <= lut_data[127:96] + 32'h8;
+    cmux_pools[0][lut_data_index][1][0] <= lut_data[31:0] + 32'h8;   // offset pattern
+    cmux_pools[0][lut_data_index][1][1] <= lut_data[63:32] + 32'h8;
+    cmux_pools[0][lut_data_index][1][2] <= lut_data[95:64] + 32'h8;
+    cmux_pools[0][lut_data_index][1][3] <= lut_data[127:96] + 32'h8;
     
-    // Critical debug: Show raw AXI4 data and parsed values
-    if (lut_load_counter == 0 || lut_load_counter == 341) begin
-      $display("[VP_ENGINE] CRITICAL - LUT[%0d] RAW AXI4: 0x%0h", lut_load_counter, lut_data);
-      $display("[VP_ENGINE] CRITICAL - LUT[%0d] PARSED: [0][0]=0x%0h, [0][1]=0x%0h, [1][0]=0x%0h", 
-               lut_load_counter, lut_data[31:0], lut_data[63:32], lut_data[31:0] + 32'h8);
+    // Critical debug: Show raw AXI4 data and parsed values  
+    if (lut_data_index <= 2 || lut_data_index == 341) begin
+      $display("[VP_ENGINE] PIPELINE FIX - Data for LUT[%0d] RAW AXI4: 0x%0h", lut_data_index, lut_data);
+      $display("[VP_ENGINE] PIPELINE FIX - LUT[%0d] PARSED: [0][0]=0x%0h, [0][1]=0x%0h, [1][0]=0x%0h", 
+               lut_data_index, lut_data[31:0], lut_data[63:32], lut_data[31:0] + 32'h8);
+      $display("[VP_ENGINE] PIPELINE FIX - Storing to pools[0][%0d] (req_counter=%0d)", lut_data_index, lut_load_counter);
+    end
+    
+    // Debug: Verify stored values after a few cycles
+    if (lut_load_counter == 2) begin
+      $display("[VP_ENGINE] STORED VALUES CHECK:");
+      $display("  pools[0][0]: [0][0]=0x%0h, [0][1]=0x%0h", 
+               cmux_pools[0][0][0][0], cmux_pools[0][0][0][1]);
+      $display("  pools[0][1]: [0][0]=0x%0h, [0][1]=0x%0h", 
+               cmux_pools[0][1][0][0], cmux_pools[0][1][0][1]);
+      $display("  pools[0][2]: [0][0]=0x%0h, [0][1]=0x%0h", 
+               cmux_pools[0][2][0][0], cmux_pools[0][2][0][1]);
     end
   end
   
@@ -482,7 +524,7 @@ always_ff @(posedge clk) begin
     control_bit = (ggsw_value % 32'd1000) > 32'd500;
     
     // Debug first CMux operation to trace data flow
-    if (cmux_round == 4'd10 && cmux_process_idx == 0) begin
+    if (cmux_round == 5'd10 && cmux_process_idx == 0) begin
       $display("[VP_ENGINE] CRITICAL - First CMux operation:");
       $display("  ggsw_value=0x%0h, control_bit=%0d", ggsw_value, control_bit);
       $display("  from_pool=%0d, to_pool=%0d", from_pool, to_pool);
@@ -491,6 +533,13 @@ always_ff @(posedge clk) begin
                cmux_pools[from_pool][from_idx0][0][0], cmux_pools[from_pool][from_idx0][0][1]);
       $display("  Source[%0d]: [0][0]=0x%0h, [0][1]=0x%0h", from_idx1,
                cmux_pools[from_pool][from_idx1][0][0], cmux_pools[from_pool][from_idx1][0][1]);
+      $display("  Selected: Source[%0d] (control_bit=%0d)", control_bit ? from_idx1 : from_idx0, control_bit);
+    end
+    
+    // Debug: Track a specific entry through all rounds
+    if (cmux_process_idx == 0 && cmux_round <= 5'd12) begin
+      $display("[VP_ENGINE] Round %0d: Entry[0] from pools[%0d][%0d] -> pools[%0d][0]", 
+               cmux_round-9, from_pool, control_bit ? from_idx1 : from_idx0, to_pool);
     end
     
     // CMux选择逻辑: 根据control_bit选择from_idx0或from_idx1

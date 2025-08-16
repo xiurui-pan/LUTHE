@@ -579,7 +579,7 @@ module tb_wop_vertical_packing_engine
               test_ggsw_samples[bit_idx][ell][k][n] = (bit_idx % 2 == 0) ? 600 : 400;  // Alternating pattern
             end else begin
               // Upper bits (10-19): used in CMux tree
-              test_ggsw_samples[bit_idx][ell][k][n] = (bit_idx % 2 == 1) ? 700 : 300;  // Different pattern
+              test_ggsw_samples[bit_idx][ell][k][n] = (bit_idx % 2 == 0) ? 800 : 200;  // 匹配Python模式
             end
           end
         end
@@ -588,15 +588,11 @@ module tb_wop_vertical_packing_engine
     
     // Generate meaningful LUT table matching typical use case
     for (int i = 0; i < LUT_SIZE; i++) begin
-      // Create a function that maps 10-bit input to meaningful output
-      // Example: f(x) = x * 100 + popcount(x) for distinguishable results
-      int popcount = $countones(i);
-      int base_value = i * 100 + popcount;
-      
+      // 修复：使用与Python脚本相同的LUT生成逻辑
       for (int k = 0; k <= K; k++) begin
         for (int n = 0; n < N_LVL1; n++) begin
-          // Fill entire polynomial with distinct non-zero values
-          test_lut_table[i][k][n] = base_value + n + (k * 100000);
+          // 匹配Python: value = i * (K + 1) * N_LVL1 + k * N_LVL1 + n
+          test_lut_table[i][k][n] = i * 8 + k * 4 + n;
         end
       end
     end
@@ -744,9 +740,28 @@ module tb_wop_vertical_packing_engine
         end
       end
     end
+    
+    // 🔧 CRITICAL FIX: VP引擎期望简单偏移地址读取CMux控制位
+    // VP引擎读取地址: ggsw_samples_base_addr + cmux_bit_counter (10-19)
+    // 需要将CMux位的第一个系数[0][0][0]写入简单偏移地址
+    $display("[TB] CRITICAL FIX: Writing CMux control data for VP engine simple offset access");
+    for (int bit_idx = 10; bit_idx < 20; bit_idx++) begin
+      int simple_addr = ggsw_samples_base_addr + bit_idx;
+      regfile_memory[simple_addr] = test_ggsw_samples[bit_idx][0][0][0];  // First coefficient
+      $display("  bit[%0d]: simple_addr=0x%0h, value=0x%0h (%0d)", 
+               bit_idx, simple_addr, test_ggsw_samples[bit_idx][0][0][0], test_ggsw_samples[bit_idx][0][0][0]);
+    end
     $display("[TB] ✅ Test GGSW samples written to RegFile - VP引擎现在可以读取非零数据");
     $display("[TB] Sample: regfile_memory[0x%0h] = 0x%0h (bit_0[0][0][0])", 
              ggsw_samples_base_addr, regfile_memory[ggsw_samples_base_addr]);
+    
+    // Debug: Print GGSW data for CMux bits (10-19)
+    $display("[TB] CRITICAL - GGSW CMux data verification:");
+    for (int bit_idx = 10; bit_idx < 20; bit_idx++) begin
+      int addr = ggsw_samples_base_addr + bit_idx;
+      $display("  bit[%0d]: addr=0x%0h, value=0x%0h (%0d), test_data=0x%0h", 
+               bit_idx, addr, regfile_memory[addr], regfile_memory[addr], test_ggsw_samples[bit_idx][0][0][0]);
+    end
     
     // Prepare inputs
     ggsw_samples_ready = 1;

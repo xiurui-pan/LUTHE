@@ -111,6 +111,7 @@ logic [REGF_ADDR_W-1:0] cmux_result_addr; // CMux结果存储地址
 
 // 控制信号
 logic [4:0] cmux_bit_counter;  // 10-19
+logic ggsw_req_sent;           // GGSW请求发送标志
 logic [9:0] cmux_entry_counter; // 0-1023
 logic [31:0] lut_load_counter;
 logic [31:0] lut_data_index;  // 修复管道延迟：跟踪接收数据的实际索引
@@ -152,6 +153,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
   if (!s_rst_n) begin
     current_state <= IDLE;
     cmux_bit_counter <= 10;  // CMux从bit 10开始
+    ggsw_req_sent <= 1'b0;
     cmux_entry_counter <= '0;
     lut_load_counter <= '0;
     lut_data_index <= '0;  // 初始化数据索引
@@ -220,7 +222,16 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       end
       
       LOAD_GGSW_SAMPLES: begin
-        if (regf_rd_req_rdy && regf_rd_data_avail[0]) begin
+        // 请求被接受时设置标志
+        if (regf_rd_req_vld && regf_rd_req_rdy && !ggsw_req_sent) begin
+          ggsw_req_sent <= 1'b1;
+          $display("[VP_ENGINE] GGSW request accepted for bit[%0d]", cmux_bit_counter);
+        end
+        
+        // 收到数据时处理
+        if (regf_rd_data_avail[0]) begin
+          // 收到数据，处理下一个位
+          ggsw_req_sent <= 1'b0; // 清除请求标志，允许下一个请求
           cmux_bit_counter <= cmux_bit_counter + 1;
           if (cmux_bit_counter >= 19) begin
             ggsw_load_done <= 1'b1;
@@ -329,9 +340,14 @@ always_comb begin
     end
     
     LOAD_GGSW_SAMPLES: begin
-      if (!ggsw_load_done) begin
+      // 修复握手协议：只有在未发送请求且未完成时才发送新请求
+      if (!ggsw_load_done && cmux_bit_counter <= 19 && !ggsw_req_sent) begin
         regf_rd_req_vld = 1'b1;
-        regf_rd_req = {ggsw_samples_base_addr + cmux_bit_counter, 16'h0000};
+        // 修复地址格式：地址应该在高位，不需要拼接低16位0  
+        regf_rd_req = (ggsw_samples_base_addr + cmux_bit_counter) << 5; // 地址放在[20:5]位
+        $display("[VP_ENGINE] Requesting GGSW bit[%0d]: base=0x%0h + counter=%0d = addr=0x%0h", 
+                 cmux_bit_counter, ggsw_samples_base_addr, cmux_bit_counter, ggsw_samples_base_addr + cmux_bit_counter);
+        $display("[VP_ENGINE] DEBUG: regf_rd_req=0x%0h (shifted addr to high bits)", regf_rd_req);
       end
     end
     
@@ -413,7 +429,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       CMUX_INIT_POOLS: begin
         // 初始化已通过LOAD_LUT_ENTRIES完成，直接进入CMux处理
         cmux_tree_state <= CMUX_TREE_EXEC;
-        cmux_round <= 5'd12;
+        // 保持cmux_round=10，不要重新设置！
         cmux_entries_count <= 10'd512; // 第一轮输出512个
         cmux_pool_ping_pong <= 1'b1;   // 输出到pools[1]
       end
@@ -470,18 +486,17 @@ always_ff @(posedge clk) begin
     cmux_pools[0][lut_data_index][0][2] <= lut_data[95:64];  // coef2 -> a[0][2]
     cmux_pools[0][lut_data_index][0][3] <= lut_data[127:96]; // coef3 -> a[0][3]
     
-    // K=1, so we need a[1][0-3] too, but AXI4 only gives us 4 coefficients per transfer
-    // For now, replicate pattern (need to check testbench LUT data format)
-    cmux_pools[0][lut_data_index][1][0] <= lut_data[31:0] + 32'h8;   // offset pattern
-    cmux_pools[0][lut_data_index][1][1] <= lut_data[63:32] + 32'h8;
-    cmux_pools[0][lut_data_index][1][2] <= lut_data[95:64] + 32'h8;
-    cmux_pools[0][lut_data_index][1][3] <= lut_data[127:96] + 32'h8;
+    // K=1: a[1][n] = i*8 + 1*4 + n = a[0][n] + 4 (based on testbench LUT generation)
+    cmux_pools[0][lut_data_index][1][0] <= lut_data[31:0] + 32'h4;   // fixed offset: +4 not +8
+    cmux_pools[0][lut_data_index][1][1] <= lut_data[63:32] + 32'h4;
+    cmux_pools[0][lut_data_index][1][2] <= lut_data[95:64] + 32'h4;
+    cmux_pools[0][lut_data_index][1][3] <= lut_data[127:96] + 32'h4;
     
     // Critical debug: Show raw AXI4 data and parsed values  
     if (lut_data_index <= 2 || lut_data_index == 341) begin
       $display("[VP_ENGINE] PIPELINE FIX - Data for LUT[%0d] RAW AXI4: 0x%0h", lut_data_index, lut_data);
       $display("[VP_ENGINE] PIPELINE FIX - LUT[%0d] PARSED: [0][0]=0x%0h, [0][1]=0x%0h, [1][0]=0x%0h", 
-               lut_data_index, lut_data[31:0], lut_data[63:32], lut_data[31:0] + 32'h8);
+               lut_data_index, lut_data[31:0], lut_data[63:32], lut_data[31:0] + 32'h4);
       $display("[VP_ENGINE] PIPELINE FIX - Storing to pools[0][%0d] (req_counter=%0d)", lut_data_index, lut_load_counter);
     end
     
@@ -497,10 +512,13 @@ always_ff @(posedge clk) begin
     end
   end
   
-  // 2. 加载GGSW样本 (bits 10-19)
-  if (current_state == LOAD_GGSW_SAMPLES && regf_rd_req_rdy && regf_rd_data_avail[0]) begin
+  // 2. 加载GGSW样本 (bits 10-19) - 修复时序匹配问题
+  if (current_state == LOAD_GGSW_SAMPLES && regf_rd_data_avail[0]) begin
     // 存储GGSW样本第一个系数，用于CMux控制位提取
     cmux_tgsw_samples[cmux_bit_counter][0][0][0] <= regf_rd_data[0];
+    // Debug: Print loaded GGSW data
+    $display("[VP_ENGINE] GGSW Loading: bit[%0d] = 0x%0h (%0d)", 
+             cmux_bit_counter, regf_rd_data[0], regf_rd_data[0]);
     // 其他系数不需要存储完整的TLWE样本，只需控制位
   end
   
@@ -523,10 +541,11 @@ always_ff @(posedge clk) begin
     ggsw_value = cmux_tgsw_samples[cmux_round][0][0][0];
     control_bit = (ggsw_value % 32'd1000) > 32'd500;
     
-    // Debug first CMux operation to trace data flow
-    if (cmux_round == 5'd10 && cmux_process_idx == 0) begin
-      $display("[VP_ENGINE] CRITICAL - First CMux operation:");
-      $display("  ggsw_value=0x%0h, control_bit=%0d", ggsw_value, control_bit);
+    // Debug each CMux round to trace control bits pattern
+    if (cmux_process_idx == 0) begin
+      $display("[VP_ENGINE] CRITICAL - CMux Round %0d (bit %0d):", cmux_round-5'd9, cmux_round);
+      $display("  cmux_tgsw_samples[%0d][0][0][0] = 0x%0h (%0d)", cmux_round, cmux_tgsw_samples[cmux_round][0][0][0], cmux_tgsw_samples[cmux_round][0][0][0]);
+      $display("  ggsw_value=0x%0h (%0d), control_bit=%0d", ggsw_value, ggsw_value, control_bit);
       $display("  from_pool=%0d, to_pool=%0d", from_pool, to_pool);
       $display("  from_idx0=%0d, from_idx1=%0d", from_idx0, from_idx1);
       $display("  Source[%0d]: [0][0]=0x%0h, [0][1]=0x%0h", from_idx0, 

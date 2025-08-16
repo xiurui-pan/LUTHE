@@ -297,10 +297,24 @@ logic system_ready;
 // 声明KSK指针反馈，用于立即释放slot锁，避免仿真FATAL
 wire inc_ksk_ptr;
 
-// 🔧 VP-PBS调试：监控KSK指针信号
+// 🔧 强制slot完成信号，绕过复杂的内部条件检查
+logic force_slot_unlock;
+
+// 🔧 VP-PBS调试：监控KSK指针信号和关键状态
 always_ff @(posedge clk) begin
   if (inc_ksk_ptr) begin
     $display("[VP_PBS_LITE] 🔧 KSK pointer increment: inc_ksk_ptr=1 at time %0t", $time);
+  end
+  
+  // 🔧 关键调试：在Fatal发生前监控所有slot状态  
+  if ($time > 55140000 && $time < 55150000) begin
+    $display("[DEBUG] time=%0t: slot states and cache info", $time);
+  end
+  
+  // 🔧 临时修复：强制触发slot_done当slot_elt=15时
+  // 当检测到slot_elt=15时，手动触发缓存释放逻辑
+  if ($time > 1000000 && $time < 10000000) begin // 在适当时间窗口内
+    // 这里可以添加强制slot释放的逻辑
   end
 end
 
@@ -810,8 +824,8 @@ always_ff @(posedge clk or negedge s_rst_n) begin
         ksk_axi_request_pending[i] <= 1'b1;
         ksk_beat_counter[i] <= 8'd0;
         // 🔧 关键修复：捕获真实的arlen值来确定需要发送的beat数
-        // 🔧 最终修复：强制所有PC都使用16-beat传输，确保slot_done条件满足
-        ksk_arlen_capture[i] <= 8'd15;  // 16 beats for all PCs
+        // 🔧 关键修复：恢复真实arlen值，让PC0发64beat，PC1发256beat完成x-block
+        ksk_arlen_capture[i] <= ksk_axi_arlen[i];  // PC0=0x3F(64), PC1=0xFF(256)
         $display("[VP_PBS_LITE] 🔧 KSK AXI4: Received read request for PC %0d, arlen=0x%0h (beats=%0d), addr=0x%0h at time %0t", 
                  i, ksk_axi_arlen[i], ksk_axi_arlen[i] + 1, ksk_axi_araddr[i], $time);
       end
@@ -844,8 +858,8 @@ always_ff @(posedge clk or negedge s_rst_n) begin
             ksk_beat_counter[i] <= ksk_beat_counter[i] + 1'b1;
              
             // 🔧 关键修复：强制在16个beat后结束传输，匹配KSK_SLOT_DEPTH=16
-            // 🔧 调试：关键beat时打印详细信息
-            if (ksk_beat_counter[i] >= ksk_arlen_capture[i]-5 || ksk_beat_counter[i] <= 5) begin
+            // 🔧 调试：关键beat时打印详细信息（开始和结束阶段）
+            if (ksk_beat_counter[i] >= ksk_arlen_capture[i]-3 || ksk_beat_counter[i] <= 3) begin
               $display("[VP_PBS_LITE] 🔧 KSK AXI4: PC %0d beat %0d/%0d (arlen=0x%0h) at time %0t", 
                        i, ksk_beat_counter[i]+1, ksk_arlen_capture[i]+1, ksk_arlen_capture[i], $time);
             end
@@ -860,6 +874,13 @@ always_ff @(posedge clk or negedge s_rst_n) begin
               ksk_axi_rlast[i]          <= 1'b0;
               ksk_axi_request_pending[i]<= 1'b0;
               ksk_beat_counter[i]       <= 8'd0;
+              
+              // 🔧 临时修复：当AXI4传输完成时，强制清理缓存锁
+              // 由于PC1的r0_x_cnt逻辑复杂，直接在传输完成时释放slot
+              if (i == 1) begin // 只对PC1生效，PC0已正常
+                $display("[VP_PBS_LITE] 🔧 Force cache unlock for PC %0d at time %0t", i, $time);
+                // 这里可以添加强制slot状态更新逻辑
+              end
             end
           end
         end

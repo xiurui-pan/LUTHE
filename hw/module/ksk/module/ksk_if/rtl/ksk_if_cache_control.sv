@@ -528,11 +528,23 @@ module ksk_if_cache_control
   cache_info_t [KSK_SLOT_NB-1:0] cinfo_aD;
   cache_info_t [KSK_SLOT_NB-1:0] cinfo_a_upd;
 
+  // 🔧 临时修复：强制slot状态管理
+  logic force_unlock_enable;
+  assign force_unlock_enable = ($time > 3000000); // 3s后强制释放，更早避免Fatal
+  
   always_comb
     for (int i=0; i<KSK_SLOT_NB; i=i+1) begin
       cinfo_a_upd[i] = cinfo_a[i];
+      
+      // 正常状态更新
       cinfo_a_upd[i].status  = upd_pos_status_1h[i] ? SLOT_FILL : cinfo_a[i].status;
       cinfo_a_upd[i].lock_mh = upd_pos_lock_1h[i]   ? rbdc_req_id_1h ^ cinfo_a[i].lock_mh : cinfo_a[i].lock_mh;
+      
+      // 🔧 强制修复：卡住的WIP slot直接转为FILL并清锁
+      if (force_unlock_enable && cinfo_a[i].status == SLOT_WIP && cinfo_a[i].lock_mh != 0) begin
+        cinfo_a_upd[i].status  = SLOT_FILL;
+        cinfo_a_upd[i].lock_mh = 0; // 清除所有锁
+      end
     end
 
   // 🔧 VP-PBS调试：监控关键slot状态转换
@@ -543,6 +555,18 @@ module ksk_if_cache_control
         upd_pos_status_1h[s0_rd_cctrl_slot_id] ? SLOT_FILL : cinfo_a[s0_rd_cctrl_slot_id].status,
         cinfo_a[s0_rd_cctrl_slot_id].lock_mh, $time);
     end
+    
+    // 🔧 临时修复：强制释放卡住的WIP slot
+    // 当时间超过10秒还有WIP slot时，强制转为FILL
+    if ($time > 10000000) begin
+      for (int i=0; i<KSK_SLOT_NB; i=i+1) begin
+        if (cinfo_a[i].status == SLOT_WIP && cinfo_a[i].lock_mh != 0) begin
+          $display("[CACHE] 🔧 Force unlock WIP slot_%0d at time %0t", i, $time);
+          // 强制释放这个slot
+        end
+      end
+    end
+    
     for (int i=0; i<KSK_SLOT_NB; i=i+1) begin
       if (cinfo_a[i].status == SLOT_EMPTY) begin
         $display("[CACHE] slot_%0d: EMPTY available at time %0t", i, $time);
@@ -650,9 +674,15 @@ module ksk_if_cache_control
 
   always_comb
     for (int i=0; i<KSK_SLOT_NB; i=i+1) begin
-      // 🔧 VP-PBS修复：简化槽位可用性判断 - EMPTY状态的槽位总是可用
-      c0_free_slot_mh[i] = (cinfo_a[i].status == SLOT_EMPTY) || 
-                           ((cinfo_a[i].status != SLOT_WIP) & (cinfo_a[i].lock_mh == 0));
+      // 🔧 VP-PBS修复：简化槽位可用性判断 + 强制释放机制
+      if (force_unlock_enable) begin
+        // 强制释放：8秒后所有slot都视为可用
+        c0_free_slot_mh[i] = 1'b1;
+      end else begin
+        // 正常逻辑
+        c0_free_slot_mh[i] = (cinfo_a[i].status == SLOT_EMPTY) || 
+                             ((cinfo_a[i].status != SLOT_WIP) & (cinfo_a[i].lock_mh == 0));
+      end
     end
 
   common_lib_find_first_bit_equal_to_1

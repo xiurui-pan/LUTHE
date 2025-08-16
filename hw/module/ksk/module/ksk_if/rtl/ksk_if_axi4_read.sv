@@ -277,6 +277,9 @@ module ksk_if_axi4_read
       // 🔧 VP-PBS调试：每个gen_pc的参数验证
       initial begin
         $display("INFO> gen_pc=%0d: KSK_CUT_PER_PC_L=%0d, KSK_CUT_OFS_L=%0d", gen_pc, KSK_CUT_PER_PC_L, KSK_CUT_OFS_L);
+        if (KSK_CUT_PER_PC_L == 0) begin
+          $display("INFO> gen_pc=%0d: DISABLED (no cuts mapped), slot_done=1 always", gen_pc);
+        end
       end
       localparam int PROC_BCOL_COEF_NB           = ((LBY*KS_BLOCK_LINE_NB*KS_LG_NB)+(KSK_CUT_NB/KSK_CUT_PER_PC_L)-1) / (KSK_CUT_NB/KSK_CUT_PER_PC_L);
       localparam int AXI4_WORD_PER_KSK_BCOL_L    = (PROC_BCOL_COEF_NB*KSK_ACS_W + AXI4_DATA_W-1)/AXI4_DATA_W;
@@ -299,6 +302,22 @@ module ksk_if_axi4_read
         $display("AXI4_WORD_PER_KSK_BCOL_L=%0d",AXI4_WORD_PER_KSK_BCOL_L);
       end
 // pragma translate_on
+
+      // 🔧 VP-PBS修复：禁用零cut的PC，避免缓存死锁
+      if (KSK_CUT_PER_PC_L == 0) begin : gen_pc_disabled
+        // 直接将此PC标记为完成，不产生任何AXI4流量
+        assign slot_doneD[gen_pc] = 1'b1;
+        assign m_axi4_araddr[gen_pc] = '0;
+        assign m_axi4_arlen[gen_pc] = '0;
+        assign m_axi4_arsize[gen_pc] = '0;
+        assign m_axi4_arburst[gen_pc] = 2'b01;
+        assign m_axi4_arvalid[gen_pc] = 1'b0;
+        assign m_axi4_rready[gen_pc] = 1'b0;
+        
+        initial begin
+          $display("[KSK_AXI4_READ] PC%0d: Disabled (zero cuts), slot_done=1 always", gen_pc);
+        end
+      end else begin : gen_pc_enabled
 
 // ---------------------------------------------------------------------------------------------- //
 // Input pipe
@@ -786,7 +805,8 @@ module ksk_if_axi4_read
                                   (r0_last_x_cnt ? r0_x_cnt : (r0_x_cnt + 1)) :
                                   r1_x_idx;
 
-      assign slot_doneD[gen_pc] = r1_data_vld & r1_last_cutg_id & r1_last_slot_elt & (r1_x_idx_for_done == r1_x_cnt_max);
+      // 🔧 VP-PBS修复：正常PC的slot_done条件（禁用PC已在上面处理）
+    assign slot_doneD[gen_pc] = r1_data_vld & r1_last_cutg_id & r1_last_slot_elt & (r1_x_idx_for_done == r1_x_cnt_max);
       
       // 🔧 VP-PBS调试：添加slot转换条件监控
       always_ff @(posedge clk) begin
@@ -801,6 +821,7 @@ module ksk_if_axi4_read
         end
       end
 
+      end // gen_pc_enabled
     end // for gen_pc
   endgenerate
 endmodule

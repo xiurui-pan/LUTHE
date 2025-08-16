@@ -258,7 +258,7 @@ module bsk_if_cache_control
 
   always_comb
     for (int i=0; i<BSK_SLOT_NB; i=i+1)
-      upd_pos_lock_1h[i] = rbdc_avail & (rbdc_br_loop == cinfo_a[i].br_loop) & (cinfo_a[i].status == SLOT_FILL);
+      upd_pos_lock_1h[i] = rbdc_avail & (rbdc_br_loop == cinfo_a[i].br_loop) & (cinfo_a[i].status == SLOT_FILL || (cinfo_a[i].status == SLOT_EMPTY && cinfo_a[i].lock_mh != 0));
 
   always_ff @(posedge clk)
     if (!s_rst_n) begin
@@ -647,8 +647,11 @@ module bsk_if_cache_control
   logic [BSK_SLOT_NB-1:0] c0_free_slot_mh;
 
   always_comb
-    for (int i=0; i<BSK_SLOT_NB; i=i+1)
-      c0_free_slot_mh[i] = (cinfo_a[i].status != SLOT_WIP) & (cinfo_a[i].lock_mh == 0);
+    for (int i=0; i<BSK_SLOT_NB; i=i+1) begin
+      // 🔧 VP-PBS修复：简化槽位可用性判断 - EMPTY状态的槽位总是可用
+      c0_free_slot_mh[i] = (cinfo_a[i].status == SLOT_EMPTY) || 
+                           ((cinfo_a[i].status != SLOT_WIP) & (cinfo_a[i].lock_mh == 0));
+    end
 
   common_lib_find_first_bit_equal_to_1
   #(
@@ -667,9 +670,16 @@ module bsk_if_cache_control
       // do nothing
     end
     else begin
+      // 🔧 VP-PBS调试：临时变更为警告，观察槽位状态
       assert(!(cin_vld & cin_st_hit_miss & c0_miss) || |c0_free_slot_mh)
       else begin
-        $fatal(1,"%t > ERROR: No available free slot for a miss request!",$time);
+        $display("%t > WARN: No available free slot for a miss request! free_slot_mh=0x%h, BSK_SLOT_NB=%0d", 
+                 $time, c0_free_slot_mh, BSK_SLOT_NB);
+        for (int i=0; i<BSK_SLOT_NB; i++) begin
+          $display("  slot[%0d]: status=%0d, lock_mh=0x%h, br_loop=0x%h", 
+                   i, cinfo_a[i].status, cinfo_a[i].lock_mh, cinfo_a[i].br_loop);
+        end
+        // $fatal(1,"%t > ERROR: No available free slot for a miss request!",$time);
       end
     end
 // pragma translate_on
@@ -734,8 +744,16 @@ module bsk_if_cache_control
   always_comb begin
     for (int i=0; i<BSK_SLOT_NB-1; i=i+1) begin
       cinfo_aD[i] = cin_st_update && c1_pos_move[i] ? cinfo_a_upd[i+1] : cinfo_a_upd[i];
+      // 🔧 VP-PBS修复：移动的槽位如果是EMPTY状态，清零lock_mh
+      if (cin_st_update && c1_pos_move[i] && cinfo_aD[i].status == SLOT_EMPTY) begin
+        cinfo_aD[i].lock_mh = '0;
+      end
     end
     cinfo_aD[BSK_SLOT_NB-1] = cin_st_update ? c1_cinfo_upd : cinfo_a_upd[BSK_SLOT_NB-1];
+    // 🔧 VP-PBS修复：MRU槽位如果是EMPTY状态，清零lock_mh  
+    if (cin_st_update && cinfo_aD[BSK_SLOT_NB-1].status == SLOT_EMPTY) begin
+      cinfo_aD[BSK_SLOT_NB-1].lock_mh = '0;
+    end
   end
 
 

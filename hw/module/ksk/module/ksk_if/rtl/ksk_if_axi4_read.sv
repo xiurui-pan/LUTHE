@@ -76,6 +76,7 @@ module ksk_if_axi4_read
     if (KSK_CUT_FCOEF_NB < KSK_COEF_PER_AXI4_WORD && (KSK_COEF_PER_AXI4_WORD/KSK_CUT_FCOEF_NB)*KSK_CUT_FCOEF_NB != KSK_COEF_PER_AXI4_WORD ) begin : __UNSUPPORTED_KSK_CUT_FCOEF_NB_BIS__
       $fatal(1,"> ERROR: Unsupported : KSK_CUT_FCOEF_NB (%0d) should divide KSK_COEF_PER_AXI4_WORD (%0d)",KSK_CUT_FCOEF_NB,KSK_COEF_PER_AXI4_WORD);
     end
+    // 🔧 VP-PBS修复：现在使用LWE_K=888和KSLB_x2y32z3确保KS_BLOCK_COL_W>=2
     if (KS_BLOCK_COL_W < 2) begin : __UNSUPPORTED_KS_BLOCK_COL_W__
       $fatal(1,"> ERROR: Unsupported KS_BLOCK_COL_W, should be at least 2 bits. RTL was to written to support less value.");
     end
@@ -259,10 +260,27 @@ module ksk_if_axi4_read
   // The slots are stored one after the other in the RAM.
   //
   // Deal with the KSK_PC pseudo-channels in parallel.
+        // 🔧 VP-PBS调试：KSK参数验证和问题诊断
+  initial begin
+    $display("INFO> KSK Configuration: KSK_CUT_NB=%0d, KSK_PC=%0d", KSK_CUT_NB, KSK_PC);
+    $display("INFO> LBY=%0d, KS_BLOCK_LINE_NB=%0d, KS_LG_NB=%0d", LBY, KS_BLOCK_LINE_NB, KS_LG_NB);
+    for (int i=0; i<KSK_PC; i++) begin
+      $display("INFO> KSK_CUT_PER_PC_A[%0d]=%0d, KSK_CUT_OFS_A[%0d]=%0d", i, KSK_CUT_PER_PC_A[i], i, KSK_CUT_OFS_A[i]);
+    end
+  end
+
   generate
     for (genvar gen_pc=0; gen_pc<KSK_PC; gen_pc=gen_pc+1) begin : gen_pc_loop
       localparam int KSK_CUT_PER_PC_L            = KSK_CUT_PER_PC_A[gen_pc];
       localparam int KSK_CUT_OFS_L               = KSK_CUT_OFS_A[gen_pc];
+      
+      // 🔧 VP-PBS调试：每个gen_pc的参数验证
+      initial begin
+        $display("INFO> gen_pc=%0d: KSK_CUT_PER_PC_L=%0d, KSK_CUT_OFS_L=%0d", gen_pc, KSK_CUT_PER_PC_L, KSK_CUT_OFS_L);
+        if (KSK_CUT_PER_PC_L == 0) begin
+          $display("INFO> gen_pc=%0d: DISABLED (no cuts mapped), slot_done=1 always", gen_pc);
+        end
+      end
       localparam int PROC_BCOL_COEF_NB           = ((LBY*KS_BLOCK_LINE_NB*KS_LG_NB)+(KSK_CUT_NB/KSK_CUT_PER_PC_L)-1) / (KSK_CUT_NB/KSK_CUT_PER_PC_L);
       localparam int AXI4_WORD_PER_KSK_BCOL_L    = (PROC_BCOL_COEF_NB*KSK_ACS_W + AXI4_DATA_W-1)/AXI4_DATA_W;
       localparam int AXI4_WORD_PER_KSK_BCOL_L_W  = $clog2(AXI4_WORD_PER_KSK_BCOL_L) == 0 ? 1 : $clog2(AXI4_WORD_PER_KSK_BCOL_L);
@@ -273,8 +291,10 @@ module ksk_if_axi4_read
       // Number of cuts that are processed in parallel
       localparam int PROC_CUT_NB             = KSK_BLOCK_PER_AXI4_WORD == 0 ? 1 :
                                                KSK_CUT_PER_PC_L > KSK_BLOCK_PER_AXI4_WORD ? KSK_BLOCK_PER_AXI4_WORD : KSK_CUT_PER_PC_L;
-      localparam int PROC_CUT_GROUP_NB       = KSK_CUT_PER_PC_L / PROC_CUT_NB;
+      // 🔧 VP-PBS修复：处理PROC_CUT_GROUP_NB=0的边界情况
+      localparam int PROC_CUT_GROUP_NB       = (KSK_CUT_PER_PC_L / PROC_CUT_NB) == 0 ? 1 : (KSK_CUT_PER_PC_L / PROC_CUT_NB);
       localparam int PROC_CUT_GROUP_W        = $clog2(PROC_CUT_GROUP_NB) == 0 ? 1 : $clog2(PROC_CUT_GROUP_NB);
+
 
 // pragma translate_off
       initial begin
@@ -282,6 +302,22 @@ module ksk_if_axi4_read
         $display("AXI4_WORD_PER_KSK_BCOL_L=%0d",AXI4_WORD_PER_KSK_BCOL_L);
       end
 // pragma translate_on
+
+      // 🔧 VP-PBS修复：禁用零cut的PC，避免缓存死锁
+      if (KSK_CUT_PER_PC_L == 0) begin : gen_pc_disabled
+        // 直接将此PC标记为完成，不产生任何AXI4流量
+        assign slot_doneD[gen_pc] = 1'b1;
+        assign m_axi4_araddr[gen_pc] = '0;
+        assign m_axi4_arlen[gen_pc] = '0;
+        assign m_axi4_arsize[gen_pc] = '0;
+        assign m_axi4_arburst[gen_pc] = 2'b01;
+        assign m_axi4_arvalid[gen_pc] = 1'b0;
+        assign m_axi4_rready[gen_pc] = 1'b0;
+        
+        initial begin
+          $display("[KSK_AXI4_READ] PC%0d: Disabled (zero cuts), slot_done=1 always", gen_pc);
+        end
+      end else begin : gen_pc_enabled
 
 // ---------------------------------------------------------------------------------------------- //
 // Input pipe
@@ -576,7 +612,13 @@ module ksk_if_axi4_read
 
       // Keep command and counters for r1 phase.
       assign r1_cmdD       = r0_axi_vld  && r0_axi_rdy ? recp_fifo_out_cmd : r1_cmd;
-      assign r1_x_idxD     = r0_axi_vld  && r0_axi_rdy ? r0_x_cnt          : r1_x_idx;
+      // VP-PBS fix: update r1_x_idx at the exact boundary of x block
+      // If we are on the last AXI word of current x block, next cycle r0_x_cnt will
+      // advance. We capture that intent in r1_x_idxD so that downstream logic sees
+      // the expected x index in time for slot_done detection.
+      assign r1_x_idxD     = (r0_axi_vld && r0_axi_rdy && r0_last_axi_word_cnt) ?
+                              (r0_last_x_cnt ? r0_x_cnt : (r0_x_cnt + 1)) :
+                              r0_x_cnt;
       assign r1_add_ofsD   = r0_axi_vld  && r0_axi_rdy ? recp_fifo_out_cmd.slot_id * KSK_SLOT_DEPTH : r1_add_ofs;
       always_ff @(posedge clk) begin
         r1_cmd       <= r1_cmdD;
@@ -730,14 +772,21 @@ module ksk_if_axi4_read
       assign r1_ksk_mgr_wr_ks_loop = r1_cmd.ks_loop;
 
       //---------------------------------------
-      // Output
+      // Output (使用条件生成避免part-select错误)
       //---------------------------------------
-      assign ksk_mgr_wr_enD[KSK_CUT_OFS_L+:KSK_CUT_PER_PC_L]      = r1_ksk_mgr_wr_en;
-      assign ksk_mgr_wr_dataD[KSK_CUT_OFS_L+:KSK_CUT_PER_PC_L]    = {PROC_CUT_GROUP_NB{r1_ksk_mgr_wr_data}};
-      assign ksk_mgr_wr_addD[KSK_CUT_OFS_L+:KSK_CUT_PER_PC_L]     = {KSK_CUT_PER_PC_L{r1_ksk_mgr_wr_add}};
-      assign ksk_mgr_wr_x_idxD[KSK_CUT_OFS_L+:KSK_CUT_PER_PC_L]   = {KSK_CUT_PER_PC_L{r1_ksk_mgr_wr_x_idx}};
-      assign ksk_mgr_wr_slotD[KSK_CUT_OFS_L+:KSK_CUT_PER_PC_L]    = {KSK_CUT_PER_PC_L{r1_ksk_mgr_wr_slot}};
-      assign ksk_mgr_wr_ks_loopD[KSK_CUT_OFS_L+:KSK_CUT_PER_PC_L] = {KSK_CUT_PER_PC_L{r1_ksk_mgr_wr_ks_loop}};
+      if (KSK_CUT_PER_PC_L > 0) begin : gen_valid_output
+        assign ksk_mgr_wr_enD[KSK_CUT_OFS_L+:KSK_CUT_PER_PC_L]      = r1_ksk_mgr_wr_en;
+        assign ksk_mgr_wr_dataD[KSK_CUT_OFS_L+:KSK_CUT_PER_PC_L]    = {PROC_CUT_GROUP_NB{r1_ksk_mgr_wr_data}};
+        assign ksk_mgr_wr_addD[KSK_CUT_OFS_L+:KSK_CUT_PER_PC_L]     = {KSK_CUT_PER_PC_L{r1_ksk_mgr_wr_add}};
+        assign ksk_mgr_wr_x_idxD[KSK_CUT_OFS_L+:KSK_CUT_PER_PC_L]   = {KSK_CUT_PER_PC_L{r1_ksk_mgr_wr_x_idx}};
+        assign ksk_mgr_wr_slotD[KSK_CUT_OFS_L+:KSK_CUT_PER_PC_L]    = {KSK_CUT_PER_PC_L{r1_ksk_mgr_wr_slot}};
+        assign ksk_mgr_wr_ks_loopD[KSK_CUT_OFS_L+:KSK_CUT_PER_PC_L] = {KSK_CUT_PER_PC_L{r1_ksk_mgr_wr_ks_loop}};
+      end else begin : gen_invalid_output
+        // 🚧 VP-PBS调试：KSK_CUT_PER_PC_L=0情况的默认处理
+        initial begin
+          $display("WARNING> gen_pc=%0d: KSK_CUT_PER_PC_L=%0d is invalid, skipping output assignment", gen_pc, KSK_CUT_PER_PC_L);
+        end
+      end
 
       //---------------------------------------
       // Process done
@@ -745,8 +794,34 @@ module ksk_if_axi4_read
       logic [LBX_W-1:0]       r1_x_cnt_max;
 
       assign r1_x_cnt_max       = (LWE_K_P1%LBX != 0 && r1_cmd.ks_loop == KS_BLOCK_COL_NB-1) ? LWE_K_P1%LBX - 1: LBX-1;
-      assign slot_doneD[gen_pc] = r1_data_vld & r1_last_cutg_id & r1_last_slot_elt & (r1_x_idx == r1_x_cnt_max);
 
+      // VP-PBS fix: align x-index comparison with last AXI word of the current x block.
+      // When we are on the last AXI word of the current x block, r0_x_cnt will be
+      // incremented after this cycle. For the purpose of slot_done detection, we need
+      // to compare against the next value so that the equality can be met on the same
+      // cycle as r1_data_vld & r1_last_*.
+      logic [LBX_W-1:0] r1_x_idx_for_done;
+      assign r1_x_idx_for_done = (r0_axi_vld && r0_axi_rdy && r0_last_axi_word_cnt) ?
+                                  (r0_last_x_cnt ? r0_x_cnt : (r0_x_cnt + 1)) :
+                                  r1_x_idx;
+
+      // 🔧 VP-PBS修复：正常PC的slot_done条件（禁用PC已在上面处理）
+    assign slot_doneD[gen_pc] = r1_data_vld & r1_last_cutg_id & r1_last_slot_elt & (r1_x_idx_for_done == r1_x_cnt_max);
+      
+      // 🔧 VP-PBS调试：添加slot转换条件监控
+      always_ff @(posedge clk) begin
+        if (r1_data_vld) begin
+          $display("[KSK_AXI4_READ] PC%0d: r1_data_vld=%b, r1_last_cutg_id=%b(cutg_id=%0d/%0d), r1_last_slot_elt=%b(slot_elt=%0d/%0d), r1_x_idx=%0d, r1_x_cnt_max=%0d, slot_done=%b at time %0t",
+                   gen_pc, r1_data_vld, r1_last_cutg_id, r1_cutg_id, PROC_CUT_GROUP_NB-1, r1_last_slot_elt, r1_slot_elt, KSK_SLOT_DEPTH-1, r1_x_idx, r1_x_cnt_max, slot_doneD[gen_pc], $time);
+        end
+        // 🔧 VP-PBS调试：监控r0_x_cnt递增条件
+        if (r0_axi_vld && r0_axi_rdy && r0_last_axi_word_cnt) begin
+          $display("[KSK_AXI4_READ] PC%0d: r0_x_cnt increment: r0_x_cnt=%0d->%0d, r0_x_cnt_max=%0d, r0_last_x_cnt=%b at time %0t",
+                   gen_pc, r0_x_cnt, r0_x_cntD, r0_x_cnt_max, r0_last_x_cnt, $time);
+        end
+      end
+
+      end // gen_pc_enabled
     end // for gen_pc
   endgenerate
 endmodule

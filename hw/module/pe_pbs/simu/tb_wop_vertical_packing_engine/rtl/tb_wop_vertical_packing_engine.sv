@@ -731,6 +731,23 @@ module tb_wop_vertical_packing_engine
     // Generate test data
     generate_test_data();
     
+    // 🔧 关键修复：将测试数据写入RegFile内存，解决CMux数据为0问题
+    $display("[TB] Writing test GGSW samples to RegFile at 0x%0h", ggsw_samples_base_addr);
+    for (int bit_idx = 0; bit_idx < MAX_BIT_WIDTH; bit_idx++) begin
+      for (int ell = 0; ell < ELL_LVL1; ell++) begin
+        for (int k = 0; k <= K; k++) begin
+          for (int n = 0; n < N_LVL1; n++) begin
+            int addr = ggsw_samples_base_addr + (bit_idx * ELL_LVL1 * (K+1) * N_LVL1) + 
+                      (ell * (K+1) * N_LVL1) + (k * N_LVL1) + n;
+            regfile_memory[addr] = test_ggsw_samples[bit_idx][ell][k][n];
+          end
+        end
+      end
+    end
+    $display("[TB] ✅ Test GGSW samples written to RegFile - VP引擎现在可以读取非零数据");
+    $display("[TB] Sample: regfile_memory[0x%0h] = 0x%0h (bit_0[0][0][0])", 
+             ggsw_samples_base_addr, regfile_memory[ggsw_samples_base_addr]);
+    
     // Prepare inputs
     ggsw_samples_ready = 1;
     

@@ -32,8 +32,8 @@ module tb_wop_vertical_packing_engine
   parameter int MAX_BIT_WIDTH = 20,
   parameter int N_LVL1 = 1024,
   parameter int ELL_LVL1 = 3,
-  parameter int BSK_PC = 2,     // BSK port count
-  parameter int KSK_PC = 2      // KSK port count
+  parameter int BSK_PC = 1,     // BSK port count - 匹配BSK_CUT_NB=1
+  parameter int KSK_PC = 2      // KSK port count - 匹配实际TOP_PC配置
 )();
 
 // ==============================================================================================

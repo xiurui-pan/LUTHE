@@ -12,38 +12,6 @@
             "KSK_SLOT":"KSK_SLOT_8"
         },
         {
-            "name": "hw/module/ksk/module/ksk_manager/module/ksk_mgr_common/rtl/KSK_CUT/KSK_CUT_16/ksk_mgr_common_cut_definition_pkg.sv",
-            "library": "work",
-            "env": ["all"],
-            "target": ["all"],
-            "is_include_file": false,
-            "KSK_CUT":"KSK_CUT_16"
-        },
-        {
-            "name": "hw/module/ksk/module/ksk_manager/module/ksk_mgr_common/rtl/KSK_CUT/KSK_CUT_8/ksk_mgr_common_cut_definition_pkg.sv",
-            "library": "work",
-            "env": ["all"],
-            "target": ["all"],
-            "is_include_file": false,
-            "KSK_CUT":"KSK_CUT_8"
-        },
-        {
-            "name": "hw/module/ksk/module/ksk_manager/module/ksk_mgr_common/rtl/KSK_CUT/KSK_CUT_4/ksk_mgr_common_cut_definition_pkg.sv",
-            "library": "work",
-            "env": ["all"],
-            "target": ["all"],
-            "is_include_file": false,
-            "KSK_CUT":"KSK_CUT_4"
-        },
-        {
-            "name": "hw/module/ksk/module/ksk_manager/module/ksk_mgr_common/rtl/KSK_CUT/KSK_CUT_2/ksk_mgr_common_cut_definition_pkg.sv",
-            "library": "work",
-            "env": ["all"],
-            "target": ["all"],
-            "is_include_file": false,
-            "KSK_CUT":"KSK_CUT_2"
-        },
-        {
             "name": "hw/module/ksk/module/ksk_manager/module/ksk_mgr_common/rtl/KSK_CUT/KSK_CUT_1/ksk_mgr_common_cut_definition_pkg.sv",
             "library": "work",
             "env": ["all"],

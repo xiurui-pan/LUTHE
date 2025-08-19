@@ -258,6 +258,15 @@ else
   echo "WARN> golden tool ./tools/big_lut_golden not found; external golden will fail"
 fi
 
+# Copy big_lut_simplified tool for testbench
+if [ -f ./big_lut_simplified ]; then
+  echo "INFO> Copy big_lut_simplified tool to work dir"
+  cp ./big_lut_simplified ${work_dir}/big_lut_simplified || true
+  chmod +x ${work_dir}/big_lut_simplified || true
+else
+  echo "WARN> big_lut_simplified tool not found; testbench golden comparison will fail"
+fi
+
 echo "INFO> Running simulation (keep work) via edalize"
 $run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -d $(pwd) -k keep \
   -P MOD_Q_W int $MOD_Q_W \

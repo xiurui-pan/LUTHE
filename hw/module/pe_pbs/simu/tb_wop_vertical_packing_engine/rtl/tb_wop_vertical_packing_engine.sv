@@ -44,6 +44,9 @@ module tb_wop_vertical_packing_engine
   localparam int REGF_ADDR_W = 16;  // RegFile address width
   
   localparam int CLK_PERIOD = 10; // 10ns = 100MHz
+  // Verbosity control (enable with +TB_VERBOSE)
+  bit tb_verbose;
+  initial tb_verbose = $test$plusargs("TB_VERBOSE");
 
 // ==============================================================================================
 // DUT Interface Signals
@@ -284,8 +287,14 @@ module tb_wop_vertical_packing_engine
   // RegFile接口仲裁器 (VP Engine vs PBS Kernel Lite)
   // ==============================================================================================
   
-  // 简单优先级仲裁：VP优先，PBS其次
+  // 简单优先级仲裁：VP优先，PBS其次（仅当VP请求有效且非零时才认为占用）
   always_comb begin
+    // 判断VP是否真的发起了有效请求（过滤掉无效的全零req）
+    logic vp_rd_active;
+    logic vp_wr_active;
+    vp_rd_active = (vp_regf_rd_req_vld && (vp_regf_rd_req != '0));
+    vp_wr_active = (vp_regf_wr_req_vld && (vp_regf_wr_req != '0));
+
     // 默认分配给VP Engine
     regf_rd_req_vld = vp_regf_rd_req_vld;
     regf_rd_req = vp_regf_rd_req;
@@ -294,14 +303,31 @@ module tb_wop_vertical_packing_engine
     regf_wr_data_vld = vp_regf_wr_data_vld;
     regf_wr_data = vp_regf_wr_data;
     
-    // 如果VP不活跃，分配给PBS
-    if (!vp_regf_rd_req_vld && !vp_regf_wr_req_vld) begin
+    // DEBUG: 检查VP Engine RegFile访问状态
+    // if (vp_regf_rd_req_vld || vp_regf_wr_req_vld) begin
+    //   $display("[TB_ARBIT] VP Engine active: rd_vld=%b (req=0x%0h), wr_vld=%b (req=0x%0h) at time %0t", 
+    //            vp_regf_rd_req_vld, vp_regf_rd_req, vp_regf_wr_req_vld, vp_regf_wr_req, $time);
+    // end
+    // 过多刷屏，已经删除
+    
+    // 如果VP没有有效请求，分配给PBS
+    if (!(vp_rd_active || vp_wr_active)) begin
       regf_rd_req_vld = pbs_regf_rd_req_vld;
       regf_rd_req = pbs_regf_rd_req;
       regf_wr_req_vld = pbs_regf_wr_req_vld;
       regf_wr_req = pbs_regf_wr_req;
       regf_wr_data_vld = pbs_regf_wr_data_vld;
       regf_wr_data = pbs_regf_wr_data;
+      
+      // 🔧 关键调试：仲裁逻辑状态
+      if ((pbs_regf_rd_req_vld || pbs_regf_wr_req_vld) && $time > 30000000) begin
+        $display("[TB_ARBIT] ✅ PBS granted access: pbs_rd_req=0x%0h, pbs_wr_req=0x%0h, vp_rd_vld=%b, vp_wr_vld=%b at time %0t", 
+                 pbs_regf_rd_req, pbs_regf_wr_req, vp_regf_rd_req_vld, vp_regf_wr_req_vld, $time);
+      end
+    end else if ((pbs_regf_rd_req_vld || pbs_regf_wr_req_vld) && $time > 30000000) begin
+      // 🔧 调试：PBS被阻塞的情况
+      $display("[TB_ARBIT] ❌ PBS blocked: pbs_rd_req=0x%0h, pbs_wr_req=0x%0h, vp_rd_vld=%b, vp_wr_vld=%b at time %0t", 
+               pbs_regf_rd_req, pbs_regf_wr_req, vp_regf_rd_req_vld, vp_regf_wr_req_vld, $time);
     end
   end
   
@@ -512,7 +538,7 @@ module tb_wop_vertical_packing_engine
             // Generic read-back: return regfile_memory at requested address
             begin
               logic [REGF_ADDR_W-1:0] read_addr;
-              read_addr = rd_req_temp[REGF_RD_REQ_W-1 -: REGF_ADDR_W];
+              read_addr = { rd_req_temp, 5'b0 };
               regf_rd_data[0] <= regfile_memory[read_addr];
               $display("[REGF_SIM] Returning data from addr=0x%0h: %0h", read_addr, regfile_memory[read_addr]);
             end
@@ -547,8 +573,22 @@ module tb_wop_vertical_packing_engine
         
         // Write to regfile_memory
         begin
-          automatic logic [REGF_ADDR_W-1:0] write_addr = regf_wr_req[REGF_WR_REQ_W-1 -: REGF_ADDR_W];
+          // 根据regf_wr_req结构，低REGF_ADDR_W位（16位）即为RegFile平坦地址
+          automatic logic [REGF_ADDR_W-1:0] write_addr;
+          write_addr = { regf_wr_req, 5'b0 };
           regfile_memory[write_addr] <= regf_wr_data[0];
+          
+          // 🔧 添加关键写入调试信息
+          $display("[REGF_SIM] ✅ WRITE: addr=0x%0h, data=0x%0h at time %0t", 
+                   write_addr, regf_wr_data[0], $time);
+          
+          // 🔍 专门追踪0x2400地址的写入
+          if (write_addr == 16'h2400) begin
+            $display("[REGFILE] 🔍 CRITICAL: Writing to 0x2400, data=0x%0h, old_value=0x%0h", 
+                     regf_wr_data[0], regfile_memory[write_addr]);
+          end
+          $display("[REGF_SIM] DEBUG: regf_wr_req=0x%0h, REGF_WR_REQ_W=%0d, REGF_ADDR_W=%0d", 
+                   regf_wr_req, REGF_WR_REQ_W, REGF_ADDR_W);
         end
         
         // Capture full result vector sequentially
@@ -612,7 +652,7 @@ module tb_wop_vertical_packing_engine
   task automatic dump_lut_and_bits_to_files(string lut_path, string bits_path);
     int fh_lut, fh_bits;
     fh_lut = $fopen(lut_path, "w");
-    if (fh_lut == 0) $fatal("[TB] Failed to open %s", lut_path);
+    if (fh_lut == 0) $fatal(1, "[TB] Failed to open %s", lut_path);
     for (int i = 0; i < LUT_SIZE; i++) begin
       for (int n = 0; n < N_LVL1; n++) begin
         $fwrite(fh_lut, "%0d ", int'(test_lut_table[i][0][n]));
@@ -622,7 +662,7 @@ module tb_wop_vertical_packing_engine
     $fclose(fh_lut);
 
     fh_bits = $fopen(bits_path, "w");
-    if (fh_bits == 0) $fatal("[TB] Failed to open %s", bits_path);
+    if (fh_bits == 0) $fatal(1, "[TB] Failed to open %s", bits_path);
     for (int d = 0; d < 20; d++) begin
       $fwrite(fh_bits, "%0d\n", golden_ggsw_bits[d] & 1);
     end
@@ -699,6 +739,8 @@ module tb_wop_vertical_packing_engine
              golden_result_a[0], golden_result_a[1]);
   endfunction
 
+
+
 // ==============================================================================================
 // Main Test Sequence
 // ==============================================================================================
@@ -733,7 +775,7 @@ module tb_wop_vertical_packing_engine
       for (int ell = 0; ell < ELL_LVL1; ell++) begin
         for (int k = 0; k <= K; k++) begin
           for (int n = 0; n < N_LVL1; n++) begin
-            int addr = ggsw_samples_base_addr + (bit_idx * ELL_LVL1 * (K+1) * N_LVL1) + 
+            automatic int addr = ggsw_samples_base_addr + (bit_idx * ELL_LVL1 * (K+1) * N_LVL1) + 
                       (ell * (K+1) * N_LVL1) + (k * N_LVL1) + n;
             regfile_memory[addr] = test_ggsw_samples[bit_idx][ell][k][n];
           end
@@ -746,7 +788,9 @@ module tb_wop_vertical_packing_engine
     // 需要将CMux位的第一个系数[0][0][0]写入简单偏移地址
     $display("[TB] CRITICAL FIX: Writing CMux control data for VP engine simple offset access");
     for (int bit_idx = 10; bit_idx < 20; bit_idx++) begin
-      int simple_addr = ggsw_samples_base_addr + bit_idx;
+      // 🔧 修复：PBS kernel读取地址是 (ggsw_bits_addr + br_bit_idx) >> 5
+      // 所以我们需要写入到地址 (ggsw_samples_base_addr + bit_idx) >> 5
+      automatic int simple_addr = (ggsw_samples_base_addr + bit_idx) >> 5;
       regfile_memory[simple_addr] = test_ggsw_samples[bit_idx][0][0][0];  // First coefficient
       $display("  bit[%0d]: simple_addr=0x%0h, value=0x%0h (%0d)", 
                bit_idx, simple_addr, test_ggsw_samples[bit_idx][0][0][0], test_ggsw_samples[bit_idx][0][0][0]);
@@ -758,7 +802,7 @@ module tb_wop_vertical_packing_engine
     // Debug: Print GGSW data for CMux bits (10-19)
     $display("[TB] CRITICAL - GGSW CMux data verification:");
     for (int bit_idx = 10; bit_idx < 20; bit_idx++) begin
-      int addr = ggsw_samples_base_addr + bit_idx;
+      automatic int addr = (ggsw_samples_base_addr + bit_idx) >> 5;
       $display("  bit[%0d]: addr=0x%0h, value=0x%0h (%0d), test_data=0x%0h", 
                bit_idx, addr, regfile_memory[addr], regfile_memory[addr], test_ggsw_samples[bit_idx][0][0][0]);
     end
@@ -793,23 +837,13 @@ module tb_wop_vertical_packing_engine
     join_any
     disable fork;
     
-    // After done, pull actual results from PBS dst region in regfile_memory
-    // to avoid relying on write-capture path.
-    $display("[TB] Captured %0d coefficients via write path", actual_write_index);
-    if (actual_write_index < N_LVL1) begin
-      $display("[TB] WARNING: Only %0d/%0d coefficients captured from write path", actual_write_index, N_LVL1);
-    end
-
-    // Build actual_result_a from VP-PBS output region (authoritative)
-    for (int i = 0; i < N_LVL1; i++) begin
-      actual_result_a[i] = regfile_memory[result_addr + i];
-    end
+    // 已移除旧 WORKAROUND；现在直接等待 PBS Kernel 写入并比较
     
     // Call golden reference for comparison
     
     // Prepare golden reference inputs - extract control bits from GGSW samples
     for (int i = 0; i < MAX_BIT_WIDTH; i++) begin
-      int ggsw_value = int'(test_ggsw_samples[i][0][0][0]);
+      automatic int ggsw_value = int'(test_ggsw_samples[i][0][0][0]);
       golden_ggsw_bits[i] = (ggsw_value % 1000) > 500 ? 1 : 0;  // Extract control bit
     end
     for (int i = 0; i < LUT_SIZE; i++) begin
@@ -819,9 +853,9 @@ module tb_wop_vertical_packing_engine
     // External golden path
     dump_lut_and_bits_to_files("output_lut.txt", "output_bits.txt");
     $display("[TB] Running external golden generator...");
-    void'($system($sformatf("../big_lut_simplified %s %s %s %0d %0d", "output_lut.txt", "output_bits.txt", "output_golden.txt", N_LVL1, LUT_SIZE)));
+    void'($system($sformatf("./big_lut_simplified %s %s %s %0d %0d", "output_lut.txt", "output_bits.txt", "output_golden.txt", N_LVL1, LUT_SIZE)));
     if (!load_golden_from_file("output_golden.txt")) begin
-      $fatal("[TB] Failed to load external golden results");
+      $fatal(1, "[TB] Failed to load external golden results");
     end
 
     // SV internal golden for cross-check (can be removed later)

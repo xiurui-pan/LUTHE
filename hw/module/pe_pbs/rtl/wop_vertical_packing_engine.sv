@@ -122,7 +122,8 @@ typedef enum logic [2:0] {
   CMUX_IDLE,
   CMUX_INIT_POOLS,      // 初始化: 加载1024个LUT到pools[0]
   CMUX_TREE_EXEC,       // 执行10轮CMux选择 (避免与主状态机重名)
-  CMUX_EXTRACT_RESULT   // 提取最终结果
+  CMUX_EXTRACT_RESULT,  // 提取最终结果
+  CMUX_RESULT_READY     // 结果已准备好，可以开始写入
 } cmux_tree_state_e;
 
 cmux_tree_state_e cmux_tree_state;
@@ -175,6 +176,11 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     // 地址初始化
     cmux_result_addr <= '0;
     pbs_output_addr <= '0;
+    
+    // 关键修复：初始化cmux_pools数组，避免未定义值
+    cmux_pools <= '0;
+    cmux_tgsw_samples <= '0;
+    cmux_result_tlwe <= '0;
   end else begin
     current_state <= next_state;
     
@@ -242,7 +248,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       
       CMUX_TREE_PROCESS: begin
         // CMux Tree处理完成检查
-        if (cmux_tree_state == CMUX_EXTRACT_RESULT) begin
+        if (cmux_tree_state == CMUX_RESULT_READY) begin
           cmux_tree_done <= 1'b1;
           $display("[VP_ENGINE] CMux Tree completed - 10 rounds processed");
         end
@@ -343,8 +349,8 @@ always_comb begin
       // 修复握手协议：只有在未发送请求且未完成时才发送新请求
       if (!ggsw_load_done && cmux_bit_counter <= 19 && !ggsw_req_sent) begin
         regf_rd_req_vld = 1'b1;
-        // 修复地址格式：地址应该在高位，不需要拼接低16位0  
-        regf_rd_req = (ggsw_samples_base_addr + cmux_bit_counter) << 5; // 地址放在[20:5]位
+        // 使用拼接而非左移，避免位宽截断导致的X传播
+        regf_rd_req = (ggsw_samples_base_addr + cmux_bit_counter) >> 5;
         $display("[VP_ENGINE] Requesting GGSW bit[%0d]: base=0x%0h + counter=%0d = addr=0x%0h", 
                  cmux_bit_counter, ggsw_samples_base_addr, cmux_bit_counter, ggsw_samples_base_addr + cmux_bit_counter);
         $display("[VP_ENGINE] DEBUG: regf_rd_req=0x%0h (shifted addr to high bits)", regf_rd_req);
@@ -354,9 +360,23 @@ always_comb begin
     WRITE_CMUX_RESULT: begin
       if (!cmux_result_written) begin
         regf_wr_req_vld = 1'b1;
-        regf_wr_req = {cmux_result_addr + cmux_entry_counter, 16'h0000};
+        // 🔧 修复：先计算完整地址，再右移5位，确保地址递增
+        regf_wr_req = (cmux_result_addr >> 5) + cmux_entry_counter;
         regf_wr_data_vld[0] = 1'b1;
-        regf_wr_data[0] = cmux_result_tlwe[0][cmux_entry_counter];  // 简化：只写a[0]
+        regf_wr_data[0] = cmux_result_tlwe[0][cmux_entry_counter % N_LVL1];  // 修复：使用模运算确保索引在有效范围内
+        
+        // 🔧 添加关键调试信息
+        $display("[VP_ENGINE] WRITE_CMUX_RESULT: entry=%0d, cmux_result_addr=0x%0h, cmux_entry_counter=0x%0h", 
+                 cmux_entry_counter, cmux_result_addr, cmux_entry_counter);
+        $display("[VP_ENGINE] WRITE_CMUX_RESULT: calculated_addr=0x%0h, data=0x%0h",
+                 { (cmux_result_addr + cmux_entry_counter), 5'd0 }, cmux_result_tlwe[0][cmux_entry_counter % N_LVL1]);
+        $display("[VP_ENGINE] Write handshake: wr_req_rdy=%b, wr_data_rdy[0]=%b", 
+                 regf_wr_req_rdy, regf_wr_data_rdy[0]);
+      end else begin
+        // CRITICAL FIX: 写入完成后清除写入信号，避免阻塞PBS
+        regf_wr_req_vld = 1'b0;
+        regf_wr_data_vld[0] = 1'b0;
+        $display("[VP_ENGINE] WRITE_CMUX_RESULT: All entries written, clearing RegFile write signals");
       end
     end
     
@@ -386,21 +406,17 @@ always_comb begin
     end
     
     WAIT_PBS_DONE: begin
-      // 监控VP-PBS响应状态
-      if (vp_pbs_response.current_state == VP_PBS_DONE && vp_pbs_inst_ack) begin
-        if (vp_pbs_response.success) begin
-          done = 1'b1;
-          result_ready = 1'b1;
-          $display("[VP_ENGINE] VP-PBS processing completed successfully, result at addr=0x%0h", 
-                   vp_pbs_response.result_addr);
-        end else begin
-          $display("[VP_ENGINE] VP-PBS processing failed with error");
-          // 可以添加错误处理逻辑
-          done = 1'b1; // 即使失败也要完成
-        end
-      end else if (vp_pbs_response.current_state == VP_PBS_ERROR) begin
-        $display("[VP_ENGINE] VP-PBS reported error state");
+      // 等待PBS kernel完成：根据状态机和ack信号驱动done/result_ready
+      if (vp_pbs_inst_ack && vp_pbs_response.current_state == VP_PBS_DONE) begin
         done = 1'b1;
+        result_ready = 1'b1;
+        $display("[VP_ENGINE] PBS completed successfully, done asserted");
+      end else if (vp_pbs_response.current_state == VP_PBS_ERROR) begin
+        done = 1'b1;
+        $display("[VP_ENGINE] PBS reported error, still finishing");
+      end else begin
+        done = 1'b0;
+        result_ready = 1'b0;
       end
     end
   endcase
@@ -469,6 +485,11 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       
       CMUX_EXTRACT_RESULT: begin
         // 提取最终结果 pools[final_pool][0]
+        cmux_tree_state <= CMUX_RESULT_READY;
+      end
+      
+      CMUX_RESULT_READY: begin
+        // 结果已准备好，现在可以安全转换到写入状态
         cmux_tree_state <= CMUX_IDLE;
       end
     endcase

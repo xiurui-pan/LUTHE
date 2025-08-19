@@ -31,6 +31,18 @@ LOG=$(cd "$PROJECT_ROOT" && timeout 300 bash -lc "source setup.sh >/dev/null 2>&
 \[VP_ENGINE\].*DONE|\
 \[VP_ENGINE\].*RTL RESULT|\
 \[VP_ENGINE\].*WRITE_RESULT COMPLETED|\
+\[DEBUG\].*LOAD_CMUX_RESULT|\
+\[DEBUG\].*Blind-Rotation|\
+\[DEBUG\].*VP_PBS_LITE|\
+\[VP_PBS_LITE\].*Final result|\
+\[VP_PBS_LITE\].*Post-processing|\
+\[REGF_SIM\].*WRITE.*0x2400|\
+\[TB_ARBIT\].*VP Engine active|\
+\[TB_ARBIT\].*PBS|\
+\[TB\].*Reading VP-PBS results|\
+\[TB\].*First few values|\
+\[TB\].*DEBUG 258 origin|\
+\[TB\].*regfile_memory.*0x2400|\
 \[TB\].*Starting|\
 \[TB\].*completed|\
 \[TB\].*control bits|\
@@ -42,6 +54,8 @@ LOG=$(cd "$PROJECT_ROOT" && timeout 300 bash -lc "source setup.sh >/dev/null 2>&
 \[GOLDEN\]|\
 \[SIMPLE_PBS\]|\
 \[VP_ENGINE\].*POST_PROCESS.*|\
+|[TB].*WORKAROUND|\
+|WORKAROUND|\
 ^ERROR:|\
 ^FATAL:|\
 FAILED|\

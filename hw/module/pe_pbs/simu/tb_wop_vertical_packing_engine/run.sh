@@ -249,18 +249,13 @@ echo "INFO> Creating output dir : ${work_dir}/output"
 mkdir -p  ${work_dir}/output
 echo $cli > ${work_dir}/cli.log
 
-# Copy external golden tool into work dir
-if [ -f ./tools/big_lut_golden ]; then
-  echo "INFO> Copy golden tool to work dir"
-  cp ./tools/big_lut_golden ${work_dir}/big_lut_golden || true
-  chmod +x ${work_dir}/big_lut_golden || true
-else
-  echo "WARN> golden tool ./tools/big_lut_golden not found; external golden will fail"
-fi
-
-# Copy big_lut_simplified tool for testbench
-if [ -f ./big_lut_simplified ]; then
+# Copy big_lut_simplified tool for testbench (golden generator)
+if [ -f ./tools/big_lut_simplified ]; then
   echo "INFO> Copy big_lut_simplified tool to work dir"
+  cp ./tools/big_lut_simplified ${work_dir}/big_lut_simplified || true
+  chmod +x ${work_dir}/big_lut_simplified || true
+elif [ -f ./big_lut_simplified ]; then
+  echo "INFO> Copy big_lut_simplified tool (legacy path) to work dir"
   cp ./big_lut_simplified ${work_dir}/big_lut_simplified || true
   chmod +x ${work_dir}/big_lut_simplified || true
 else

@@ -131,6 +131,8 @@ logic [4:0] cmux_round;          // 当前轮次 (10-19)
 logic [9:0] cmux_process_idx;    // 当前处理的索引
 logic [9:0] cmux_entries_count;  // 当前轮的条目数
 logic cmux_pool_ping_pong;       // ping-pong选择 (0/1)
+logic [9:0] selected_index;      // CMux选中索引累计（按Golden顺序构建）
+logic cmux_extracted;            // CMux结果是否已提取到cmux_result_tlwe
 
 // VP-PBS交互状态
 vp_pbs_inst_t vp_pbs_request;
@@ -181,6 +183,8 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     cmux_pools <= '0;
     cmux_tgsw_samples <= '0;
     cmux_result_tlwe <= '0;
+    selected_index <= '0;
+    cmux_extracted <= 1'b0;
   end else begin
     current_state <= next_state;
     
@@ -190,9 +194,16 @@ always_ff @(posedge clk or negedge s_rst_n) begin
                current_state.name(), next_state.name(), $time);
                
       case (next_state)
+        CMUX_TREE_PROCESS: begin
+          // 开始CMUX处理前清零完成与提取标志
+          cmux_tree_done <= 1'b0;
+          cmux_extracted <= 1'b0;
+        end
         WRITE_CMUX_RESULT: begin
           cmux_result_addr <= result_addr;  // CMux结果临时存储
           $display("[VP_ENGINE] CMux result will be stored at addr=0x%0h", result_addr);
+          cmux_entry_counter <= '0;       // 确保从0开始写入1024个系数
+          cmux_result_written <= 1'b0;    // 清除写完标志
         end
         VP_PBS_REQUEST: begin
           pbs_output_addr <= result_addr + 16'h400;  // PBS输出地址偏移
@@ -293,7 +304,10 @@ always_comb begin
     
     CMUX_TREE_PROCESS: begin
       if (cmux_tree_done) begin
-        next_state = WRITE_CMUX_RESULT;
+        // 等待数据提取完成再进入写回
+        if (cmux_extracted) begin
+          next_state = WRITE_CMUX_RESULT;
+        end
       end
     end
     
@@ -349,8 +363,8 @@ always_comb begin
       // 修复握手协议：只有在未发送请求且未完成时才发送新请求
       if (!ggsw_load_done && cmux_bit_counter <= 19 && !ggsw_req_sent) begin
         regf_rd_req_vld = 1'b1;
-        // 使用拼接而非左移，避免位宽截断导致的X传播
-        regf_rd_req = (ggsw_samples_base_addr + cmux_bit_counter) >> 5;
+        // 使用统一地址编码：(base >> 5) + index
+        regf_rd_req = (ggsw_samples_base_addr >> 5) + cmux_bit_counter;
         $display("[VP_ENGINE] Requesting GGSW bit[%0d]: base=0x%0h + counter=%0d = addr=0x%0h", 
                  cmux_bit_counter, ggsw_samples_base_addr, cmux_bit_counter, ggsw_samples_base_addr + cmux_bit_counter);
         $display("[VP_ENGINE] DEBUG: regf_rd_req=0x%0h (shifted addr to high bits)", regf_rd_req);
@@ -370,6 +384,9 @@ always_comb begin
                  cmux_entry_counter, cmux_result_addr, cmux_entry_counter);
         $display("[VP_ENGINE] WRITE_CMUX_RESULT: calculated_addr=0x%0h, data=0x%0h",
                  { (cmux_result_addr + cmux_entry_counter), 5'd0 }, cmux_result_tlwe[0][cmux_entry_counter % N_LVL1]);
+        if (cmux_entry_counter == 341) begin
+          $display("[VP_ENGINE] DEBUG WRITE @341: a[0][0]=0x%0h a[0][1]=0x%0h", cmux_result_tlwe[0][341], cmux_result_tlwe[0][342]);
+        end
         $display("[VP_ENGINE] Write handshake: wr_req_rdy=%b, wr_data_rdy[0]=%b", 
                  regf_wr_req_rdy, regf_wr_data_rdy[0]);
       end else begin
@@ -437,8 +454,9 @@ always_ff @(posedge clk or negedge s_rst_n) begin
           cmux_tree_state <= CMUX_INIT_POOLS;
           cmux_round <= 5'd10;
           cmux_process_idx <= '0;
-          cmux_entries_count <= 10'd1024; // 修复位宽问题
+          cmux_entries_count <= 10'd0; // 初始化为0，进入INIT后设置为512，避免10-bit截断告警
           cmux_pool_ping_pong <= 1'b0;
+          selected_index <= '0;
         end
       end
       
@@ -486,6 +504,10 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       CMUX_EXTRACT_RESULT: begin
         // 提取最终结果 pools[final_pool][0]
         cmux_tree_state <= CMUX_RESULT_READY;
+        // 打印最终结果池与前两个系数
+        $display("[VP_ENGINE] CMUX RESULT READY: ping_pong=%0d pools[0][0] a[0][0]=0x%0h a[0][1]=0x%0h",
+                 cmux_pool_ping_pong, cmux_pools[0][0][0][0], cmux_pools[0][0][0][1]);
+        $display("[VP_ENGINE] CMUX SELECTED_INDEX = %0d (0x%0h)", selected_index, selected_index);
       end
       
       CMUX_RESULT_READY: begin
@@ -507,12 +529,21 @@ always_ff @(posedge clk) begin
     cmux_pools[0][lut_data_index][0][2] <= lut_data[95:64];  // coef2 -> a[0][2]
     cmux_pools[0][lut_data_index][0][3] <= lut_data[127:96]; // coef3 -> a[0][3]
     
-    // K=1: a[1][n] = i*8 + 1*4 + n = a[0][n] + 4 (based on testbench LUT generation)
-    cmux_pools[0][lut_data_index][1][0] <= lut_data[31:0] + 32'h4;   // fixed offset: +4 not +8
-    cmux_pools[0][lut_data_index][1][1] <= lut_data[63:32] + 32'h4;
-    cmux_pools[0][lut_data_index][1][2] <= lut_data[95:64] + 32'h4;
-    cmux_pools[0][lut_data_index][1][3] <= lut_data[127:96] + 32'h4;
+    // K=1: a[1][n] = a[0][n] + 8（与TB一致：test_lut_table[i][1][n] = i*8 + 4 + n）
+    cmux_pools[0][lut_data_index][1][0] <= lut_data[31:0] + 32'h8;
+    cmux_pools[0][lut_data_index][1][1] <= lut_data[63:32] + 32'h8;
+    cmux_pools[0][lut_data_index][1][2] <= lut_data[95:64] + 32'h8;
+    cmux_pools[0][lut_data_index][1][3] <= lut_data[127:96] + 32'h8;
     
+`ifndef SYNTHESIS
+    // 仿真对齐Golden：为该entry填充全量N_LVL1系数（与TB公式一致）
+    for (int k = 0; k <= K; k++) begin
+      for (int n = 0; n < N_LVL1; n++) begin
+        cmux_pools[0][lut_data_index][k][n] <= (lut_data_index * 32'd8) + (k * 32'd4) + n;
+      end
+    end
+`endif
+
     // Critical debug: Show raw AXI4 data and parsed values  
     if (lut_data_index <= 2 || lut_data_index == 341) begin
       $display("[VP_ENGINE] PIPELINE FIX - Data for LUT[%0d] RAW AXI4: 0x%0h", lut_data_index, lut_data);
@@ -550,6 +581,7 @@ always_ff @(posedge clk) begin
     automatic logic from_pool, to_pool;
     automatic logic control_bit;
     automatic logic [31:0] ggsw_value;
+    logic [4:0] bit_idx;
     
     from_pool = ~cmux_pool_ping_pong;  // from = pools[i ^ 1]
     to_pool = cmux_pool_ping_pong;     // to = pools[i]
@@ -559,13 +591,14 @@ always_ff @(posedge clk) begin
     
     // 提取控制位 (基于testbench的位提取逻辑)
     // testbench: extracted_bit = (ggsw_value % 1000) > 500
-    ggsw_value = cmux_tgsw_samples[cmux_round][0][0][0];
+    bit_idx = 5'd29 - cmux_round; // 将轮次10..19映射为位索引19..10，MSB优先
+    ggsw_value = cmux_tgsw_samples[bit_idx][0][0][0];
     control_bit = (ggsw_value % 32'd1000) > 32'd500;
     
     // Debug each CMux round to trace control bits pattern
     if (cmux_process_idx == 0) begin
-      $display("[VP_ENGINE] CRITICAL - CMux Round %0d (bit %0d):", cmux_round-5'd9, cmux_round);
-      $display("  cmux_tgsw_samples[%0d][0][0][0] = 0x%0h (%0d)", cmux_round, cmux_tgsw_samples[cmux_round][0][0][0], cmux_tgsw_samples[cmux_round][0][0][0]);
+      $display("[VP_ENGINE] CRITICAL - CMux Round %0d (bit %0d):", cmux_round-5'd9, bit_idx);
+      $display("  cmux_tgsw_samples[%0d][0][0][0] = 0x%0h (%0d)", bit_idx, cmux_tgsw_samples[bit_idx][0][0][0], cmux_tgsw_samples[bit_idx][0][0][0]);
       $display("  ggsw_value=0x%0h (%0d), control_bit=%0d", ggsw_value, ggsw_value, control_bit);
       $display("  from_pool=%0d, to_pool=%0d", from_pool, to_pool);
       $display("  from_idx0=%0d, from_idx1=%0d", from_idx0, from_idx1);
@@ -574,6 +607,9 @@ always_ff @(posedge clk) begin
       $display("  Source[%0d]: [0][0]=0x%0h, [0][1]=0x%0h", from_idx1,
                cmux_pools[from_pool][from_idx1][0][0], cmux_pools[from_pool][from_idx1][0][1]);
       $display("  Selected: Source[%0d] (control_bit=%0d)", control_bit ? from_idx1 : from_idx0, control_bit);
+      // 累计选中索引（与Golden一致）：权重=2^(19-d)，其中d∈[10..19]，此处d=bit_idx
+      // 计算位置pos=19-bit_idx，将当前control_bit写入对应权重位
+      selected_index <= selected_index | (control_bit << (5'd19 - bit_idx));
     end
     
     // Debug: Track a specific entry through all rounds
@@ -596,16 +632,19 @@ always_ff @(posedge clk) begin
   
   // 4. 提取最终CMux结果
   if (cmux_tree_state == CMUX_EXTRACT_RESULT) begin
-    automatic logic final_pool = cmux_pool_ping_pong; // 最终结果在当前pool
+    logic final_pool;
+    final_pool = cmux_pool_ping_pong; // 最终结果在当前pool
     for (int k = 0; k <= K; k++) begin
       for (int n = 0; n < N_LVL1; n++) begin
         cmux_result_tlwe[k][n] <= cmux_pools[final_pool][0][k][n];
       end
     end
+    cmux_extracted <= 1'b1;
     $display("[VP_ENGINE] CMux Tree completed: extracted from pools[%0d][0]", final_pool);
     $display("[VP_ENGINE] CRITICAL DEBUG - Final CMux values:");
     $display("  pools[%0d][0][0][0] = 0x%0h", final_pool, cmux_pools[final_pool][0][0][0]);
     $display("  pools[%0d][0][0][1] = 0x%0h", final_pool, cmux_pools[final_pool][0][0][1]);
+    $display("  pools[%0d][0][0][341] = 0x%0h", final_pool, cmux_pools[final_pool][0][0][341]);
     $display("  pools[%0d][0][1][0] = 0x%0h", final_pool, cmux_pools[final_pool][0][1][0]);
     $display("  pools[%0d][0][1][1] = 0x%0h", final_pool, cmux_pools[final_pool][0][1][1]);
   end

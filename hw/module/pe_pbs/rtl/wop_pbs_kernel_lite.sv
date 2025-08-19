@@ -35,7 +35,7 @@ module wop_pbs_kernel_lite
   import vp_pbs_inst_pkg::*;
   // 🧪 策略A变体：调试当前BSK_CUT_NB配置
 #(
-  // BSK_PC是localparam，不能覆盖，需要通过编译配置选择正确的BSK_CUT
+  // BSK_PC是localparam，不能覆盖，需要通过编译配置选择正确的BSK_CUT_NB
   
   // 基础参数
   parameter int MOD_Q_W = 32,
@@ -243,6 +243,9 @@ logic [31:0] process_counter;
 // Blind Rotation简化：直接从RegFile读取bits[0..9]的第一个系数
 logic [3:0]  br_bit_idx;
 logic        br_bit_req_inflight;
+logic        br_started; // 标记已进入BR并完成首拍
+logic        br_discard_first; // 丢弃bit[0]首次返回，防止读取到残留数据
+logic [9:0]  br_bits; // 收集10个BR控制位
 logic [31:0] ggsw_value_sampled;
 localparam int GGSW_BIT_STRIDE = ELL_LVL1 * (K+1) * N_LVL1;
 
@@ -360,6 +363,8 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     lut_index <= '0;
     br_bit_idx <= '0;
     br_bit_req_inflight <= 1'b0;
+    br_started <= 1'b0;
+    br_bits <= '0;
     
     cmux_result_tlwe <= '0;
     ggsw_samples <= '0;
@@ -385,17 +390,37 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       end
       BLIND_ROTATION: begin
         // 读取bits[0..9]的控制位并累加旋转量
-        if (pep_regf_rd_req_rdy && !br_bit_req_inflight && br_bit_idx < 10) begin
-          br_bit_req_inflight <= 1'b1;
+        // 🔧 首次进入BR时，开启一次性丢弃机制
+        if (current_state == BLIND_ROTATION && !br_started) begin
+          br_discard_first <= 1'b1;
+          br_started <= 1'b1;
+          br_bits <= '0; // 每次进入BR清零位向量
         end
-        if (regf_pep_rd_data_avail[0] && br_bit_req_inflight) begin
-          ggsw_value_sampled <= regf_pep_rd_data[0];
-          if ((regf_pep_rd_data[0] % 32'd1000) > 32'd500) begin
-            rot_shift <= rot_shift + (10'd1 << br_bit_idx);
+        // 🔧 只有在br_bit_idx < 10时才执行
+        if (br_bit_idx < 10) begin
+          if (pep_regf_rd_req_rdy && !br_bit_req_inflight) begin
+            br_bit_req_inflight <= 1'b1;
           end
-          br_bit_idx <= br_bit_idx + 1;
-          br_bit_req_inflight <= 1'b0;
-          $display("[VP_PBS_LITE] BR bit[%0d] sampled=0x%0h -> rot_shift=%0d", br_bit_idx, regf_pep_rd_data[0], rot_shift);
+          if (regf_pep_rd_data_avail[0] && br_bit_req_inflight) begin
+            if (br_discard_first) begin
+              // 丢弃第一次返回（bit[0]）
+              br_discard_first <= 1'b0;
+              br_bit_req_inflight <= 1'b0; // 允许重新发起同地址请求
+              $display("[VP_PBS_LITE] BR DISCARD first response at bit[0], retrying...");
+            end else begin
+              ggsw_value_sampled <= regf_pep_rd_data[0];
+              // 🔧 采样位，存入br_bits
+              br_bits[br_bit_idx] <= ((regf_pep_rd_data[0] % 32'd1000) > 32'd500);
+              br_bit_idx <= br_bit_idx + 1;
+              br_bit_req_inflight <= 1'b0;
+              $display("[VP_PBS_LITE] BR bit[%0d] sampled=0x%0h -> bit=%0b", br_bit_idx, regf_pep_rd_data[0], br_bits[br_bit_idx]);
+            end
+          end
+        end
+        // 完成10位后进入提取
+        else begin
+          // 统一设置rot_shift为位向量的数值（自然等于各位权重之和）
+          rot_shift <= br_bits;
         end
       end
       POST_PROCESSING: begin
@@ -408,7 +433,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       end
       WRITE_RESULT: begin
         // 在写阶段，按握手推进写入索引
-        if (pep_regf_wr_req_rdy && pep_regf_wr_data_rdy[0] && process_counter < N_LVL1) begin
+        if (pep_regf_wr_req_rdy && pep_regf_wr_data_rdy[0]) begin
           process_counter <= process_counter + 1;
         end
       end
@@ -441,6 +466,9 @@ always_ff @(posedge clk or negedge s_rst_n) begin
           // 🔧 修复：不移除rot_shift，让它保持到SAMPLE_EXTRACT阶段
           br_bit_idx <= '0;
           br_bit_req_inflight <= 1'b0;
+          br_started <= 1'b0; // 标记首拍未开始
+          br_discard_first <= 1'b0; // 进入时清零，由时序分支首拍置1
+          br_bits <= '0;
         end
       end
       
@@ -465,6 +493,15 @@ always_ff @(posedge clk or negedge s_rst_n) begin
         end
       end
     endcase
+  end
+end
+
+// 在BR首拍将br_started置位，随后允许发起读请求
+always_ff @(posedge clk or negedge s_rst_n) begin
+  if (!s_rst_n) begin
+    br_started <= 1'b0;
+  end else if (current_state == BLIND_ROTATION) begin
+    br_started <= 1'b1;
   end
 end
 
@@ -539,40 +576,22 @@ always_comb begin
       pep_regf_rd_req_vld = 1'b1;
       // 地址编码与TB一致：地址位于[20:5]
       pep_regf_rd_req = (cmux_result_addr >> 5) + process_counter[15:0];
-      
-      if (pep_regf_rd_req_rdy && regf_pep_rd_data_avail[0]) begin
-        // 加载CMux结果并递增计数器
-        if (process_counter < N_LVL1) begin
-          cmux_result_tlwe[0][process_counter] = regf_pep_rd_data[0];
-          if (K > 0) begin
-            cmux_result_tlwe[1][process_counter] = regf_pep_rd_data[0]; // 简化
-          end
-          // >>> DEBUG: print the first few CMux words being loaded <<<
-          if (process_counter < 4) begin
-            $display("[DEBUG] CMux[%0d] loaded = 0x%08h", process_counter, regf_pep_rd_data[0]);
-          end
-          // 注意：计数器更新在时序逻辑中处理
-          // 🔧 减少调试输出刷屏：每100个打印一次
-          if (process_counter % 100 == 0 || process_counter == N_LVL1-1) begin
-            $display("[VP_PBS_LITE] Loaded CMux data %0d/%0d", process_counter, N_LVL1);
-          end
-        end
-        
-        if (process_counter >= N_LVL1) begin
-          cmux_result_loaded = 1'b1;
-          next_state = BLIND_ROTATION;
-          $display("[VP_PBS_LITE] CMux loading completed, moving to BLIND_ROTATION");
-        end
+      // 当加载满N_LVL1后，进入BR阶段
+      if (process_counter >= N_LVL1) begin
+        cmux_result_loaded = 1'b1;
+        next_state = BLIND_ROTATION;
+        $display("[VP_PBS_LITE] CMux loading completed, moving to BLIND_ROTATION");
       end
     end
     
     BLIND_ROTATION: begin
       // 简化：通过RegFile读取bits[0..9]控制位计算旋转量
       vp_response.current_state = VP_PBS_BLIND_ROT;
-      // 发起逐位读取请求
+      // 发起逐位读取请求（不使用首拍gating）
       if (!br_bit_req_inflight && br_bit_idx < 10) begin
         pep_regf_rd_req_vld = 1'b1;
-        pep_regf_rd_req = (ggsw_bits_addr + br_bit_idx) >> 5;
+        pep_regf_rd_req = (ggsw_bits_addr >> 5) + br_bit_idx;
+        $display("[VP_PBS_LITE] BR REQ: bit_idx=%0d, rd_req=0x%0h (base=0x%0h >>5 + %0d)", br_bit_idx, pep_regf_rd_req, ggsw_bits_addr, br_bit_idx);
       end
       // 完成10位后进入提取
       if (br_bit_idx >= 10) begin
@@ -588,11 +607,23 @@ always_comb begin
       vp_response.current_state = VP_PBS_EXTRACTING;
       if (!extract_done) begin
         automatic int idx0;
+        // 🔧 调试：显示rot_shift的详细计算过程
+        $display("[VP_PBS_LITE] DEBUG: SAMPLE_EXTRACT - rot_shift=0x%0h (%0d)", rot_shift, rot_shift);
+        $display("[VP_PBS_LITE] DEBUG: SAMPLE_EXTRACT - N_LVL1=%0d", N_LVL1);
+        
         idx0 = rot_shift % N_LVL1;
+        $display("[VP_PBS_LITE] DEBUG: SAMPLE_EXTRACT - idx0 = %0d %% %0d = %0d", rot_shift, N_LVL1, idx0);
+        
         final_result_vec[0] = cmux_result_tlwe[0][idx0];
+        $display("[VP_PBS_LITE] DEBUG: SAMPLE_EXTRACT - final_result_vec[0] = cmux_result_tlwe[0][%0d] = 0x%0h", idx0, final_result_vec[0]);
+        
         for (int i = 1; i < N_LVL1; i++) begin
           automatic int src = (N_LVL1 - i + rot_shift) % N_LVL1;
           final_result_vec[i] = -cmux_result_tlwe[0][src];
+          if (i <= 4) begin
+            $display("[VP_PBS_LITE] DEBUG: SAMPLE_EXTRACT - final_result_vec[%0d] = -cmux_result_tlwe[0][%0d] = -0x%0h = 0x%0h", 
+                     i, src, cmux_result_tlwe[0][src], final_result_vec[i]);
+          end
         end
         extract_done = 1'b1;
         $display("[VP_PBS_LITE] Sample extract completed: rot_shift=%0d, a0=0x%08h", rot_shift, final_result_vec[0]);
@@ -626,8 +657,10 @@ always_comb begin
        
        // 🔧 CRITICAL FIX: 使用与VP Engine相同的地址编码格式
        // VP Engine使用：regf_wr_req = (addr) << 5，我们也使用相同格式
-       pep_regf_wr_req = (output_addr + process_counter[15:0]) >> 5;
-       pep_regf_wr_data[0] = final_result_vec[process_counter[15:0]];
+       // 修复：确保按顺序写入，避免地址跳跃
+       // 目标物理地址: output_addr + process_counter * 32 → req = (output_addr >> 5) + process_counter
+       pep_regf_wr_req = (output_addr >> 5) + process_counter;
+       pep_regf_wr_data[0] = final_result_vec[process_counter];
        
        if ((process_counter % 64) == 0) begin
          $display("[VP_PBS_LITE] WRITE_RESULT progress: pc=%0d addr=0x%0h data=0x%0h req_vld=%b req_rdy=%b data_vld=%b data_rdy=%b", 

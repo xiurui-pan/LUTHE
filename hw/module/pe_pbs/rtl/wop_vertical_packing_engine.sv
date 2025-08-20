@@ -78,7 +78,12 @@ module wop_vertical_packing_engine
   output logic                 vp_pbs_inst_vld,
   input  logic                 vp_pbs_inst_rdy,
   input  logic                 vp_pbs_inst_ack,
-  input  vp_pbs_response_t     vp_pbs_response
+  input  vp_pbs_response_t     vp_pbs_response,
+  
+  // BSK资源请求接口
+  output vp_pbs_resource_req_t vp_bsk_resource_req,
+  output logic                 vp_bsk_resource_req_vld,
+  input  logic                 vp_bsk_resource_req_rdy
 );
 
 // ==============================================================================================
@@ -162,9 +167,9 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     lut_data_index <= '0;  // 初始化数据索引
     cmux_pool_select <= 1'b0;
     
-    // CMux Tree状态机初始化
+    // CMux Tree状态机初始化 - 修复：CMux处理bits 10-19
     cmux_tree_state <= CMUX_IDLE;
-    cmux_round <= 5'd12;
+    cmux_round <= 5'd10;  // 起始轮次：bit 10 (第1轮)
     cmux_process_idx <= '0;
     cmux_entries_count <= 10'd0;
     cmux_pool_ping_pong <= 1'b0;
@@ -350,6 +355,8 @@ always_comb begin
   regf_wr_data = '0;
   vp_pbs_inst_vld = 1'b0;
   vp_pbs_inst = '0;
+  vp_bsk_resource_req_vld = 1'b0;
+  vp_bsk_resource_req = '0;
   
   case (current_state)
     LOAD_LUT_ENTRIES: begin
@@ -412,8 +419,22 @@ always_comb begin
       vp_pbs_inst_vld = 1'b1;
       vp_pbs_inst = vp_pbs_request;
       
+      // 🔧 新增：BSK资源请求 - 基于bigLut_20bit_lvl1算法
+      vp_bsk_resource_req = make_vp_resource_req(
+        1'b0,          // need_ntt: Blind Rotation不使用NTT
+        1'b1,          // need_bsk: 需要BSK数据
+        1'b0,          // need_ksk: VP不使用KSK
+        8'd0,          // bsk_batch_id: br_loop=0 (limited to available slots 0-7)
+        8'd0,          // ksk_id: 不使用
+        32'h0,         // axi_base: 不使用AXI
+        16'h0          // axi_len: 不使用AXI
+      );
+      vp_bsk_resource_req_vld = 1'b1;
+      
       $display("[VP_ENGINE] *** SENDING VP-PBS REQUEST *** vld=%b, rdy=%b at time %0t", 
                vp_pbs_inst_vld, vp_pbs_inst_rdy, $time);
+      $display("[VP_ENGINE] *** SENDING BSK RESOURCE REQUEST *** br_loop=%0d, vld=%b, rdy=%b", 
+               vp_bsk_resource_req.bsk_batch_id, vp_bsk_resource_req_vld, vp_bsk_resource_req_rdy);
       
       if (vp_pbs_inst_rdy) begin
         $display("[VP_ENGINE] VP-PBS handshake SUCCESS! Moving to WAIT_PBS_DONE");
@@ -474,13 +495,13 @@ always_ff @(posedge clk or negedge s_rst_n) begin
           cmux_process_idx <= cmux_process_idx + 1;
           // 减少调试频率，只在特定条目时显示
           if (cmux_process_idx == 0 || cmux_process_idx == cmux_entries_count-1) begin
-            $display("[VP_ENGINE] CMux processing: round %0d, idx %0d/%0d", 
-                     cmux_round-9, cmux_process_idx, cmux_entries_count-1);
+            $display("[VP_ENGINE] CMux processing: bit %0d (round %0d), idx %0d/%0d", 
+                     cmux_round, cmux_round-9, cmux_process_idx, cmux_entries_count-1);
           end
         end else begin
           // 当前轮完成，准备下一轮
-          $display("[VP_ENGINE] Round %0d completed: processed %0d entries", 
-                   cmux_round-9, cmux_entries_count);
+          $display("[VP_ENGINE] Bit %0d (round %0d) completed: processed %0d entries", 
+                   cmux_round, cmux_round-9, cmux_entries_count);
           $display("[VP_ENGINE] DEBUG: cmux_round=%0d, condition (>= 19) = %0d", 
                    cmux_round, (cmux_round >= 5'd19));
           
@@ -495,8 +516,8 @@ always_ff @(posedge clk or negedge s_rst_n) begin
             cmux_process_idx <= '0;
             cmux_entries_count <= cmux_entries_count >> 1; // 减半
             cmux_pool_ping_pong <= ~cmux_pool_ping_pong;   // 切换ping-pong
-            $display("[VP_ENGINE] Starting round %0d: %0d entries, ping_pong=%0d", 
-                     cmux_round-8, cmux_entries_count >> 1, ~cmux_pool_ping_pong);
+            $display("[VP_ENGINE] Starting bit %0d (round %0d): %0d entries, ping_pong=%0d", 
+                     cmux_round+1, cmux_round-8, cmux_entries_count >> 1, ~cmux_pool_ping_pong);
           end
         end
       end
@@ -597,7 +618,7 @@ always_ff @(posedge clk) begin
     
     // Debug each CMux round to trace control bits pattern
     if (cmux_process_idx == 0) begin
-      $display("[VP_ENGINE] CRITICAL - CMux Round %0d (bit %0d):", cmux_round-5'd9, bit_idx);
+      $display("[VP_ENGINE] CRITICAL - CMux Bit %0d (round %0d, bit_idx %0d):", cmux_round, cmux_round-5'd9, bit_idx);
       $display("  cmux_tgsw_samples[%0d][0][0][0] = 0x%0h (%0d)", bit_idx, cmux_tgsw_samples[bit_idx][0][0][0], cmux_tgsw_samples[bit_idx][0][0][0]);
       $display("  ggsw_value=0x%0h (%0d), control_bit=%0d", ggsw_value, ggsw_value, control_bit);
       $display("  from_pool=%0d, to_pool=%0d", from_pool, to_pool);

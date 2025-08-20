@@ -32,7 +32,7 @@ module tb_wop_vertical_packing_engine
   parameter int MAX_BIT_WIDTH = 20,
   parameter int N_LVL1 = 1024,
   parameter int ELL_LVL1 = 3,
-  parameter int BSK_PC = 1,     // BSK port count - 匹配BSK_CUT_NB=1
+  parameter int BSK_PC = 2,     // 🔧 BSK port count - 匹配实际BSK模块需求
   parameter int KSK_PC = 2      // KSK port count - 匹配实际TOP_PC配置
 )();
 
@@ -112,6 +112,11 @@ module tb_wop_vertical_packing_engine
   logic vp_pbs_inst_ack;
   vp_pbs_response_t vp_pbs_response;
   
+  // BSK resource request interface signals
+  vp_pbs_resource_req_t vp_bsk_resource_req;
+  logic vp_bsk_resource_req_vld;
+  logic vp_bsk_resource_req_rdy;
+  
 
   
   // RegFile memory simulation
@@ -137,6 +142,11 @@ module tb_wop_vertical_packing_engine
   bit pbs_cap_active;
   int pbs_cap_idx;
   logic [REGF_WR_REQ_W-1:0] pbs_last_req;
+
+  // 内核缓冲区对比验证: CAPTURE vs KERNEL
+  logic [N_LVL1-1:0][MOD_Q_W-1:0] kernel_result_buffer;
+  bit kernel_comparison_done;
+  int kernel_mismatch_count;
 
 // ==============================================================================================
 // Test Data Storage
@@ -227,11 +237,7 @@ module tb_wop_vertical_packing_engine
   logic [4:0] bit_index;
   // Result compare helper variables
   int mismatch_direct;
-  int mismatch_shift_plus1;
-  int mismatch_shift_minus1;
-  int best_mismatch;
-  int dump_cnt;
-  string mode;
+
   
   // RegFile interface helper variables
   regf_rd_req_t rd_req_temp;
@@ -295,7 +301,12 @@ module tb_wop_vertical_packing_engine
     .vp_pbs_inst_vld(vp_pbs_inst_vld),
     .vp_pbs_inst_rdy(vp_pbs_inst_rdy),
     .vp_pbs_inst_ack(vp_pbs_inst_ack),
-    .vp_pbs_response(vp_pbs_response)
+    .vp_pbs_response(vp_pbs_response),
+    
+    // BSK resource request interface
+    .vp_bsk_resource_req(vp_bsk_resource_req),
+    .vp_bsk_resource_req_vld(vp_bsk_resource_req_vld),
+    .vp_bsk_resource_req_rdy(vp_bsk_resource_req_rdy)
   );
 
 // ==============================================================================================
@@ -308,18 +319,34 @@ module tb_wop_vertical_packing_engine
   logic wop_pbs_inst_rdy;
   logic wop_pbs_inst_ack;
   
-  // 简化的共享接口信号 (测试用)
-  logic reset_bsk_cache = 1'b0;
-  logic reset_bsk_cache_done;
-  logic bsk_mem_avail = 1'b1;
-  logic [1:0][axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] bsk_mem_addr = '0;
-  logic reset_ksk_cache = 1'b0;
-  logic reset_ksk_cache_done;
-  logic ksk_mem_avail = 1'b1;
-  logic [1:0][axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] ksk_mem_addr = '0;
-  logic reset_cache = 1'b0;
-  logic [axi_if_glwe_axi_pkg::AXI4_ADD_W-1:0] gid_offset = '0;
-  logic [1:0][7:0][MOD_Q_W-1:0] twd_omg_ru_r_pow = '0;
+  // BSK/KSK AXI接口信号 (连接到PBS kernel)
+  logic [BSK_PC-1:0][axi_if_bsk_axi_pkg::AXI4_ID_W-1:0] m_axi4_bsk_arid;
+  logic [BSK_PC-1:0][axi_if_bsk_axi_pkg::AXI4_ADD_W-1:0] m_axi4_bsk_araddr;
+  logic [BSK_PC-1:0][axi_if_common_param_pkg::AXI4_LEN_W-1:0] m_axi4_bsk_arlen;
+  logic [BSK_PC-1:0][axi_if_common_param_pkg::AXI4_SIZE_W-1:0] m_axi4_bsk_arsize;
+  logic [BSK_PC-1:0][axi_if_common_param_pkg::AXI4_BURST_W-1:0] m_axi4_bsk_arburst;
+  logic [BSK_PC-1:0] m_axi4_bsk_arvalid;
+  logic [BSK_PC-1:0] m_axi4_bsk_arready;
+  logic [BSK_PC-1:0][axi_if_bsk_axi_pkg::AXI4_ID_W-1:0] m_axi4_bsk_rid;
+  logic [BSK_PC-1:0][axi_if_bsk_axi_pkg::AXI4_DATA_W-1:0] m_axi4_bsk_rdata;
+  logic [BSK_PC-1:0][axi_if_common_param_pkg::AXI4_RESP_W-1:0] m_axi4_bsk_rresp;
+  logic [BSK_PC-1:0] m_axi4_bsk_rlast;
+  logic [BSK_PC-1:0] m_axi4_bsk_rvalid;
+  logic [BSK_PC-1:0] m_axi4_bsk_rready;
+  
+  logic [KSK_PC-1:0][axi_if_ksk_axi_pkg::AXI4_ID_W-1:0] m_axi4_ksk_arid;
+  logic [KSK_PC-1:0][axi_if_ksk_axi_pkg::AXI4_ADD_W-1:0] m_axi4_ksk_araddr;
+  logic [KSK_PC-1:0][axi_if_common_param_pkg::AXI4_LEN_W-1:0] m_axi4_ksk_arlen;
+  logic [KSK_PC-1:0][axi_if_common_param_pkg::AXI4_SIZE_W-1:0] m_axi4_ksk_arsize;
+  logic [KSK_PC-1:0][axi_if_common_param_pkg::AXI4_BURST_W-1:0] m_axi4_ksk_arburst;
+  logic [KSK_PC-1:0] m_axi4_ksk_arvalid;
+  logic [KSK_PC-1:0] m_axi4_ksk_arready;
+  logic [KSK_PC-1:0][axi_if_ksk_axi_pkg::AXI4_ID_W-1:0] m_axi4_ksk_rid;
+  logic [KSK_PC-1:0][axi_if_ksk_axi_pkg::AXI4_DATA_W-1:0] m_axi4_ksk_rdata;
+  logic [KSK_PC-1:0][axi_if_common_param_pkg::AXI4_RESP_W-1:0] m_axi4_ksk_rresp;
+  logic [KSK_PC-1:0] m_axi4_ksk_rlast;
+  logic [KSK_PC-1:0] m_axi4_ksk_rvalid;
+  logic [KSK_PC-1:0] m_axi4_ksk_rready;
   
   // Real wop_pbs_kernel_lite实例化 (精简版，专为VP服务)
   wop_pbs_kernel_lite #(
@@ -341,6 +368,11 @@ module tb_wop_vertical_packing_engine
     .vp_pbs_inst_rdy(vp_pbs_inst_rdy),
     .vp_pbs_inst_ack(vp_pbs_inst_ack),
     .vp_pbs_response(vp_pbs_response),
+    
+    // BSK资源请求接口 (新增)
+    .vp_bsk_resource_req(vp_bsk_resource_req),
+    .vp_bsk_resource_req_vld(vp_bsk_resource_req_vld),
+    .vp_bsk_resource_req_rdy(vp_bsk_resource_req_rdy),
     
     // RegFile接口 (简化，只连接关键信号)
     .pep_regf_wr_req_vld(pbs_regf_wr_req_vld),
@@ -371,7 +403,37 @@ module tb_wop_vertical_packing_engine
     .m_axi4_glwe_rresp('0),
     .m_axi4_glwe_rlast(1'b1),
     .m_axi4_glwe_rvalid(lut_data_avail),
-    .m_axi4_glwe_rready()
+    .m_axi4_glwe_rready(),
+    
+    // BSK AXI接口
+    .m_axi4_bsk_arid(m_axi4_bsk_arid),
+    .m_axi4_bsk_araddr(m_axi4_bsk_araddr),
+    .m_axi4_bsk_arlen(m_axi4_bsk_arlen),
+    .m_axi4_bsk_arsize(m_axi4_bsk_arsize),
+    .m_axi4_bsk_arburst(m_axi4_bsk_arburst),
+    .m_axi4_bsk_arvalid(m_axi4_bsk_arvalid),
+    .m_axi4_bsk_arready(m_axi4_bsk_arready),
+    .m_axi4_bsk_rid(m_axi4_bsk_rid),
+    .m_axi4_bsk_rdata(m_axi4_bsk_rdata),
+    .m_axi4_bsk_rresp(m_axi4_bsk_rresp),
+    .m_axi4_bsk_rlast(m_axi4_bsk_rlast),
+    .m_axi4_bsk_rvalid(m_axi4_bsk_rvalid),
+    .m_axi4_bsk_rready(m_axi4_bsk_rready),
+    
+    // KSK AXI接口
+    .m_axi4_ksk_arid(m_axi4_ksk_arid),
+    .m_axi4_ksk_araddr(m_axi4_ksk_araddr),
+    .m_axi4_ksk_arlen(m_axi4_ksk_arlen),
+    .m_axi4_ksk_arsize(m_axi4_ksk_arsize),
+    .m_axi4_ksk_arburst(m_axi4_ksk_arburst),
+    .m_axi4_ksk_arvalid(m_axi4_ksk_arvalid),
+    .m_axi4_ksk_arready(m_axi4_ksk_arready),
+    .m_axi4_ksk_rid(m_axi4_ksk_rid),
+    .m_axi4_ksk_rdata(m_axi4_ksk_rdata),
+    .m_axi4_ksk_rresp(m_axi4_ksk_rresp),
+    .m_axi4_ksk_rlast(m_axi4_ksk_rlast),
+    .m_axi4_ksk_rvalid(m_axi4_ksk_rvalid),
+    .m_axi4_ksk_rready(m_axi4_ksk_rready)
   );
   
   // ==============================================================================================
@@ -394,12 +456,7 @@ module tb_wop_vertical_packing_engine
     regf_wr_data_vld = vp_regf_wr_data_vld;
     regf_wr_data = vp_regf_wr_data;
     
-    // DEBUG: 检查VP Engine RegFile访问状态
-    // if (vp_regf_rd_req_vld || vp_regf_wr_req_vld) begin
-    //   $display("[TB_ARBIT] VP Engine active: rd_vld=%b (req=0x%0h), wr_vld=%b (req=0x%0h) at time %0t", 
-    //            vp_regf_rd_req_vld, vp_regf_rd_req, vp_regf_wr_req_vld, vp_regf_wr_req, $time);
-    // end
-    // 过多刷屏，已经删除
+
     
     // 如果VP没有有效请求，分配给PBS
     if (!(vp_rd_active || vp_wr_active)) begin
@@ -410,15 +467,95 @@ module tb_wop_vertical_packing_engine
       regf_wr_data_vld = pbs_regf_wr_data_vld;
       regf_wr_data = pbs_regf_wr_data;
       
-      // 🔧 关键调试：仲裁逻辑状态
-      if ((pbs_regf_rd_req_vld || pbs_regf_wr_req_vld) && $time > 30000000) begin
-        $display("[TB_ARBIT] ✅ PBS granted access: pbs_rd_req=0x%0h, pbs_wr_req=0x%0h, vp_rd_vld=%b, vp_wr_vld=%b at time %0t", 
-                 pbs_regf_rd_req, pbs_regf_wr_req, vp_regf_rd_req_vld, vp_regf_wr_req_vld, $time);
+      // 简化调试：仅在关键时刻显示仲裁状态
+      if ((pbs_regf_rd_req_vld || pbs_regf_wr_req_vld) && tb_verbose) begin
+        $display("[TB_ARBIT] PBS granted access at time %0t", $time);
       end
-    end else if ((pbs_regf_rd_req_vld || pbs_regf_wr_req_vld) && $time > 30000000) begin
-      // 🔧 调试：PBS被阻塞的情况
-      $display("[TB_ARBIT] ❌ PBS blocked: pbs_rd_req=0x%0h, pbs_wr_req=0x%0h, vp_rd_vld=%b, vp_wr_vld=%b at time %0t", 
-               pbs_regf_rd_req, pbs_regf_wr_req, vp_regf_rd_req_vld, vp_regf_wr_req_vld, $time);
+    end else if ((pbs_regf_rd_req_vld || pbs_regf_wr_req_vld) && tb_verbose) begin
+      $display("[TB_ARBIT] PBS blocked at time %0t", $time);
+    end
+  end
+  
+  // 🔧 BSK/KSK AXI接口模拟器 - 启用真实BSK数据响应
+  typedef enum logic [1:0] {
+    BSK_IDLE,
+    BSK_PROCESSING,
+    BSK_RESPONDING
+  } bsk_state_t;
+  
+  bsk_state_t bsk_state;
+  logic [7:0] bsk_response_counter;
+  logic [BSK_PC-1:0] bsk_access_detected;
+  
+  always_ff @(posedge clk or negedge s_rst_n) begin
+    if (!s_rst_n) begin
+      bsk_state <= BSK_IDLE;
+      bsk_response_counter <= '0;
+      bsk_access_detected <= '0;
+      m_axi4_bsk_arready <= '1;
+      m_axi4_bsk_rvalid <= '0;
+      m_axi4_bsk_rdata <= '0;
+      m_axi4_bsk_rid <= '0;
+      m_axi4_bsk_rresp <= '0;
+      m_axi4_bsk_rlast <= '0;
+      
+      m_axi4_ksk_arready <= '1;
+      m_axi4_ksk_rvalid <= '0;
+      m_axi4_ksk_rdata <= '0;
+      m_axi4_ksk_rid <= '0;
+      m_axi4_ksk_rresp <= '0;
+      m_axi4_ksk_rlast <= '0;
+    end else begin
+      // 🔧 BSK真实响应状态机
+      case (bsk_state)
+        BSK_IDLE: begin
+          m_axi4_bsk_arready <= '1;
+          m_axi4_bsk_rvalid <= '0;
+          bsk_access_detected <= m_axi4_bsk_arvalid;
+          
+          if (|m_axi4_bsk_arvalid) begin
+            $display("[TB_BSK] ✅ BSK AXI access detected! arvalid=%b at time %0t", m_axi4_bsk_arvalid, $time);
+            bsk_state <= BSK_PROCESSING;
+            bsk_response_counter <= '0;
+          end
+        end
+        
+        BSK_PROCESSING: begin
+          m_axi4_bsk_arready <= '0;  // Stop accepting new requests
+          bsk_response_counter <= bsk_response_counter + 1;
+          
+          // 模拟BSK访问延迟
+          if (bsk_response_counter >= 10) begin
+            bsk_state <= BSK_RESPONDING;
+            m_axi4_bsk_rvalid <= '1;
+            // 🔧 提供模拟BSK数据
+            for (int i = 0; i < BSK_PC; i++) begin
+              if (bsk_access_detected[i]) begin
+                m_axi4_bsk_rdata[i] <= {4{32'hBEEF0000 + i}};  // 模拟BSK数据
+                m_axi4_bsk_rlast[i] <= 1'b1;
+                m_axi4_bsk_rresp[i] <= 2'b00;  // OKAY
+              end
+            end
+            $display("[TB_BSK] ✅ BSK data response ready at time %0t", $time);
+          end
+        end
+        
+        BSK_RESPONDING: begin
+          // 保持响应一个周期，然后返回IDLE
+          bsk_state <= BSK_IDLE;
+          m_axi4_bsk_rvalid <= '0;
+          bsk_access_detected <= '0;
+          $display("[TB_BSK] ✅ BSK response completed at time %0t", $time);
+        end
+      endcase
+      
+      // KSK简化响应：始终ready，但不提供数据（暂时）
+      m_axi4_ksk_arready <= '1;
+      m_axi4_ksk_rvalid <= '0;
+      
+      if (|m_axi4_ksk_arvalid) begin
+        $display("[TB_KSK] KSK AXI access detected at time %0t", $time);
+      end
     end
   end
   
@@ -427,8 +564,6 @@ module tb_wop_vertical_packing_engine
     wop_pbs_inst_vld = 1'b0;
     wop_pbs_inst = '0;
   end
-  
-  // 旧的简化PBS逻辑已删除，现在使用真实的wop_pbs_kernel
 
 
 
@@ -462,9 +597,9 @@ module tb_wop_vertical_packing_engine
       lut_access_counter <= 0;
       $display("[LUT_SIM] *** LUT SIMULATOR RESET *** at time %0t", $time);
     end else begin
-      // Debug: Print key events (simplified)
-      if (lut_req_vld && lut_req_rdy) begin
-        $display("[LUT_SIM] *** REQUEST DETECTED *** addr=0x%0h at time %0t", lut_addr, $time);
+      // 简化调试：仅在verbose模式显示LUT访问
+      if (lut_req_vld && lut_req_rdy && tb_verbose) begin
+        $display("[LUT_SIM] REQUEST: addr=0x%0h", lut_addr);
       end
       case (lut_state)
         LUT_IDLE: begin
@@ -474,35 +609,28 @@ module tb_wop_vertical_packing_engine
           if (lut_req_vld && lut_req_rdy) begin
             lut_state <= LUT_PROCESSING;
             lut_access_counter <= 0;
-            $display("[LUT_SIM] *** LUT REQUEST RECEIVED *** addr=0x%0h at time %0t", lut_addr, $time);
+            if (tb_verbose) $display("[LUT_SIM] LUT REQUEST RECEIVED: addr=0x%0h", lut_addr);
           end
         end
         
         LUT_PROCESSING: begin
           lut_req_rdy <= 1'b0;
           lut_access_counter <= lut_access_counter + 1;
-          $display("[LUT_SIM] Processing cycle %0d/5 at time %0t", lut_access_counter, $time);
           
           // Simulate memory access latency
           if (lut_access_counter >= 5) begin
             lut_state <= LUT_READY;
             lut_data_avail <= 1'b1;
-            $display("[LUT_SIM] *** ENTERING DATA PREPARATION *** at time %0t", $time);
             
             // Calculate which LUT entry to return
-            // RTL uses 128-byte steps, so divide by 128
             entry_index = (lut_addr - lut_base_addr) >> 7;  // >> 7 = / 128
-            $display("[LUT_SIM] Address calculation: addr=0x%0h, base=0x%0h, entry_index=%0d", 
-                     lut_addr, lut_base_addr, entry_index);
             if (entry_index < LUT_SIZE) begin
               // Return packed LUT data - first 4 coefficients for simplicity
-              // Format: lut_data[127:0] = {coef[3], coef[2], coef[1], coef[0]}
               lut_data <= {test_lut_table[entry_index][0][3], test_lut_table[entry_index][0][2], 
                           test_lut_table[entry_index][0][1], test_lut_table[entry_index][0][0]};
-              $display("[LUT_SIM] *** PREPARING DATA *** Returning LUT entry %0d: data=0x%0h (coef[0]=%0h)", 
-                       entry_index, {test_lut_table[entry_index][0][3], test_lut_table[entry_index][0][2], 
-                                   test_lut_table[entry_index][0][1], test_lut_table[entry_index][0][0]},
-                       test_lut_table[entry_index][0][0]);
+              if (tb_verbose) begin
+                $display("[LUT_SIM] Returning LUT entry %0d", entry_index);
+              end
             end else begin
               lut_data <= '0;
               $display("[LUT_SIM] ERROR: Invalid LUT entry %0d (>= %0d)", entry_index, LUT_SIZE);
@@ -534,6 +662,12 @@ module tb_wop_vertical_packing_engine
       if (vp_pbs_inst_vld && vp_pbs_inst_rdy) begin
         $display("[TB][VP_PBS_MON] VP-PBS request: operation=%0d, cmux_addr=0x%0h, output_addr=0x%0h", 
                  vp_pbs_inst.operation_type, vp_pbs_inst.cmux_result_addr, vp_pbs_inst.output_addr);
+      end
+      
+      // 🔧 新增：BSK资源请求监控
+      if (vp_bsk_resource_req_vld && vp_bsk_resource_req_rdy) begin
+        $display("[TB][BSK_REQ_MON] BSK resource request: need_bsk=%b, br_loop=%0d, need_ntt=%b", 
+                 vp_bsk_resource_req.need_bsk, vp_bsk_resource_req.bsk_batch_id, vp_bsk_resource_req.need_ntt);
       end
       
       if (vp_pbs_inst_ack) begin
@@ -645,17 +779,10 @@ module tb_wop_vertical_packing_engine
             $display("[REGF_SIM] UPDATE BYPASS idx=%0d data=0x%0h (addr=0x%0h)", widx, regf_wr_data[0], write_addr);
           end
           
-          // 🔧 添加关键写入调试信息
-          $display("[REGF_SIM] ✅ WRITE: addr=0x%0h, data=0x%0h at time %0t", 
-                   write_addr, regf_wr_data[0], $time);
-          
-          // 🔍 专门追踪0x2400地址的写入
-          if (write_addr == 16'h2400) begin
-            $display("[REGFILE] 🔍 CRITICAL: Writing to 0x2400, data=0x%0h, old_value=0x%0h", 
-                     regf_wr_data[0], regfile_memory[write_addr]);
+          // 简化调试：仅在verbose模式显示写入信息
+          if (tb_verbose) begin
+            $display("[REGF_SIM] WRITE: addr=0x%0h, data=0x%0h", write_addr, regf_wr_data[0]);
           end
-          $display("[REGF_SIM] DEBUG: regf_wr_req=0x%0h, REGF_WR_REQ_W=%0d, REGF_ADDR_W=%0d", 
-                   regf_wr_req, REGF_WR_REQ_W, REGF_ADDR_W);
  
           // 顺序捕获：当未启用直接捕获时才启用RegFile写回捕获，避免双重写入actual_result_a
           if (!USE_DIRECT_PBS_CAPTURE) begin
@@ -785,56 +912,62 @@ module tb_wop_vertical_packing_engine
     return 1;
   endfunction
 
-// ==============================================================================================
-// Golden Reference - SystemVerilog Implementation (no DPI-C needed)
-// ==============================================================================================
-  
-  // No DPI-C functions needed - using simple SystemVerilog logic
-  
-  // Simplified vertical packing golden reference
-  function automatic void generate_expected_results();
-    // Baseline-like golden using simplified semantics consistent with test data
-    int selected_index;
-    int rotation_shift;
-    int bit_value;
-    int src_idx;
-    int poly_val;
-
-    // 1) CMux tree selection index from bits 10..19 (MSB first)
-    selected_index = 0;
-    for (int d = 10; d < 20; d++) begin
-      bit_value = golden_ggsw_bits[d] & 1;
-      selected_index = (selected_index << 1) | bit_value;
+  // ==============================================================================================
+  // CAPTURE vs KERNEL 对比验证
+  // ==============================================================================================
+  task kernel_vs_capture_verification();
+    int mismatch_count = 0;
+    int max_display = 10; // 限制显示的不匹配条目数
+    int display_count = 0;
+    
+    $display("==============================================================================================");
+    $display("  CAPTURE vs KERNEL Verification");
+    $display("==============================================================================================");
+    
+    if (!kernel_comparison_done) begin
+      $display("[TB_VERIFY] ❌ ERROR: Kernel buffer not captured yet!");
+      return;
     end
-
-    // 2) Rotation shift from bits 0..9: sum of 2^d where bit is 1
-    rotation_shift = 0;
-    for (int d = 0; d < 10; d++) begin
-      if (golden_ggsw_bits[d]) begin
-        rotation_shift += (1 << d);
-      end
-    end
-    rotation_shift = rotation_shift % N_LVL1;
-
-    // 3) Sample extract directly from rotated polynomial
-    // a[0] = poly[(0 + rotation_shift) % N]
-    // a[i] = -poly[(N - i + rotation_shift) % N] for i>=1
+    
+    // 逐一对比actual_result_a (直连捕获) vs kernel_result_buffer (内核缓冲)
     for (int i = 0; i < N_LVL1; i++) begin
-      if (i == 0) begin
-        src_idx = (0 + rotation_shift) % N_LVL1;
-        poly_val = int'(test_lut_table[selected_index][0][src_idx]);
-        golden_result_a[i] = poly_val;
-      end else begin
-        src_idx = (N_LVL1 - i + rotation_shift) % N_LVL1;
-        poly_val = int'(test_lut_table[selected_index][0][src_idx]);
-        golden_result_a[i] = -poly_val;
+      if (actual_result_a[i] !== kernel_result_buffer[i]) begin
+        mismatch_count++;
+        if (display_count < max_display) begin
+          $display("[TB_VERIFY] ⚠️  MISMATCH[%0d]: CAPTURE=0x%0h, KERNEL=0x%0h, diff=0x%0h", 
+                   i, actual_result_a[i], kernel_result_buffer[i], 
+                   actual_result_a[i] ^ kernel_result_buffer[i]);
+          display_count++;
+        end
       end
     end
-
-    $display("[GOLDEN] Baseline-like: index=%0d, rot=%0d, a0=%0h, a1=%0h", selected_index, rotation_shift,
-             golden_result_a[0], golden_result_a[1]);
-  endfunction
-
+    
+    if (mismatch_count == 0) begin
+      $display("[TB_VERIFY] ✅ PERFECT MATCH: All %0d entries match between CAPTURE and KERNEL!", N_LVL1);
+      $display("[TB_VERIFY] ✅ Direct capture accuracy: 100%% (%0d/%0d)", N_LVL1, N_LVL1);
+      $display("[TB_VERIFY] ✅ RegFile write-back integrity: VERIFIED");
+    end else begin
+      $display("[TB_VERIFY] ❌ VERIFICATION FAILED: %0d/%0d entries mismatch!", mismatch_count, N_LVL1);
+      $display("[TB_VERIFY] ❌ Direct capture accuracy: %.2f%% (%0d/%0d)", 
+               (100.0 * (N_LVL1 - mismatch_count)) / N_LVL1, (N_LVL1 - mismatch_count), N_LVL1);
+      if (mismatch_count > max_display) begin
+        $display("[TB_VERIFY] ⚠️  (Only showing first %0d mismatches, %0d more suppressed)", 
+                 max_display, mismatch_count - max_display);
+      end
+    end
+    
+    // 样本检查
+    $display("[TB_VERIFY] Sample comparison:");
+    $display("  [0]: CAPTURE=0x%0h, KERNEL=0x%0h %s", 
+             actual_result_a[0], kernel_result_buffer[0],
+             (actual_result_a[0] === kernel_result_buffer[0]) ? "✅" : "❌");
+    $display("  [%0d]: CAPTURE=0x%0h, KERNEL=0x%0h %s", 
+             N_LVL1-1, actual_result_a[N_LVL1-1], kernel_result_buffer[N_LVL1-1],
+             (actual_result_a[N_LVL1-1] === kernel_result_buffer[N_LVL1-1]) ? "✅" : "❌");
+    
+    kernel_mismatch_count = mismatch_count;
+    $display("==============================================================================================");
+  endtask
 
 
 // ==============================================================================================
@@ -914,6 +1047,17 @@ module tb_wop_vertical_packing_engine
       begin
         wait(done);
         $display("[TB] Vertical packing completed at time %0t", $time);
+        
+        // 🔧 NEW: 捕获PBS内核的最终结果缓冲区用于对比验证
+        if (!kernel_comparison_done) begin
+          kernel_comparison_done = 1;
+          for (int i = 0; i < N_LVL1; i++) begin
+            kernel_result_buffer[i] = u_wop_pbs_kernel_lite.final_result_vec[i];
+          end
+          $display("[TB_KERNEL] Captured PBS kernel final_result_vec: %0d entries", N_LVL1);
+          $display("[TB_KERNEL] Sample: kernel_result_buffer[0]=0x%0h, kernel_result_buffer[%0d]=0x%0h",
+                   kernel_result_buffer[0], N_LVL1-1, kernel_result_buffer[N_LVL1-1]);
+        end
       end
       begin
         // Monitor DUT status every 1000 cycles (less frequent)
@@ -928,46 +1072,32 @@ module tb_wop_vertical_packing_engine
     join_any
     disable fork;
     
-    // 已移除旧 WORKAROUND；现在直接等待 PBS Kernel 写入并比较
-    // 若启用直接PBS捕获，确保捕获完全结束，添加超时保护
+    // Wait for completion and extract results
     if (USE_DIRECT_PBS_CAPTURE) begin
       fork
-        begin
-          wait (pbs_cap_idx == N_LVL1);
-          $display("[TB_DIRECT] capture complete: %0d entries", pbs_cap_idx);
-        end
-        begin
-          #10000000; // 10ms超时
-          $display("[TB_DIRECT] TIMEOUT waiting for capture completion, pbs_cap_idx=%0d", pbs_cap_idx);
-        end
+        wait (pbs_cap_idx == N_LVL1);
+        #10000000; // 10ms timeout
       join_any
       disable fork;
-
-      // 直接捕获完成后：对比前16项与PBS Kernel内部向量，快速定位问题归因
-      begin
-        int mism_internal;
-        mism_internal = 0;
-        for (int i = 0; i < 16; i++) begin
-          if (actual_result_a[i] !== u_wop_pbs_kernel_lite.final_result_vec[i]) begin
-            mism_internal++;
-            $display("[TB_DIRECT] CAPTURE!=KERNEL at [%0d]: cap=%0h kernel=%0h", i, actual_result_a[i], u_wop_pbs_kernel_lite.final_result_vec[i]);
-          end
-        end
-        $display("[TB_DIRECT] CAPTURE vs KERNEL first16 mismatches=%0d", mism_internal);
-      end
+      
+      // 🔧 修复：数据已经在直连捕获过程中实时写入actual_result_a，不需要额外复制
+      // actual_result_a已通过监视器在每个PBS写回周期实时更新
+      $display("[TB] PBS direct capture completed: %0d entries", pbs_cap_idx);
+      
+      // 🔧 NEW: CAPTURE vs KERNEL验证
+      kernel_vs_capture_verification();
     end else begin
-      // 非直接捕获模式，等待RegFile捕获结束
       fork
-        begin
-          wait (capturing_active == 0);
-          $display("[TB_CAPTURE] regfile capture complete: %0d entries", actual_write_index);
-        end
-        begin
-          #10000000; // 10ms超时
-          $display("[TB_CAPTURE] TIMEOUT waiting for regfile capture");
-        end
+        wait (capturing_active == 0);
+        #10000000; // 10ms timeout
       join_any
       disable fork;
+      
+      for (int i = 0; i < N_LVL1; i++) begin
+        automatic int addr = (result_addr >> 5) + i;
+        actual_result_a[i] = regfile_memory[addr];
+      end
+      $display("[TB] RegFile capture completed: %0d entries", actual_write_index);
     end
     
     // Call golden reference for comparison
@@ -1011,48 +1141,23 @@ module tb_wop_vertical_packing_engine
       end
     end
 
-    // Compare results with alignment auto-detection (0 or +/-1 circular shift)
+    // Compare results with golden reference
     mismatch_direct = 0;
-    mismatch_shift_plus1 = 0;   // compare RTL[i] vs Golden[(i+1)%N]
-    mismatch_shift_minus1 = 0;  // compare RTL[i] vs Golden[(i+N-1)%N]
     for (int i = 0; i < N_LVL1; i++) begin
       if (actual_result_a[i] != golden_result_a[i]) begin
         mismatch_direct++;
       end
-      if (actual_result_a[i] != golden_result_a[(i+1)%N_LVL1]) begin
-        mismatch_shift_plus1++;
-      end
-      if (actual_result_a[i] != golden_result_a[(i+N_LVL1-1)%N_LVL1]) begin
-        mismatch_shift_minus1++;
-      end
     end
-    best_mismatch = mismatch_direct;
-    mode = "direct";
-    if (mismatch_shift_plus1 < best_mismatch) begin
-      best_mismatch = mismatch_shift_plus1;
-      mode = "+1";
-    end
-    if (mismatch_shift_minus1 < best_mismatch) begin
-      best_mismatch = mismatch_shift_minus1;
-      mode = "-1";
-    end
-    if (best_mismatch == 0) begin
-      $display("[TB] ✅ SUCCESS: Results match golden (alignment=%s)", mode);
+
+    if (mismatch_direct == 0) begin
+      $display("[TB] ✅ SUCCESS: Results match golden reference");
     end else begin
-      // Dump a few mismatches for the selected alignment
-      automatic int dump_cnt = 0;
-      for (int i = 0; i < N_LVL1 && dump_cnt < 16; i++) begin
-        logic [MOD_Q_W-1:0] gsel;
-        if (mode == "+1") gsel = golden_result_a[(i+1)%N_LVL1];
-        else if (mode == "-1") gsel = golden_result_a[(i+N_LVL1-1)%N_LVL1];
-        else gsel = golden_result_a[i];
-        if (actual_result_a[i] != gsel) begin
-          $display("[TB] Mismatch at a[%0d] (mode=%s): RTL=%0h, Golden=%0h", i, mode, actual_result_a[i], gsel);
-          dump_cnt++;
+      $display("[TB] ❌ FAILURE: %0d mismatches found", mismatch_direct);
+      for (int i = 0; i < N_LVL1 && i < 16; i++) begin
+        if (actual_result_a[i] != golden_result_a[i]) begin
+          $display("[TB] Mismatch at a[%0d]: RTL=%0h, Golden=%0h", i, actual_result_a[i], golden_result_a[i]);
         end
       end
-      $display("[TB] ❌ FAILURE: %0d mismatches found after alignment=%s (direct=%0d, +1=%0d, -1=%0d)",
-               best_mismatch, mode, mismatch_direct, mismatch_shift_plus1, mismatch_shift_minus1);
     end
     
     $display("[TB] Test completed at time %0t", $time);

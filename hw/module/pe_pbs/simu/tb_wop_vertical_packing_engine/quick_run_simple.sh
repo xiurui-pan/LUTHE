@@ -44,6 +44,10 @@ BSK.*command|\
 BSK.*data|\
 BSK.*access|\
 BSK.*response|\
+BSK.*initialization|\
+BSK.*slot|\
+BSK_MGR.*Slot|\
+LWE_K_W.*max_slots|\
 KSK.*access|\
 handshake.*SUCCESS|\
 captured.*entries|\

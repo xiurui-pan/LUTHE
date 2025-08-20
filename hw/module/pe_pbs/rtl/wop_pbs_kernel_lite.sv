@@ -347,13 +347,14 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       end
       BLIND_ROTATION: begin
         // ✅ 使用真实BSK模块，等待BSK处理完成
-        if (bsk_request_received && bsk_data_avail[0][0][0] && ggsw_bit_counter < 8) begin
+        // 当BSK数据可用时递增计数器 - 恢复到10个bits
+        if (bsk_data_avail[0][0][0] && ggsw_bit_counter < 10) begin
           ggsw_bit_counter <= ggsw_bit_counter + 1;
           $display("[VP_PBS_LITE] 🔧 BSK bit %0d completed, incrementing counter", ggsw_bit_counter);
         end
         
-        // 限制在8个bits以适应BSK slot数量
-        if (ggsw_bit_counter >= 8) begin
+        // 完成10个bits后结束Blind Rotation
+        if (ggsw_bit_counter >= 10) begin
           blind_rot_done <= 1'b1;
         end
       end
@@ -392,7 +393,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       
       BLIND_ROTATION: begin
         if (current_state != next_state) begin
-          $display("[VP_PBS_LITE] Starting Blind Rotation using real BSK module (8 bits)");
+          $display("[VP_PBS_LITE] Starting Blind Rotation using real BSK module (10 bits, 16 slots)");
           blind_rot_done <= 1'b0;
           ggsw_bit_counter <= '0;
           bsk_cmd_sent <= 1'b0; // 🔧 重置命令发送标志
@@ -554,9 +555,9 @@ always_comb begin
       vp_response.current_state = VP_PBS_BLIND_ROT;
       vp_response.progress_counter = ggsw_bit_counter;
       
-      // 发送BSK请求给pe_pbs_with_bsk模块
-      if (system_ready && ggsw_bit_counter < 8) begin  // 限制在可用slot范围内
-        bsk_data_ready = '1;  // 准备接收BSK数据
+      // 发送BSK请求给pe_pbs_with_bsk模块 - 恢复到10个bits
+      if (system_ready && ggsw_bit_counter < 10) begin  // 扩展到16 slots，支持0-15
+        bsk_data_ready = '1;  // 准备接收BSK数据（所有维度）
         
         $display("[VP_PBS_LITE] 🔧 BSK Request: bit=%0d, req_rdy=%b, data_avail[0][0][0]=%b at time %0t",
                  ggsw_bit_counter, bsk_req_rdy, bsk_data_avail[0][0][0], $time);
@@ -566,18 +567,18 @@ always_comb begin
           // 使用真实BSK模块的计算结果
           $display("[VP_PBS_LITE] ✅ Using real BSK module result for bit %0d", ggsw_bit_counter);
           
-          if (ggsw_bit_counter >= 7) begin  // 完成8个bits (0-7)
+          if (ggsw_bit_counter >= 9) begin  // 完成10个bits (0-9)
             blind_rot_done = 1'b1;
             next_state = SAMPLE_EXTRACT;
-            $display("[VP_PBS_LITE] ✅ BSK processing completed for 8 bits (slot limited)");
+            $display("[VP_PBS_LITE] ✅ BSK processing completed for 10 bits (full algorithm)");
           end
         end
       end else begin
         bsk_data_ready = '0;
-        if (ggsw_bit_counter >= 8) begin
+        if (ggsw_bit_counter >= 10) begin
           blind_rot_done = 1'b1;
           next_state = SAMPLE_EXTRACT;
-          $display("[VP_PBS_LITE] ✅ BSK processing completed (8 bits)");
+          $display("[VP_PBS_LITE] ✅ BSK processing completed (10 bits)");
         end
       end
     end

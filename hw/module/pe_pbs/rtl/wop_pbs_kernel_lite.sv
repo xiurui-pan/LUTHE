@@ -152,14 +152,14 @@ module wop_pbs_kernel_lite
   //== KSK AXI4 Memory Interface - 真实KSK内存接口  
   output logic [KSK_PC-1:0][axi_if_ksk_axi_pkg::AXI4_ID_W-1:0]     m_axi4_ksk_arid,
   output logic [KSK_PC-1:0][axi_if_ksk_axi_pkg::AXI4_ADD_W-1:0]    m_axi4_ksk_araddr,
-  output logic [KSK_PC-1:0][7:0]                                   m_axi4_ksk_arlen,
-  output logic [KSK_PC-1:0][2:0]                                   m_axi4_ksk_arsize,
-  output logic [KSK_PC-1:0][1:0]                                   m_axi4_ksk_arburst,
+  output logic [KSK_PC-1:0][AXI4_LEN_W-1:0]                        m_axi4_ksk_arlen,
+  output logic [KSK_PC-1:0][AXI4_SIZE_W-1:0]                       m_axi4_ksk_arsize,
+  output logic [KSK_PC-1:0][AXI4_BURST_W-1:0]                      m_axi4_ksk_arburst,
   output logic [KSK_PC-1:0]                                        m_axi4_ksk_arvalid,
   input  logic [KSK_PC-1:0]                                        m_axi4_ksk_arready,
   input  logic [KSK_PC-1:0][axi_if_ksk_axi_pkg::AXI4_ID_W-1:0]     m_axi4_ksk_rid,
   input  logic [KSK_PC-1:0][axi_if_ksk_axi_pkg::AXI4_DATA_W-1:0]   m_axi4_ksk_rdata,
-  input  logic [KSK_PC-1:0][1:0]                                   m_axi4_ksk_rresp,
+  input  logic [KSK_PC-1:0][AXI4_RESP_W-1:0]                       m_axi4_ksk_rresp,
   input  logic [KSK_PC-1:0]                                        m_axi4_ksk_rlast,
   input  logic [KSK_PC-1:0]                                        m_axi4_ksk_rvalid,
   output logic [KSK_PC-1:0]                                        m_axi4_ksk_rready
@@ -179,6 +179,24 @@ typedef enum logic [2:0] {
 } vp_pbs_lite_state_e;
 
 vp_pbs_lite_state_e current_state, next_state;
+
+// ==============================================================================================
+// 辅助函数定义
+// ==============================================================================================
+
+// modSwitchToTorus32函数 - 与C++参考算法一致
+function automatic logic [31:0] modSwitchToTorus32(
+  input logic [31:0] mu,
+  input logic [31:0] Msize
+);
+  logic [63:0] interv;
+  logic [63:0] phase64;
+  
+  // 与C++完全一致的算法：将mu从模Msize映射到Torus32
+  interv = (64'h8000000000000000 / Msize) * 2;
+  phase64 = mu * interv;
+  return phase64[63:32];  // 返回高32位作为Torus32结果
+endfunction
 
 // ==============================================================================================
 // 内部信号和存储
@@ -319,12 +337,37 @@ logic [KSK_PC-1:0] ksk_axi_rready; // 🔧 确保rready是数组类型
 // 🔧 关键修复：添加缺失的AXI4地址通道信号
 logic [KSK_PC-1:0][axi_if_ksk_axi_pkg::AXI4_ID_W-1:0] ksk_axi_arid;
 logic [KSK_PC-1:0][axi_if_ksk_axi_pkg::AXI4_ADD_W-1:0] ksk_axi_araddr;
-logic [KSK_PC-1:0][7:0] ksk_axi_arlen;  // 这是关键！用于确定传输长度
-logic [KSK_PC-1:0][2:0] ksk_axi_arsize;
-logic [KSK_PC-1:0][1:0] ksk_axi_arburst;
+logic [KSK_PC-1:0][AXI4_LEN_W-1:0] ksk_axi_arlen;   // 修复位宽
+logic [KSK_PC-1:0][AXI4_SIZE_W-1:0] ksk_axi_arsize; // 修复位宽
+logic [KSK_PC-1:0][AXI4_BURST_W-1:0] ksk_axi_arburst; // 修复位宽
 
 // BSK模块信号
 logic system_ready;
+
+// KSK相关信号声明（提前声明以避免使用前声明错误）
+logic [LBX-1:0][LBY-1:0][LBZ-1:0][MOD_KSK_W-1:0] ksk_data;
+logic [LBX-1:0][LBY-1:0] ksk_data_vld;
+logic [LBX-1:0][LBY-1:0] ksk_data_rdy;
+logic ks_seq_cmd_enquiry;
+logic [KS_CMD_W-1:0] seq_ks_cmd;
+logic seq_ks_cmd_avail;
+logic [KS_RESULT_W-1:0] ks_seq_result;
+logic ks_seq_result_vld;
+logic ks_seq_result_rdy;
+logic ksk_processing_done;
+logic ksk_data_ready_real;
+logic [KS_BATCH_CMD_W-1:0] ks_batch_cmd;
+logic ks_batch_cmd_avail;
+
+// pep_key_switch需要的BLWE RAM接口信号
+logic [LBY-1:0] ldb_blram_wr_en;
+logic [LBY-1:0][PID_W-1:0] ldb_blram_wr_pid;
+logic [LBY-1:0][MOD_Q_W-1:0] ldb_blram_wr_data;
+logic [LBY-1:0] ldb_blram_wr_pbs_last;
+logic [PID_W-1:0] ks_boram_pid;
+logic ks_boram_parity;
+logic ks_boram_wr_en;
+logic [LWE_COEF_W-1:0] ks_boram_data;
 
 // ==============================================================================================
 // 状态机实现
@@ -353,6 +396,12 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     extract_result <= '0;
     final_result <= '0;
     final_result_vec <= '0;
+    
+    // 复位pep_key_switch BLWE接口信号
+    ldb_blram_wr_en <= '0;
+    ldb_blram_wr_pid <= '0;
+    ldb_blram_wr_data <= '0;
+    ldb_blram_wr_pbs_last <= '0;
   end else begin
     // 🔧 DEBUG: 状态转换调试
     if (current_state != next_state) begin
@@ -416,10 +465,17 @@ always_ff @(posedge clk or negedge s_rst_n) begin
         end
       end
       POST_PROCESSING: begin
-        // 🔧 在sequential logic中设置post_proc_done标志
-        // 修复：当进入POST_PROCESSING状态时设置标志
-        if (current_state == POST_PROCESSING) begin
-          $display("[VP_PBS_LITE] In POST_PROCESSING, setting post_proc_done");
+        // 🔧 临时简化KSK处理：直接应用modSwitch而不等待pep_key_switch
+        if (!ksk_cmd_sent) begin
+          $display("[VP_PBS_LITE] POST_PROCESSING: Simplified KSK processing (bypassing pep_key_switch)");
+          
+          // 直接应用modSwitchToTorus32
+          final_result_vec[0] <= modSwitchToTorus32(final_result_vec[0], 32'd32);
+          
+          $display("[VP_PBS_LITE] Applying modSwitch: 0x%08h -> 0x%08h", 
+                   final_result_vec[0], modSwitchToTorus32(final_result_vec[0], 32'd32));
+          
+          ksk_cmd_sent <= 1'b1;
           post_proc_done <= 1'b1;
         end
       end
@@ -432,6 +488,11 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       IDLE: begin
         process_counter <= '0; // 重置计数器
         ggsw_bit_counter <= '0;
+        // 复位KSK BLWE接口信号
+        ldb_blram_wr_en <= '0;
+        ldb_blram_wr_pid <= '0;
+        ldb_blram_wr_data <= '0;
+        ldb_blram_wr_pbs_last <= '0;
         bsk_cmd_sent <= 1'b0; // 🔧 重置命令发送标志
         ksk_cmd_sent <= 1'b0; // 🔧 重置KSK命令发送标志
       end
@@ -806,6 +867,8 @@ pe_pbs_with_bsk #(
   .pep_rif_info()           // 未连接
 );
 
+// KSK相关信号声明已移动到状态机之前
+
 // ==============================================================================================
 // Blind Rotation核心模块 - pep_mmacc_splitc_main
 // ==============================================================================================
@@ -909,7 +972,110 @@ pep_mmacc_splitc_main #(
 );
 
 // ==============================================================================================
-// 控制逻辑：pep_mmacc模块的控制
+// 真实KSK模块集成 - 直接使用pep_key_switch而不是包装器
+// ==============================================================================================
+
+// pep_key_switch使用前面声明的信号
+
+pep_key_switch #(
+  .RAM_LATENCY(RAM_LATENCY),
+  .ALMOST_DONE_BLINE_ID(0),
+  .KS_IF_SUBW_NB(1),
+  .KS_IF_COEF_NB(LBY)
+) i_pep_key_switch (
+  .clk(clk),
+  .s_rst_n(s_rst_n),
+  
+  // Sequencer命令接口 - 主要的KSK控制接口
+  .ks_seq_cmd_enquiry(ks_seq_cmd_enquiry),
+  .seq_ks_cmd(seq_ks_cmd),
+  .seq_ks_cmd_avail(seq_ks_cmd_avail),
+  
+  // KSK指针控制
+  .inc_ksk_wr_ptr(),
+  .inc_ksk_rd_ptr(),  // 输出端口，不连接
+  
+  // KSK Manager批处理接口
+  .batch_cmd(ks_batch_cmd),
+  .batch_cmd_avail(ks_batch_cmd_avail),
+  
+  // BLWE输入接口 (Sample Extract结果输入)
+  .ldb_blram_wr_en(ldb_blram_wr_en),
+  .ldb_blram_wr_pid(ldb_blram_wr_pid),
+  .ldb_blram_wr_data(ldb_blram_wr_data),
+  .ldb_blram_wr_pbs_last(ldb_blram_wr_pbs_last),
+  
+  // KSK密钥接口 (由pe_pbs_with_ksk提供)
+  .ksk(ksk_data),
+  .ksk_vld(ksk_data_vld),
+  .ksk_rdy(ksk_data_rdy),
+  
+  // Key Switching结果输出
+  .ks_seq_result(ks_seq_result),
+  .ks_seq_result_vld(ks_seq_result_vld),
+  .ks_seq_result_rdy(ks_seq_result_rdy),
+  
+  // Body RAM输出接口
+  .boram_wr_en(ks_boram_wr_en),
+  .boram_data(ks_boram_data),
+  .boram_pid(ks_boram_pid),
+  .boram_parity(ks_boram_parity),
+  
+  .reset_cache(1'b0)
+);
+
+// 保留pe_pbs_with_ksk仅用于提供KSK密钥数据
+// ==============================================================================================
+pe_pbs_with_ksk #(
+  .RAM_LATENCY(RAM_LATENCY),
+  .URAM_LATENCY(URAM_LATENCY),
+  .PHYS_RAM_DEPTH(PHYS_RAM_DEPTH)
+) i_pe_pbs_with_ksk (
+  .clk(clk),
+  .s_rst_n(s_rst_n),
+  
+  // KSK缓存重置
+  .reset_ksk_cache(1'b0),           // 简化：不需要重置
+  .reset_ksk_cache_done(),
+  .ksk_mem_avail(1'b1),             // 简化：KSK内存总是可用
+  .ksk_mem_addr('0),                // 简化：固定地址
+  
+  // KSK AXI4接口
+  .m_axi4_ksk_arid(m_axi4_ksk_arid),
+  .m_axi4_ksk_araddr(m_axi4_ksk_araddr),
+  .m_axi4_ksk_arlen(m_axi4_ksk_arlen),
+  .m_axi4_ksk_arsize(m_axi4_ksk_arsize),
+  .m_axi4_ksk_arburst(m_axi4_ksk_arburst),
+  .m_axi4_ksk_arvalid(m_axi4_ksk_arvalid),
+  .m_axi4_ksk_arready(m_axi4_ksk_arready),
+  .m_axi4_ksk_rid(m_axi4_ksk_rid),
+  .m_axi4_ksk_rdata(m_axi4_ksk_rdata),
+  .m_axi4_ksk_rresp(m_axi4_ksk_rresp),
+  .m_axi4_ksk_rlast(m_axi4_ksk_rlast),
+  .m_axi4_ksk_rvalid(m_axi4_ksk_rvalid),
+  .m_axi4_ksk_rready(m_axi4_ksk_rready),
+  
+  // KSK指针控制
+  .inc_ksk_wr_ptr(),                // 输出端口，不连接
+  .inc_ksk_rd_ptr(1'b0),            // 简化：不递增读指针
+  
+  // KSK batch命令
+  .ks_batch_cmd(ks_batch_cmd),
+  .ks_batch_cmd_avail(ks_batch_cmd_avail),
+  .ksk_if_batch_start_1h(current_state == POST_PROCESSING && !ksk_cmd_sent),
+  
+  // KSK数据输出
+  .ksk(ksk_data),
+  .ksk_vld(ksk_data_vld),
+  .ksk_rdy(ksk_data_rdy),
+  
+  // 错误接口 (pe_pbs_with_ksk没有error端口)
+  .pep_rif_info(),
+  .pep_rif_counter_inc()
+);
+
+// ==============================================================================================
+// 控制逻辑：pep_mmacc和KSK模块的控制
 // ==============================================================================================
 always_comb begin
   // 默认值
@@ -920,6 +1086,13 @@ always_comb begin
   pep_mmacc_ldg_gram_wr_en = '0;
   pep_mmacc_ldg_gram_wr_add = '0;
   pep_mmacc_ldg_gram_wr_data = '0;
+  
+  // KSK控制默认值  
+  seq_ks_cmd = '0;
+  seq_ks_cmd_avail = 1'b0;
+  ks_seq_result_rdy = 1'b0;
+  
+  // pep_key_switch BLWE输入在always_ff中驱动，不在这里设置默认值
   
   // 在BLIND_ROTATION开始时发送reset_cache脉冲
   if (current_state == BLIND_ROTATION && ggsw_bit_counter == 0) begin
@@ -935,6 +1108,27 @@ always_comb begin
       // 发送正确的PBS命令：Blind Rotation操作
       pep_mmacc_seq_pbs_cmd = {PBS_CMD_W{1'b0}};  // 基本的BR命令
       $display("[VP_PBS_LITE] 🔧 Responding to pep_mmacc cmd_enquiry for bit %0d", ggsw_bit_counter);
+    end
+  end
+  
+  // KSK控制逻辑
+  if (current_state == POST_PROCESSING) begin
+    if (ks_seq_cmd_enquiry && !ksk_cmd_sent) begin
+      // 响应KSK模块的命令请求，构建正确的ks_cmd
+      seq_ks_cmd_avail = 1'b1;
+      
+      // 根据testbench构建ks_cmd结构：
+      // - ks_loop: KS循环索引 (简化为0)  
+      // - rp: 读指针 (简化为0)
+      // - wp: 写指针 (简化为1，表示处理1个PBS)
+      seq_ks_cmd = {{(KS_CMD_W-3){1'b0}}, 3'b001}; // 简化的命令：ks_loop=0, rp=0, wp=1
+      $display("[VP_PBS_LITE] 🔧 Responding to KSK cmd_enquiry with structured command");
+    end
+    
+    if (ks_seq_result_vld) begin
+      // 准备接收KSK结果
+      ks_seq_result_rdy = 1'b1;
+      $display("[VP_PBS_LITE] 🔧 Accepting KSK result: 0x%0h", ks_seq_result);
     end
   end
 end

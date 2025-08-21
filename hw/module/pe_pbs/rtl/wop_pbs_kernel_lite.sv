@@ -47,8 +47,8 @@ module wop_pbs_kernel_lite
   parameter int LUT_SIZE = 1024,
   
   // BSK/KSK端口配置参数 (可通过命令行配置)
-  parameter int BSK_PC = 1,     // BSK port count - 匹配BSK_CUT_NB=1
-  parameter int KSK_PC = 1,     // KSK port count - 与testbench一致
+  parameter int BSK_PC = 2,     // BSK port count - 匹配BSK_CUT_NB=2  
+  parameter int KSK_PC = 2,     // KSK port count - 匹配pe_pbs_with_ksk期望
   
   // 集成真实模块所需的参数 (从wop_pbs_kernel.sv复制)
   parameter  mod_mult_type_e   MOD_MULT_TYPE       = set_mod_mult_type(MOD_NTT_TYPE),
@@ -68,7 +68,7 @@ module wop_pbs_kernel_lite
   
   // 内存和延迟参数
   parameter  int               RAM_LATENCY         = 2,
-  parameter  int               URAM_LATENCY        = RAM_LATENCY + 1,
+  parameter  int               URAM_LATENCY        = 2,  // Match pep_mmacc_splitc_main default
   parameter  int               ROM_LATENCY         = 2,
   
   // Twiddle文件参数

@@ -63,8 +63,8 @@ module bsk_if_axi4_read
 // ============================================================================================== //
 // localparam
 // ============================================================================================== //
-  // Force BSK_PC override to resolve Vivado package parsing conflicts
-  localparam int                BSK_PC_EFFECTIVE = 1; // Force BSK_PC=1 to match BSK_CUT_NB=1
+  // Use real BSK_PC parameter instead of hardcoded override
+  localparam int                BSK_PC_EFFECTIVE = BSK_PC; // Use real BSK_PC from top_common_param_pkg
   
   localparam int                RECP_FIFO_DEPTH  = 8; // TOREVIEW : according to memory latency.
   localparam [BSK_PC_EFFECTIVE-1:0][31:0] BSK_CUT_PER_PC_A = get_cut_per_pc(BSK_CUT_NB, BSK_PC_EFFECTIVE);
@@ -274,17 +274,27 @@ module bsk_if_axi4_read
     for (genvar gen_pc=0; gen_pc<BSK_PC_EFFECTIVE; gen_pc=gen_pc+1) begin : gen_pc_loop
       localparam int BSK_CUT_PER_PC_L            = BSK_CUT_PER_PC_A[gen_pc];
       localparam int BSK_CUT_OFS_L               = BSK_CUT_OFS_A[gen_pc];
-      localparam int PROC_GCOL_COEF_NB           = ((N*GLWE_K_P1*PBS_L)+(BSK_CUT_NB/BSK_CUT_PER_PC_L)-1) / (BSK_CUT_NB/BSK_CUT_PER_PC_L);
+      
+      // Debug prints for parameter analysis
+      initial begin
+        $display("[BSK_IF_DEBUG] gen_pc=%0d: BSK_CUT_PER_PC_L=%0d, BSK_CUT_OFS_L=%0d, BSK_CUT_NB=%0d, BSK_PC_EFFECTIVE=%0d", 
+                 gen_pc, BSK_CUT_PER_PC_L, BSK_CUT_OFS_L, BSK_CUT_NB, BSK_PC_EFFECTIVE);
+      end
+      localparam int PROC_GCOL_COEF_NB           = BSK_CUT_PER_PC_L > 0 ? 
+                                                 ((N*GLWE_K_P1*PBS_L)+(BSK_CUT_NB/BSK_CUT_PER_PC_L)-1) / (BSK_CUT_NB/BSK_CUT_PER_PC_L) :
+                                                 1; // Default value when BSK_CUT_PER_PC_L=0
       localparam int AXI4_WORD_PER_BSK_GCOL_L    = (PROC_GCOL_COEF_NB*BSK_ACS_W + AXI4_DATA_W-1)/AXI4_DATA_W;
       localparam int AXI4_WORD_PER_BSK_GCOL_L_W  = $clog2(AXI4_WORD_PER_BSK_GCOL_L) == 0 ? 1 : $clog2(AXI4_WORD_PER_BSK_GCOL_L);
       localparam int AXI4_WORD_PER_BSK_GCOL_L_WW = $clog2(AXI4_WORD_PER_BSK_GCOL_L+1) == 0 ? 1 : $clog2(AXI4_WORD_PER_BSK_GCOL_L+1);
       localparam int BSK_PC_SLOT_BYTES_L         = AXI4_WORD_PER_BSK_GCOL_L * AXI4_DATA_BYTES * GLWE_K_P1;
 
       localparam int BSK_BLOCK_PER_AXI4_WORD = BSK_COEF_PER_AXI4_WORD / BSK_CUT_FCOEF_NB;
-      // Number of cuts that are processed in parallel
-      localparam int PROC_CUT_NB             = BSK_BLOCK_PER_AXI4_WORD == 0 ? 1 :
+      // Number of cuts that are processed in parallel (protected against BSK_CUT_PER_PC_L=0)
+      localparam int PROC_CUT_NB             = BSK_CUT_PER_PC_L == 0 ? 1 :
+                                               BSK_BLOCK_PER_AXI4_WORD == 0 ? 1 :
                                                BSK_CUT_PER_PC_L > BSK_BLOCK_PER_AXI4_WORD ? BSK_BLOCK_PER_AXI4_WORD : BSK_CUT_PER_PC_L;
-      localparam int PROC_CUT_GROUP_NB       = BSK_CUT_PER_PC_L / PROC_CUT_NB;
+      localparam int PROC_CUT_GROUP_NB       = (BSK_CUT_PER_PC_L > 0 && PROC_CUT_NB > 0) ? 
+                                                 BSK_CUT_PER_PC_L / PROC_CUT_NB : 1;
       localparam int PROC_CUT_GROUP_W        = $clog2(PROC_CUT_GROUP_NB) == 0 ? 1 : $clog2(PROC_CUT_GROUP_NB);
 
 // ---------------------------------------------------------------------------------------------- //
@@ -718,14 +728,16 @@ module bsk_if_axi4_read
       assign r1_bsk_mgr_wr_br_loop = r1_cmd.br_loop;
 
       //---------------------------------------
-      // Output
+      // Output (with protection against BSK_CUT_PER_PC_L=0)
       //---------------------------------------
-      assign bsk_mgr_wr_enD[BSK_CUT_OFS_L+:BSK_CUT_PER_PC_L]      = r1_bsk_mgr_wr_en;
-      assign bsk_mgr_wr_dataD [BSK_CUT_OFS_L+:BSK_CUT_PER_PC_L]   = {PROC_CUT_GROUP_NB{r1_bsk_mgr_wr_data}};
-      assign bsk_mgr_wr_addD[BSK_CUT_OFS_L+:BSK_CUT_PER_PC_L]     = {BSK_CUT_PER_PC_L{r1_bsk_mgr_wr_add}};
-      assign bsk_mgr_wr_g_idxD[BSK_CUT_OFS_L+:BSK_CUT_PER_PC_L]   = {BSK_CUT_PER_PC_L{r1_bsk_mgr_wr_g_idx}};
-      assign bsk_mgr_wr_slotD[BSK_CUT_OFS_L+:BSK_CUT_PER_PC_L]    = {BSK_CUT_PER_PC_L{r1_bsk_mgr_wr_slot}};
-      assign bsk_mgr_wr_br_loopD[BSK_CUT_OFS_L+:BSK_CUT_PER_PC_L] = {BSK_CUT_PER_PC_L{r1_bsk_mgr_wr_br_loop}};
+      if (BSK_CUT_PER_PC_L > 0) begin : gen_valid_cut_assignments
+        assign bsk_mgr_wr_enD[BSK_CUT_OFS_L+:BSK_CUT_PER_PC_L]      = r1_bsk_mgr_wr_en;
+        assign bsk_mgr_wr_dataD [BSK_CUT_OFS_L+:BSK_CUT_PER_PC_L]   = {PROC_CUT_GROUP_NB{r1_bsk_mgr_wr_data}};
+        assign bsk_mgr_wr_addD[BSK_CUT_OFS_L+:BSK_CUT_PER_PC_L]     = {BSK_CUT_PER_PC_L{r1_bsk_mgr_wr_add}};
+        assign bsk_mgr_wr_g_idxD[BSK_CUT_OFS_L+:BSK_CUT_PER_PC_L]   = {BSK_CUT_PER_PC_L{r1_bsk_mgr_wr_g_idx}};
+        assign bsk_mgr_wr_slotD[BSK_CUT_OFS_L+:BSK_CUT_PER_PC_L]    = {BSK_CUT_PER_PC_L{r1_bsk_mgr_wr_slot}};
+        assign bsk_mgr_wr_br_loopD[BSK_CUT_OFS_L+:BSK_CUT_PER_PC_L] = {BSK_CUT_PER_PC_L{r1_bsk_mgr_wr_br_loop}};
+      end
 
       //---------------------------------------
       // Process done

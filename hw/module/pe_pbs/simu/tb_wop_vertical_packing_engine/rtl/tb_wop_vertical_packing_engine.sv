@@ -32,8 +32,8 @@ module tb_wop_vertical_packing_engine
   parameter int MAX_BIT_WIDTH = 20,
   parameter int N_LVL1 = 1024,
   parameter int ELL_LVL1 = 3,  // For compatibility with run scripts
-  parameter int BSK_PC = 1,  // Match BSK_CUT_NB=1 configuration
-  parameter int KSK_PC = 1
+  parameter int BSK_PC = 2,  // Match BSK_CUT_NB=2 configuration  
+  parameter int KSK_PC = 2   // Match KSK modules expectation
 )();
 
 // ==============================================================================================

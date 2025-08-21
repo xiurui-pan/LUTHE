@@ -69,8 +69,8 @@ MOD_Q_W=32
 MOD_Q="2**32"
 N_LVL1=1024
 ELL_LVL1=3
-BSK_PC=2  # 🎯 匹配pe_pbs_with_bsk内部期望的BSK_PC=2
-KSK_PC=2  # 🎯 匹配pe_pbs_with_ksk内部期望的KSK_PC=2
+BSK_PC=1  # 🎯 匹配pe_pbs_with_bsk内部期望的BSK_PC=2
+KSK_PC=1  # 🎯 匹配pe_pbs_with_ksk内部期望的KSK_PC=2
 REGF_REG_NB=64
 REGF_COEF_NB=32
 REGF_SEQ=4

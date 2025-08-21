@@ -281,7 +281,7 @@ module ksk_if_axi4_read
           $display("INFO> gen_pc=%0d: DISABLED (no cuts mapped), slot_done=1 always", gen_pc);
         end
       end
-      localparam int PROC_BCOL_COEF_NB           = ((LBY*KS_BLOCK_LINE_NB*KS_LG_NB)+(KSK_CUT_NB/KSK_CUT_PER_PC_L)-1) / (KSK_CUT_NB/KSK_CUT_PER_PC_L);
+      localparam int PROC_BCOL_COEF_NB           = KSK_CUT_PER_PC_L == 0 ? 1 : ((LBY*KS_BLOCK_LINE_NB*KS_LG_NB)+(KSK_CUT_NB/KSK_CUT_PER_PC_L)-1) / (KSK_CUT_NB/KSK_CUT_PER_PC_L);
       localparam int AXI4_WORD_PER_KSK_BCOL_L    = (PROC_BCOL_COEF_NB*KSK_ACS_W + AXI4_DATA_W-1)/AXI4_DATA_W;
       localparam int AXI4_WORD_PER_KSK_BCOL_L_W  = $clog2(AXI4_WORD_PER_KSK_BCOL_L) == 0 ? 1 : $clog2(AXI4_WORD_PER_KSK_BCOL_L);
       localparam int AXI4_WORD_PER_KSK_BCOL_L_WW = $clog2(AXI4_WORD_PER_KSK_BCOL_L+1) == 0 ? 1 : $clog2(AXI4_WORD_PER_KSK_BCOL_L+1);

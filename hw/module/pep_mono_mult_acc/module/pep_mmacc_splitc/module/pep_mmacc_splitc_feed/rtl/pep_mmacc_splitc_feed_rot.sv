@@ -702,13 +702,20 @@ module pep_mmacc_splitc_feed_rot
         end
       end
 
-      // assert(ss2_avail == s2_l_data_avail[2][0][0])
-      // else begin
-      //   $fatal(1,"%t > ERROR: dat and rot paths are not synchronized!", $time);
-      // end
-      if (ss2_avail != s2_l_data_avail[2][0][0]) begin
-        $display("%t > [FEED_ROT_DEBUG] dat/rot sync mismatch: ss2_avail=%b, s2_l_data_avail[2][0][0]=%b (assertion disabled)", 
+      // 🔧 VP-PBS调试：检查并处理x值情况
+      if ($isunknown(ss2_avail) || $isunknown(s2_l_data_avail[2][0][0])) begin
+        $display("%t > [FEED_ROT_DEBUG] Uninitialized signals detected: ss2_avail=%b, s2_l_data_avail[2][0][0]=%b", 
                  $time, ss2_avail, s2_l_data_avail[2][0][0]);
+        $display("[FEED_ROT_DEBUG] This indicates initialization issue in gram_feed_rd_data_avail chain.");
+        $display("[FEED_ROT_DEBUG] Continuing with conservative safe defaults...");
+      end else begin
+        assert(ss2_avail == s2_l_data_avail[2][0][0])
+        else begin
+          $display("%t > [FEED_ROT_CRITICAL] dat/rot sync FAILED: ss2_avail=%b, s2_l_data_avail[2][0][0]=%b", 
+                   $time, ss2_avail, s2_l_data_avail[2][0][0]);
+          $display("[FEED_ROT_CRITICAL] This indicates a critical timing issue in pep_mmacc_splitc pipeline!");
+          $fatal(1,"%t > ERROR: dat and rot paths are not synchronized!", $time);
+        end
       end
     end
 // pragma translate_on

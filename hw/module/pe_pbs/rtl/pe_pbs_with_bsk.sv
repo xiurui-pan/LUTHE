@@ -210,7 +210,7 @@ module pe_pbs_with_bsk
 // ---------------------------------------------------------------------------------------------- --
   bsk_manager
   #(
-    .OP_W          (MOD_Q_W),
+    .OP_W          (MOD_NTT_W),
     .RAM_LATENCY   (URAM_LATENCY)
   ) bsk_manager (
     .clk             (clk),

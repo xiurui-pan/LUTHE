@@ -270,6 +270,16 @@ logic [31:0] mod_switch_offset;
 
 // pep_mmacc相关参数定义
 localparam int MAIN_PSI = MSPLIT_MAIN_FACTOR * PSI / MSPLIT_DIV;
+
+// 🔍 参数调试打印
+initial begin
+  $display("[PARAM_DEBUG] Key parameters:");
+  $display("[PARAM_DEBUG] PSI=%0d, R=%0d, MSPLIT_MAIN_FACTOR=%0d, MSPLIT_DIV=%0d", 
+           PSI, R, MSPLIT_MAIN_FACTOR, MSPLIT_DIV);
+  $display("[PARAM_DEBUG] MAIN_PSI=%0d, RAM_LATENCY=%0d, URAM_LATENCY=%0d", 
+           MAIN_PSI, RAM_LATENCY, URAM_LATENCY);
+  $display("[PARAM_DEBUG] GRAM_NB=%0d, GLWE_K_P1=%0d", GRAM_NB, GLWE_K_P1);
+end
 logic pep_mmacc_reset_cache;
 logic pep_mmacc_pbs_seq_cmd_enquiry;
 logic [PBS_CMD_W-1:0] pep_mmacc_seq_pbs_cmd;
@@ -344,6 +354,17 @@ logic [LBX-1:0][LBY-1:0] ksk_data_vld_real;
 logic [LBX-1:0][LBY-1:0] ksk_data_rdy_real;
 
 // KSK AXI4接口信号 - 用于提供真实数据响应
+// GRAM仲裁器信号 - 🔧 为pep_mmacc提供真实的GRAM访问权限
+logic [GRAM_NB-1:0] gram_garb_feed_rot_avail_1h;
+logic [GRAM_NB-1:0] gram_garb_feed_dat_avail_1h;
+logic [GRAM_NB-1:0] gram_garb_acc_rd_avail_1h;
+logic [GRAM_NB-1:0] gram_garb_acc_wr_avail_1h;
+logic [GRAM_NB-1:0] gram_garb_sxt_avail_1h;
+logic [GRAM_NB-1:0] gram_garb_ldg_avail_1h;
+logic gram_garb_ldg_single_avail_1h;
+
+// 这些信号由pep_mmacc模块输出，不需要assign
+
 logic [KSK_PC-1:0] ksk_axi_arvalid;
 logic [KSK_PC-1:0] ksk_axi_arready;
 logic [KSK_PC-1:0][axi_if_ksk_axi_pkg::AXI4_ID_W-1:0] ksk_axi_rid;
@@ -1138,14 +1159,14 @@ pep_mmacc_splitc_main #(
   .inc_bsk_wr_ptr(pep_mmacc_inc_bsk_wr_ptr),
   .inc_bsk_rd_ptr(pep_mmacc_inc_bsk_rd_ptr),
   
-  // GRAM仲裁器接口 (简化实现)
-  .main_subs_garb_feed_rot_avail_1h(),
-  .main_subs_garb_feed_dat_avail_1h(),
-  .main_subs_garb_acc_rd_avail_1h(),
-  .main_subs_garb_acc_wr_avail_1h(),
-  .main_subs_garb_sxt_avail_1h(),
-  .main_subs_garb_ldg_avail_1h(),
-  .garb_ldg_avail_1h(),
+  // GRAM仲裁器接口 - 🔧 修复：连接到声明的信号
+  .main_subs_garb_feed_rot_avail_1h(gram_garb_feed_rot_avail_1h),
+  .main_subs_garb_feed_dat_avail_1h(gram_garb_feed_dat_avail_1h),
+  .main_subs_garb_acc_rd_avail_1h(gram_garb_acc_rd_avail_1h),
+  .main_subs_garb_acc_wr_avail_1h(gram_garb_acc_wr_avail_1h),
+  .main_subs_garb_sxt_avail_1h(gram_garb_sxt_avail_1h),
+  .main_subs_garb_ldg_avail_1h(gram_garb_ldg_avail_1h),
+  .garb_ldg_avail_1h(gram_garb_ldg_single_avail_1h),
   
   // Main-Subs通信接口 (简化实现，暂时未连接)
   .main_subs_feed_mcmd(),

@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 # 简化版快速运行脚本 - 显示更多输出用于BSK集成调试
 
-echo "=== Quick Run Vertical Packing Engine Testbench (Simplified) ==="
+echo "=== Quick VP Engine Testbench ==="
 
 # 确定项目根目录
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -23,59 +23,26 @@ fi
 echo "INFO> Using project root: $PROJECT_ROOT"
 
 # 🔧 使用更宽松的过滤，专注于BSK集成调试
-echo "INFO> Running with simplified filtering for BSK integration debug..."
+echo "INFO> Running with simplified filtering for integration debug..."
 
-LOG=$(cd "$PROJECT_ROOT" && timeout 300 bash -lc "source setup.sh >/dev/null 2>&1 && cd $SCRIPT_DIR && ./run.sh -- -v 2>&1" | \
+LOG=$(cd "$PROJECT_ROOT" && timeout 60 bash -lc "source setup.sh >/dev/null 2>&1 && cd $SCRIPT_DIR && ./run.sh -- -v 2>&1" | \
 grep -v "Loading LUT entry" | \
 grep -v "INFO>" | \
-egrep -i "\
-\[VP_ENGINE\]|\
-\[VP_PBS_LITE\]|\
-\[TB_BSK\]|\
-\[TB_KSK\]|\
-\[TB_DIRECT\]|\
-\[TB\].*SUCCESS|\
-\[TB\].*FAILURE|\
-\[TB\].*Mismatch|\
-\[TB\].*Starting|\
-\[TB\].*completed|\
-BSK.*Phase|\
-BSK.*command|\
-BSK.*data|\
-BSK.*access|\
-BSK.*response|\
-BSK.*initialization|\
-BSK.*slot|\
-BSK_MGR.*Slot|\
-LWE_K_W.*max_slots|\
-KSK.*access|\
-handshake.*SUCCESS|\
-captured.*entries|\
-\[TB_KERNEL\]|\
-\[TB_VERIFY\]|\
-CAPTURE.*vs.*KERNEL|\
-PERFECT.*MATCH|\
-verification|\
-^ERROR:|\
-^FATAL:|\
-^WARNING:.*BSK|\
-^WARNING:.*KSK|\
-FAILED|\
-PASSED|\
-SUCCESS|\
-TIMEOUT" | tail -150)
+grep -v "INFO:" | \
+grep -v "Compiling package" | \
+egrep -i "\[VP_ENGINE\]|\[VP_PBS_LITE\]|\[TB_BSK\]|\[TB_KSK\]|\[TB_DIRECT\]|\[TB\].*SUCCESS|\[TB\].*FAILURE|\[TB\].*Mismatch|\[TB\].*Starting|\[TB\].*completed|\[TB\].*Progress|\[TB\].*state|\[TB\].*Clock|\[TB\].*Reset|\[TB\].*waiting|\[TB\].*Operation|\[TB\].*instruction|current_state|progress_counter|VP_PBS.*DONE|inst_vld|inst_rdy|inst_ack|response\.current_state|BSK.*Phase|BSK.*command|BSK.*data|BSK.*access|BSK.*response|BSK.*initialization|BSK.*slot|BSK_MGR.*Slot|LWE_K_W.*max_slots|KSK.*access|handshake.*SUCCESS|captured.*entries|\[TB_KERNEL\]|\[TB_VERIFY\]|CAPTURE.*vs.*KERNEL|PERFECT.*MATCH|verification|^ERROR:|^FATAL:|^WARNING:.*BSK|^WARNING:.*KSK|FAILED|PASSED|SUCCESS|TIMEOUT|Global.*timeout|PARAM_DEBUG|HEARTBEAT|stabiliz|acknowledged|ACK|handshake" | tail -50)
 
 # 打印过滤后的日志
 echo "$LOG"
 
 # 根据Mismatch/FAIL/ERROR判断退出码
 if echo "$LOG" | egrep -iq "Mismatch|FAIL|ERROR|FATAL|FAILED|TIMEOUT"; then
-	echo "=== 检测到错误/不匹配，快速运行失败 ==="
+	echo "=== 检测到错误/不匹配，失败 ==="
 	exit 1
 fi
 
 if echo "$LOG" | egrep -iq "SUCCESS"; then
-	echo "=== 快速运行成功（无错误/不匹配检测到） ==="
+	echo "=== 成功（无错误/不匹配检测到） ==="
 	exit 0
 fi
 

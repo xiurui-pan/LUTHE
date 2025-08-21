@@ -11,5 +11,5 @@
 // ==============================================================================================
 
 package bsk_mgr_common_cut_definition_pkg;
-  localparam int BSK_CUT_NB  = 1;
+  localparam int BSK_CUT_NB  = 2; // 🔧 Override BSK_CUT_1 to BSK_CUT_NB=2 for VP-PBS integration
 endpackage

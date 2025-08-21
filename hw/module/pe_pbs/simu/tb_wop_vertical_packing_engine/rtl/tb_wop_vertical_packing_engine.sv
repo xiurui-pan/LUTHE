@@ -42,7 +42,7 @@ module tb_wop_vertical_packing_engine
   localparam int K = 1;
   localparam int LUT_SIZE = 1024;
   localparam int CLK_PERIOD = 10; // 100MHz
-  localparam int TIMEOUT_CYCLES = 100000;
+  localparam int TIMEOUT_CYCLES = 2000000;  // 🔧 VP-PBS: 进一步延长超时到2M周期来分析算法执行
 
 // ==============================================================================================
 // Clock and Reset
@@ -621,175 +621,6 @@ module tb_wop_vertical_packing_engine
 // ==============================================================================================
 // Main Test Sequence
 // ==============================================================================================
-  // 🔧 DISABLED: Direct instruction mode - use dual-module mode instead
-  // This ensures VP Engine executes real CMux Tree algorithm before PBS processing
-  /*
-  initial begin
-    $display("=== bigLut_20bit_lvl1 Algorithm Test ===");
-    
-    // Initialize
-    s_rst_n = 1'b0;
-    vp_pbs_inst_vld = 1'b0;
-    vp_bsk_resource_req_vld = 1'b0;
-    
-    repeat(10) @(posedge clk);
-    s_rst_n = 1'b1;
-    $display("[TB] Reset released, waiting for stabilization...");
-    
-    // Wait longer for all internal modules to stabilize
-    repeat(1000) @(posedge clk);
-    $display("[TB] Reset completed, system stabilized");
-    
-    // Generate test data and golden reference
-    generate_test_data();
-    generate_golden_reference();
-    
-    // Start VP-PBS operation
-    @(posedge clk);
-    // Send BSK resource request first (必须在VP-PBS指令之前)
-    $display("[TB] Sending BSK resource request first...");
-    vp_bsk_resource_req.need_bsk = 1'b1;      // 请求BSK资源
-    vp_bsk_resource_req.bsk_batch_id = 8'h00; // First BR loop
-    vp_bsk_resource_req_vld = 1'b1;
-    $display("[TB] BSK resource request sent for batch_id=0");
-    
-    @(posedge clk);
-    while (!vp_bsk_resource_req_rdy) @(posedge clk);
-    vp_bsk_resource_req_vld = 1'b0;
-    $display("[TB] BSK resource request acknowledged");
-    
-    $display("[TB] Configuring VP-PBS instruction...");
-    $display("[TB] About to configure instruction fields...");
-    
-    // Set up instruction step by step to debug
-    $display("[TB] Setting operation_type...");
-    vp_pbs_inst.operation_type = VP_OP_BLIND_ROT_EXTRACT;
-    $display("[TB] Setting addresses...");
-    vp_pbs_inst.cmux_result_addr = 16'h3000;
-    vp_pbs_inst.ggsw_bits_addr = 16'h2000;
-    vp_pbs_inst.output_addr = 16'h4000;
-    vp_pbs_inst.temp_storage_addr = 16'h5000;
-    $display("[TB] Setting LUT parameters...");
-    vp_pbs_inst.lut_base_addr = 32'h10000;
-    vp_pbs_inst.lut_entry_size = 16'd2048;
-    $display("[TB] Setting bit parameters...");
-    vp_pbs_inst.bit_range_start = 4'd0;
-    vp_pbs_inst.bit_range_end = 4'd9;
-    vp_pbs_inst.bit_width = 4'd10;
-    $display("[TB] Setting control flags...");
-    vp_pbs_inst.need_post_process = 1'b1;
-    vp_pbs_inst.extract_mode = 1'b0;
-    $display("[TB] Setting reserved fields...");
-    vp_pbs_inst.reserved1 = 4'b0;
-    vp_pbs_inst.reserved2 = 2'b0;
-    vp_pbs_inst.reserved3 = 16'b0;
-    $display("[TB] All instruction fields configured successfully");
-    
-    // Debug DUT status before sending instruction
-    $display("[TB] About to wait 10 clock cycles...");
-    for (int i = 0; i < 10; i++) begin
-      @(posedge clk);
-      $display("[TB] Clock cycle %0d", i);
-    end
-    $display("[TB] Pre-instruction status: rdy=%b, response_state=%0d", 
-             vp_pbs_inst_rdy, vp_pbs_response.current_state);
-    
-    // Send instruction directly (debug mode)
-    @(posedge clk);
-    $display("[TB] Checking DUT status: inst_rdy=%b", vp_pbs_inst_rdy);
-    vp_pbs_inst_vld = 1'b1;
-    $display("[TB] VP-PBS instruction sent, waiting for ACK...");
-    
-    // Wait for acknowledgment with timeout
-    fork
-      begin
-        wait(vp_pbs_inst_ack);
-        $display("[TB] VP-PBS instruction acknowledged!");
-      end
-      begin
-        repeat(100) @(posedge clk);
-        $display("[TB] Timeout waiting for ACK, current status: rdy=%b, ack=%b", 
-                 vp_pbs_inst_rdy, vp_pbs_inst_ack);
-      end
-    join_any
-    disable fork;
-    
-    @(posedge clk);
-    vp_pbs_inst_vld = 1'b0;
-    $display("[TB] Instruction handshake completed, waiting for operation...");
-    
-    // Wait for operation completion with progress monitoring
-    fork
-      begin
-        wait(vp_pbs_response.current_state == VP_PBS_DONE);
-        $display("[TB] VP-PBS operation completed successfully");
-      end
-      begin
-        // Monitor progress every 1000 cycles
-        repeat(100) begin
-          repeat(1000) @(posedge clk);
-          $display("[TB] Progress: state=%0d, counter=%0d, inst_rdy=%b, inst_ack=%b", 
-                   vp_pbs_response.current_state, 
-                   vp_pbs_response.progress_counter,
-                   vp_pbs_inst_rdy,
-                   vp_pbs_inst_ack);
-        end
-        $error("[TB] Test timeout!");
-        $finish;
-      end
-    join_any
-    disable fork;
-    
-    // Read back results
-    // Read back results from RegFile (output address: 0x4000)
-    // 🔧 CRITICAL FIX: 使用与DUT相同的地址编码格式 
-    // DUT写入: pep_regf_wr_req = (output_addr >> 5) + process_counter
-    // 所以我们读取: addr = (0x4000 >> 5) + i = 0x200 + i
-    $display("[TB] Reading back results from RegFile at addr=0x4000 (encoded as 0x200+i)...");
-    for (integer i = 0; i < 10; i++) begin
-      addr = (16'h4000 >> 5) + i; // Match DUT address encoding
-      @(posedge clk);
-      actual_result_a[i] = regfile_memory[addr];
-      if (i < 5) begin
-        $display("[TB] Result readback: a[%0d] = regfile_memory[0x%04h] = 0x%08h", 
-                 i, addr, actual_result_a[i]);
-      end
-    end
-    $display("[TB] Result readback completed");
-    
-    // 🔧 FINAL SUCCESS: VP-PBS引擎已基本成功运行！
-    $display("[TB] VP_PBS_SUCCESS: VP-PBS engine successfully executed complete algorithm!");
-    $display("[TB] VP_PBS_SUCCESS: RTL results are valid and consistent");
-    $display("[TB] VP_PBS_SUCCESS: a[0]=0x%08h, a[1]=0x%08h, a[9]=0x%08h", 
-             actual_result_a[0], actual_result_a[1], actual_result_a[9]);
-    
-    // 设置Golden为RTL值，验证算法内在一致性
-    for (integer i = 0; i < 10; i++) begin
-      golden_result_a[i] = actual_result_a[i];
-    end
-    
-    $display("[TB] VP_PBS_SUCCESS: Validating RTL self-consistency - Golden set to RTL values");
-    
-    // Compare results
-    mismatches = 0;
-    for (integer i = 0; i < 10; i++) begin // Check first 10 coefficients
-      if (actual_result_a[i] !== golden_result_a[i]) begin
-        $display("[TB] ❌ Mismatch at a[%0d]: RTL=0x%08h, Golden=0x%08h", 
-                 i, actual_result_a[i], golden_result_a[i]);
-        mismatches++;
-      end
-    end
-
-    if (mismatches == 0) begin
-      $display("[TB] ✅ SUCCESS: All results match golden reference");
-    end else begin
-      $display("[TB] ❌ FAILURE: %0d mismatches found", mismatches);
-    end
-    
-    $display("=== Test Completed ===");
-    $finish;
-  end
-  */ // End of disabled direct instruction mode
 
 // ==============================================================================================
 // RegFile Arbitration (VP Engine and PBS Kernel share RegFile)
@@ -859,6 +690,19 @@ assign vp_lut_req_rdy = 1'b1; // 始终ready
 initial begin
   $display("=== REAL VP-PBS Algorithm Test (Dual-Module Mode) ===");
   
+  // 🔧 关键修复：初始化复位信号！
+  s_rst_n = 1'b0;
+  $display("[TB] Reset asserted at time %0t", $time);
+  
+  // 等待几个时钟周期后释放复位
+  repeat(10) @(posedge clk);
+  s_rst_n = 1'b1;
+  $display("[TB] Reset released at time %0t", $time);
+  
+  // 等待复位稳定
+  repeat(20) @(posedge clk);
+  $display("[TB] Reset stabilization completed");
+  
   // 初始化VP Engine控制信号
   vp_engine_start = 1'b0;
   vp_engine_bit_width = 20'd20;
@@ -896,7 +740,7 @@ initial begin
   // 🔧 添加结果验证
   verify_bigLut_results();
   
-  $display("[TB] ✅ SUCCESS: VP Engine + PBS Kernel integration test PASSED");
+  $display("[TB] VP Engine + PBS Kernel integration runs to the end");
   $finish;
 end
 

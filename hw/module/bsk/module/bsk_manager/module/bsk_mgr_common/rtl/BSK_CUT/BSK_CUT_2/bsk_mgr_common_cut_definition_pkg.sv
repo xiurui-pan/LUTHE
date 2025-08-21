@@ -11,5 +11,5 @@
 // ==============================================================================================
 
 package bsk_mgr_common_cut_definition_pkg;
-  localparam int BSK_CUT_NB  = 2;
+  localparam int BSK_CUT_NB  = 2; // 🔧 Force BSK_CUT_NB=2 to match BSK_PC=2 configuration
 endpackage

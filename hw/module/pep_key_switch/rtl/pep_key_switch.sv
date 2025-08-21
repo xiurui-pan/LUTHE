@@ -343,4 +343,36 @@ module pep_key_switch
     .ks_seq_result_rdy (ks_seq_result_rdy)
   );
 
+// pragma translate_off
+  // SIM-ONLY: Top-level observability for KSK handshake and dataflow
+  logic seq_ks_cmd_avail_q;
+  logic batch_cmd_avail_q;
+  logic inc_ksk_wr_ptr_q;
+  always_ff @(posedge clk) begin
+    if (!s_rst_n) begin
+      seq_ks_cmd_avail_q <= 1'b0;
+      batch_cmd_avail_q <= 1'b0;
+      inc_ksk_wr_ptr_q <= 1'b0;
+    end else begin
+      if (ks_seq_cmd_enquiry)
+        $display("[KS_TOP] ks_seq_cmd_enquiry=1");
+      if (seq_ks_cmd_avail && !seq_ks_cmd_avail_q)
+        $display("[KS_TOP] seq_ks_cmd_avail=1 cmd=0x%0h", seq_ks_cmd);
+      if (batch_cmd_avail && !batch_cmd_avail_q)
+        $display("[KS_TOP] batch_cmd_avail=1 cmd=0x%0h", batch_cmd);
+      if (inc_ksk_wr_ptr && !inc_ksk_wr_ptr_q)
+        $display("[KS_TOP] inc_ksk_wr_ptr=1 (wr_ptr pulse)\n");
+      if (|ctrl_blram_rd_en)
+        $display("[KS_TOP] ctrl_blram_rd_en=0x%0h add[0]=0x%0h", ctrl_blram_rd_en, ctrl_blram_rd_add[0]);
+      if (blram_ctrl_rd_data_avail[0])
+        $display("[KS_TOP] blram_ctrl_rd_data_avail[0]=1 data[0]=0x%0h", blram_ctrl_rd_data[0]);
+      if (ks_seq_result_vld)
+        $display("[KS_TOP] ks_seq_result_vld=1 result=0x%0h", ks_seq_result);
+      seq_ks_cmd_avail_q <= seq_ks_cmd_avail;
+      batch_cmd_avail_q <= batch_cmd_avail;
+      inc_ksk_wr_ptr_q <= inc_ksk_wr_ptr;
+    end
+  end
+// pragma translate_on
+
 endmodule

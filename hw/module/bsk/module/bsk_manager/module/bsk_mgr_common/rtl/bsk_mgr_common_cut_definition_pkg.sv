@@ -1,1 +1,1 @@
-BSK_CUT/BSK_CUT_1/bsk_mgr_common_cut_definition_pkg.sv
+BSK_CUT/BSK_CUT_2/bsk_mgr_common_cut_definition_pkg.sv

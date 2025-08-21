@@ -347,4 +347,22 @@ module pep_ks_control
       pending_cmd        <= pending_cmdD;
     end
 
+// pragma translate_off
+  // SIM-ONLY debug: trace enquiry and reset behavior
+  logic ks_seq_cmd_enquiry_q;
+  always_ff @(posedge clk) begin
+    if (!s_rst_n) begin
+      ks_seq_cmd_enquiry_q <= 1'b0;
+    end else begin
+      if (reset_loop) begin
+        $display("[KSCtrl] reset_loop=1 (reset_cache asserted)");
+      end
+      if (ks_seq_cmd_enquiryD && !ks_seq_cmd_enquiry_q) begin
+        $display("[KSCtrl] ENQ asserted: enq_init_msb=%0b pending_cmd=%0b proc_almost_done=%0b", enq_init[ENQ_DEPTH-1], pending_cmd, proc_almost_done);
+      end
+      ks_seq_cmd_enquiry_q <= ks_seq_cmd_enquiryD;
+    end
+  end
+// pragma translate_on
+
 endmodule

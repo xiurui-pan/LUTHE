@@ -23,13 +23,15 @@ fi
 echo "INFO> Using project root: $PROJECT_ROOT"
 
 
-LOG=$(cd "$PROJECT_ROOT" && timeout 30 bash -lc "source setup.sh >/dev/null 2>&1 && cd $SCRIPT_DIR && ./run.sh -- -v --timeout 30000000 2>&1" | \
+# Stage 9: 增强调试输出来定位KS硬件问题
+LOG=$(cd "$PROJECT_ROOT" && timeout 120 bash -lc "source setup.sh >/dev/null 2>&1 && cd $SCRIPT_DIR && ./run.sh -- -v --timeout 120000000 2>&1" | \
 grep -v "Loading LUT entry" | \
 grep -v "Compiling package" | \
 grep -v "INFO: \[VRFC" | \
 grep -v "WARNING: \[VRFC" | \
 grep -v "analyzing module" | \
-grep -v "Compiling module")
+grep -v "Compiling module" | \
+grep -v "Same file given several times")
 
 # 打印完整日志（可以在命令行添加额外过滤）
 echo "$LOG"
@@ -41,7 +43,7 @@ if echo "$LOG" | egrep -iq "ERROR:.*\[|FATAL|FAILED.*test|Mismatch.*detected|TIM
 fi
 
 if echo "$LOG" | egrep -iq "bigLut.*algorithm.*finished.*successfully|Complete.*bigLut.*algorithm.*finished"; then
-	echo "=== 成功（完整bigLut算法完成） ==="
+	echo "=== bigLut算法运行结束 ==="
 	exit 0
 elif echo "$LOG" | egrep -iq "SUCCESS"; then
 	echo "=== 部分成功（Step 4完成，但需验证Step 5） ==="

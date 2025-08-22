@@ -19,12 +19,18 @@
 module tb_wop_vertical_packing_engine
   import common_definition_pkg::*;
   import param_tfhe_pkg::*;
+  import param_ntt_pkg::*;
+  import ntt_core_common_param_pkg::*;
+  import top_common_param_pkg::*;
   import regf_common_param_pkg::*;
   import axi_if_common_param_pkg::*;
   import axi_if_glwe_axi_pkg::*;
   import axi_if_bsk_axi_pkg::*;
   import axi_if_ksk_axi_pkg::*;
   import pep_common_param_pkg::*;
+  import pep_ks_common_param_pkg::*;
+  import bsk_mgr_common_param_pkg::*;
+  import ksk_mgr_common_param_pkg::*;
   import hpu_common_instruction_pkg::*;
   import vp_pbs_inst_pkg::*;
 #(
@@ -76,6 +82,56 @@ module tb_wop_vertical_packing_engine
   logic pbs_inst_ack;
   logic [LWE_K_W-1:0] pbs_inst_ack_br_loop;
   logic pbs_inst_load_blwe_ack;
+  
+  // KS interface - shared between VP-PBS and regular PBS  
+  logic ks_seq_cmd_enquiry;
+  logic [KS_CMD_W-1:0] seq_ks_cmd;
+  logic seq_ks_cmd_avail;
+  logic [KS_RESULT_W-1:0] ks_seq_result;
+  logic ks_seq_result_vld;
+  logic ks_seq_result_rdy;
+
+  // Real pe_pbs_with_ks interface signals
+  // KSK coefficient interface
+  logic [LBX-1:0][LBY-1:0][LBZ-1:0][MOD_KSK_W-1:0] ksk_coeff;
+  logic [LBX-1:0][LBY-1:0] ksk_coeff_vld;
+  logic [LBX-1:0][LBY-1:0] ksk_coeff_rdy;
+  
+  // Load BLWE interface
+  logic [LOAD_BLWE_CMD_W-1:0] seq_ldb_cmd;
+  logic seq_ldb_vld;
+  logic seq_ldb_rdy;
+  logic ldb_seq_done;
+  
+  // Body RAM interface
+  logic ks_boram_wr_en;
+  logic [LWE_COEF_W-1:0] ks_boram_data;
+  logic [PID_W-1:0] ks_boram_pid;
+  logic ks_boram_parity;
+  
+  // Batch command interface
+  logic [KS_BATCH_CMD_W-1:0] ks_batch_cmd;
+  logic ks_batch_cmd_avail;
+  
+  // Control signals
+  logic inc_ksk_wr_ptr;
+  logic inc_ksk_rd_ptr;
+  logic reset_ks_cache;
+  
+  // Error and info
+  pep_error_t pep_ks_error;
+  pep_info_t pep_ks_info;
+  pep_counter_inc_t pep_ks_counter_inc;
+  
+  // KS dedicated RegFile read interface
+  logic pep_ks_regf_rd_req_vld;
+  logic pep_ks_regf_rd_req_rdy;
+  logic [REGF_RD_REQ_W-1:0] pep_ks_regf_rd_req;
+  
+  // VP-PBS DUT dedicated RegFile read interface
+  logic pep_dut_regf_rd_req_vld;
+  logic pep_dut_regf_rd_req_rdy;
+  logic [REGF_RD_REQ_W-1:0] pep_dut_regf_rd_req;
   
   // RegFile interface
   logic pep_regf_wr_req_vld;
@@ -309,9 +365,9 @@ module tb_wop_vertical_packing_engine
     .pep_regf_wr_data(pep_regf_wr_data),
     .regf_pep_wr_ack(regf_pep_wr_ack),
     
-    .pep_regf_rd_req_vld(pep_regf_rd_req_vld),
-    .pep_regf_rd_req_rdy(pep_regf_rd_req_rdy),
-    .pep_regf_rd_req(pep_regf_rd_req),
+    .pep_regf_rd_req_vld(pep_dut_regf_rd_req_vld),
+    .pep_regf_rd_req_rdy(pep_dut_regf_rd_req_rdy),
+    .pep_regf_rd_req(pep_dut_regf_rd_req),
     .regf_pep_rd_data_avail(regf_pep_rd_data_avail),
     .regf_pep_rd_data(regf_pep_rd_data),
     .regf_pep_rd_last_word(regf_pep_rd_last_word),
@@ -365,7 +421,15 @@ module tb_wop_vertical_packing_engine
     .pbs_inst_rdy(pbs_inst_rdy),
     .pbs_inst_ack(pbs_inst_ack),
     .pbs_inst_ack_br_loop(pbs_inst_ack_br_loop),
-    .pbs_inst_load_blwe_ack(pbs_inst_load_blwe_ack)
+    .pbs_inst_load_blwe_ack(pbs_inst_load_blwe_ack),
+    
+    // KS Interface - External shared KS system connection
+    .ks_seq_cmd_enquiry(ks_seq_cmd_enquiry),
+    .seq_ks_cmd(seq_ks_cmd), 
+    .seq_ks_cmd_avail(seq_ks_cmd_avail),
+    .ks_seq_result(ks_seq_result),
+    .ks_seq_result_vld(ks_seq_result_vld),
+    .ks_seq_result_rdy(ks_seq_result_rdy)
   );
   
   // ==============================================================================================
@@ -1029,6 +1093,107 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     end
   end
 end
+
+// ==============================================================================================
+// Real pe_pbs_with_ks Instance - Actual Key Switching Hardware
+// ==============================================================================================
+// Real implementation of the KS system using pe_pbs_with_ks module
+
+// Initialize KSK coefficient data (simplified for testbench)
+always_comb begin
+  // Provide mock KSK coefficient data
+  for (int i = 0; i < LBX; i++) begin
+    for (int j = 0; j < LBY; j++) begin
+      ksk_coeff_vld[i][j] = 1'b1; // Always valid for testbench
+      for (int k = 0; k < LBZ; k++) begin
+        // Use simple pattern for KSK coefficients
+        ksk_coeff[i][j][k] = 32'h12345678 + (i << 16) + (j << 8) + k;
+      end
+    end
+  end
+end
+
+// Simple load BLWE control (not used in VP-PBS case)
+assign seq_ldb_cmd = '0;
+assign seq_ldb_vld = 1'b0;
+
+// Reset cache control
+assign reset_ks_cache = ~s_rst_n;
+assign inc_ksk_wr_ptr = 1'b0; // Controlled by KS module
+
+// RegFile read arbitration - KS has priority over VP-PBS DUT
+// Only one module can access RegFile at a time
+assign pep_ks_regf_rd_req_rdy = pep_regf_rd_req_rdy && !pep_dut_regf_rd_req_vld;
+assign pep_dut_regf_rd_req_rdy = pep_regf_rd_req_rdy && !pep_ks_regf_rd_req_vld;
+
+// Mux the requests to shared RegFile interface
+assign pep_regf_rd_req_vld = pep_ks_regf_rd_req_vld || pep_dut_regf_rd_req_vld;
+assign pep_regf_rd_req = pep_ks_regf_rd_req_vld ? pep_ks_regf_rd_req : pep_dut_regf_rd_req;
+
+pe_pbs_with_ks #(
+  .MOD_MULT_TYPE(set_mod_mult_type(MOD_NTT_TYPE)),
+  .REDUCT_TYPE(set_mod_reduct_type(MOD_NTT_TYPE)),
+  .MULT_TYPE(set_ntt_mult_type(MOD_NTT_W,MOD_NTT_TYPE)),
+  .PP_MOD_MULT_TYPE(set_mod_mult_type(MOD_NTT_TYPE)),
+  .PP_MULT_TYPE(set_ntt_mult_type(MOD_NTT_W,MOD_NTT_TYPE)),
+  .MODSW_2_PRECISION_W(MOD_NTT_W + 32),
+  .MODSW_2_MULT_TYPE(set_mult_type(MOD_NTT_W + 32)),
+  .MODSW_MULT_TYPE(set_mult_type(MOD_NTT_W)),
+  .RAM_LATENCY(2),
+  .URAM_LATENCY(3),
+  .ROM_LATENCY(2),
+  .PHYS_RAM_DEPTH(1024)
+) u_real_ks (
+  .clk(clk),
+  .s_rst_n(s_rst_n),
+  
+  // RegFile interface - connect to shared RegFile
+  .pep_regf_rd_req_vld(pep_ks_regf_rd_req_vld),
+  .pep_regf_rd_req_rdy(pep_ks_regf_rd_req_rdy),
+  .pep_regf_rd_req(pep_ks_regf_rd_req),
+  .regf_pep_rd_data_avail(regf_pep_rd_data_avail),
+  .regf_pep_rd_data(regf_pep_rd_data),
+  .regf_pep_rd_last_word(regf_pep_rd_last_word),
+  .regf_pep_rd_is_body(1'b0),
+  .regf_pep_rd_last_mask(1'b0),
+  
+  // KSK coefficient interface
+  .ksk(ksk_coeff),
+  .ksk_vld(ksk_coeff_vld),
+  .ksk_rdy(ksk_coeff_rdy),
+  
+  // Load BLWE interface
+  .seq_ldb_cmd(seq_ldb_cmd),
+  .seq_ldb_vld(seq_ldb_vld),
+  .seq_ldb_rdy(seq_ldb_rdy),
+  .ldb_seq_done(ldb_seq_done),
+  
+  // KS interface - connect to VP-PBS external interface
+  .ks_seq_cmd_enquiry(ks_seq_cmd_enquiry),
+  .seq_ks_cmd(seq_ks_cmd),
+  .seq_ks_cmd_avail(seq_ks_cmd_avail),
+  .ks_seq_result(ks_seq_result),
+  .ks_seq_result_vld(ks_seq_result_vld),
+  .ks_seq_result_rdy(ks_seq_result_rdy),
+  
+  // Body RAM interface
+  .ks_boram_wr_en(ks_boram_wr_en),
+  .ks_boram_data(ks_boram_data),
+  .ks_boram_pid(ks_boram_pid),
+  .ks_boram_parity(ks_boram_parity),
+  
+  // Control interface
+  .inc_ksk_wr_ptr(inc_ksk_wr_ptr),
+  .inc_ksk_rd_ptr(inc_ksk_rd_ptr),
+  .ks_batch_cmd(ks_batch_cmd),
+  .ks_batch_cmd_avail(ks_batch_cmd_avail),
+  .reset_cache(reset_ks_cache),
+  
+  // Error and info
+  .pep_error(pep_ks_error),
+  .pep_rif_info(pep_ks_info),
+  .pep_rif_counter_inc(pep_ks_counter_inc)
+);
 
 // ==============================================================================================
 // Timeout and Monitoring

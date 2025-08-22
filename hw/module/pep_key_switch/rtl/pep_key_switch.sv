@@ -344,33 +344,67 @@ module pep_key_switch
   );
 
 // pragma translate_off
-  // SIM-ONLY: Top-level observability for KSK handshake and dataflow
+  // SIM-ONLY: Enhanced KS dataflow debug prints for VP-PBS integration
   logic seq_ks_cmd_avail_q;
   logic batch_cmd_avail_q;
   logic inc_ksk_wr_ptr_q;
+  logic ks_seq_result_vld_q;
+  logic ks_seq_result_rdy_q;
   always_ff @(posedge clk) begin
     if (!s_rst_n) begin
       seq_ks_cmd_avail_q <= 1'b0;
       batch_cmd_avail_q <= 1'b0;
       inc_ksk_wr_ptr_q <= 1'b0;
+      ks_seq_result_vld_q <= 1'b0;
+      ks_seq_result_rdy_q <= 1'b0;
     end else begin
+      // Command enquiry from VP-PBS
       if (ks_seq_cmd_enquiry)
-        $display("[KS_TOP] ks_seq_cmd_enquiry=1");
-      if (seq_ks_cmd_avail && !seq_ks_cmd_avail_q)
-        $display("[KS_TOP] seq_ks_cmd_avail=1 cmd=0x%0h", seq_ks_cmd);
+        $display("[KS_TOP] ★ VP-PBS enquiry: ks_seq_cmd_enquiry=1");
+      
+      // Command received from sequencer (VP-PBS)
+      if (seq_ks_cmd_avail && !seq_ks_cmd_avail_q) begin
+        $display("[KS_TOP] ★ Command received: seq_ks_cmd_avail=1 cmd=0x%0h", seq_ks_cmd);
+        $display("[KS_TOP]   - Decoded: ks_loop=%0d rp=%0d wp=%0d", 
+          seq_ks_cmd[2:0], seq_ks_cmd[12:3], seq_ks_cmd[22:13]);
+      end
+      
+      // Batch command to KSK manager
       if (batch_cmd_avail && !batch_cmd_avail_q)
-        $display("[KS_TOP] batch_cmd_avail=1 cmd=0x%0h", batch_cmd);
+        $display("[KS_TOP] ★ Batch cmd to KSK mgr: batch_cmd_avail=1 cmd=0x%0h", batch_cmd);
+      
+      // KSK write pointer increment
       if (inc_ksk_wr_ptr && !inc_ksk_wr_ptr_q)
-        $display("[KS_TOP] inc_ksk_wr_ptr=1 (wr_ptr pulse)\n");
+        $display("[KS_TOP] ★ KSK wr_ptr increment pulse");
+      
+      // BLWE RAM read operations  
       if (|ctrl_blram_rd_en)
-        $display("[KS_TOP] ctrl_blram_rd_en=0x%0h add[0]=0x%0h", ctrl_blram_rd_en, ctrl_blram_rd_add[0]);
+        $display("[KS_TOP] ★ BLWE RAM read: ctrl_blram_rd_en=0x%0h add[0]=0x%0h", ctrl_blram_rd_en, ctrl_blram_rd_add[0]);
+      
+      // BLWE data available from RAM
       if (blram_ctrl_rd_data_avail[0])
-        $display("[KS_TOP] blram_ctrl_rd_data_avail[0]=1 data[0]=0x%0h", blram_ctrl_rd_data[0]);
-      if (ks_seq_result_vld)
-        $display("[KS_TOP] ks_seq_result_vld=1 result=0x%0h", ks_seq_result);
+        $display("[KS_TOP] ★ BLWE data ready: blram_ctrl_rd_data_avail[0]=1 data[0]=0x%0h", blram_ctrl_rd_data[0]);
+      
+      // Result handshake with VP-PBS
+      if (ks_seq_result_vld && !ks_seq_result_vld_q)
+        $display("[KS_TOP] ★ Result valid: ks_seq_result_vld=1→ result=0x%0h", ks_seq_result);
+      
+      if (ks_seq_result_rdy && !ks_seq_result_rdy_q)
+        $display("[KS_TOP] ★ Result accepted: ks_seq_result_rdy=1 (VP-PBS ready)");
+      
+      if (ks_seq_result_vld && ks_seq_result_rdy)
+        $display("[KS_TOP] ★★★ KS RESULT TRANSFERRED TO VP-PBS ★★★ result=0x%0h", ks_seq_result);
+        
+      // KSK error monitoring
+      if (ks_error != '0)
+        $display("[KS_TOP] ★ ERROR: ks_error=0x%0h", ks_error);
+      
+      // Update previous values
       seq_ks_cmd_avail_q <= seq_ks_cmd_avail;
       batch_cmd_avail_q <= batch_cmd_avail;
       inc_ksk_wr_ptr_q <= inc_ksk_wr_ptr;
+      ks_seq_result_vld_q <= ks_seq_result_vld;
+      ks_seq_result_rdy_q <= ks_seq_result_rdy;
     end
   end
 // pragma translate_on

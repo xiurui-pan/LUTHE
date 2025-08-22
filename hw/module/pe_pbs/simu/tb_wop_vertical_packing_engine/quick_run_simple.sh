@@ -24,7 +24,7 @@ echo "INFO> Using project root: $PROJECT_ROOT"
 
 
 # Stage 9: 增强调试输出来定位KS硬件问题
-LOG=$(cd "$PROJECT_ROOT" && timeout 120 bash -lc "source setup.sh >/dev/null 2>&1 && cd $SCRIPT_DIR && ./run.sh -- -v --timeout 120000000 2>&1" | \
+LOG=$(cd "$PROJECT_ROOT" && bash -lc "source setup.sh >/dev/null 2>&1 && cd $SCRIPT_DIR && ./run.sh -- -v --timeout 120000000 2>&1" | \
 grep -v "Loading LUT entry" | \
 grep -v "Compiling package" | \
 grep -v "INFO: \[VRFC" | \

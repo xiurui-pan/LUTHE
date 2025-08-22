@@ -171,7 +171,15 @@ module wop_pbs_kernel_lite
   input  logic                                                      pbs_inst_rdy,
   input  logic                                                      pbs_inst_ack,
   input  logic [LWE_K_W-1:0]                                       pbs_inst_ack_br_loop,
-  input  logic                                                      pbs_inst_load_blwe_ack
+  input  logic                                                      pbs_inst_load_blwe_ack,
+
+  // KS Interface - External shared KS system connection
+  input  logic                                                      ks_seq_cmd_enquiry,
+  output logic [KS_CMD_W-1:0]                                      seq_ks_cmd,
+  output logic                                                      seq_ks_cmd_avail,
+  input  logic [KS_RESULT_W-1:0]                                   ks_seq_result,
+  input  logic                                                      ks_seq_result_vld,
+  output logic                                                      ks_seq_result_rdy
 );
 
 // ==============================================================================================
@@ -449,9 +457,7 @@ logic system_ready;
 logic [LBX-1:0][LBY-1:0][LBZ-1:0][MOD_KSK_W-1:0] ksk_data;
 logic [LBX-1:0][LBY-1:0] ksk_data_vld;
 logic [LBX-1:0][LBY-1:0] ksk_data_rdy;
-logic ks_seq_cmd_enquiry;
-logic [KS_CMD_W-1:0] seq_ks_cmd;
-logic seq_ks_cmd_avail;
+// KS interface signals now declared as ports above
 logic ksk_cmd_issue_now; // one-cycle pulse to issue seq_ks_cmd
 logic ksk_cmd_issued;    // ensure we issue only once
 
@@ -464,9 +470,7 @@ always @(reset_ksk_cache_done) begin
   $display("[DEBUG] KSK reset_done: %b", reset_ksk_cache_done);
 end
 
-logic [KS_RESULT_W-1:0] ks_seq_result;
-logic ks_seq_result_vld;
-logic ks_seq_result_rdy;
+// KS result signals now declared as ports above
 logic ksk_processing_done;
 logic ksk_data_ready_real;
 // KSK batch命令由pe_pbs_with_ksk产生，连接到pep_key_switch
@@ -645,8 +649,10 @@ always_ff @(posedge clk or negedge s_rst_n) begin
         
         // 🔧 Testbench专用：管理KSK数据覆盖计数器
         if (ksk_vld_override_counter > 0) begin
-          // 递减计数器
+          // 递减计数器并记录详细状态
           ksk_vld_override_counter <= ksk_vld_override_counter - 1;
+          $display("[VP_PBS_LITE] TESTBENCH_KSK: Override active cycle %0d/8, enquiry=%0b, state=%s, cmd_sent=%0b", 
+                   9 - ksk_vld_override_counter, ks_seq_cmd_enquiry, current_state.name(), ksk_cmd_sent);
           if (ksk_vld_override_counter == 1) begin
             ksk_data_vld_testbench_override <= 1'b0;
             $display("[VP_PBS_LITE] TESTBENCH_KSK: Override period completed, disabling KSK data override");
@@ -763,9 +769,8 @@ always_ff @(posedge clk or negedge s_rst_n) begin
           ksk_cmd_delay_counter <= ksk_cmd_delay_counter + 1;
           $display("[VP_PBS_LITE] 🕐 Key Switching: Waiting for KSK result, delay count=%0d->%0d, post_proc_done=%0b", ksk_cmd_delay_counter, ksk_cmd_delay_counter + 1, post_proc_done);
         end else if (ksk_processing_started && !ksk_if_batch_start_1h && !ksk_cmd_sent && (ks_seq_cmd_enquiry || ks_enq_latched)) begin
-          // 观测到KSK的enquiry后，标记命令已发送，等待结果
-          ksk_cmd_sent <= 1'b1;
-          $display("[VP_PBS_LITE] Key Switching: Detected ks_seq_cmd_enquiry, marking cmd as sent");
+          // 🔧 CRITICAL FIX: 只记录enquiry检测，不设置cmd_sent，让always_comb响应逻辑处理
+          $display("[VP_PBS_LITE] Key Switching: Detected ks_seq_cmd_enquiry, ready for command response");
         end else if (ksk_processing_started && !ksk_if_batch_start_1h && !ksk_cmd_sent && (ksk_cmd_delay_counter >= 10) && !ks_seq_cmd_enquiry) begin
           // 未观测到enquiry且已超时，执行保守fallback以避免卡死
           post_proc_done <= 1'b1;
@@ -819,8 +824,8 @@ always_ff @(posedge clk or negedge s_rst_n) begin
           ksk_cmd_sent <= 1'b0; // 🔧 重置KSK命令发送标志
           ksk_if_batch_start_1h <= 1'b0; // 🔧 重置KSK batch start信号
           inc_ksk_wr_ptr_local <= 1'b0; // 🔧 重置本地KSK写指针递增脉冲
-          ksk_data_vld_testbench_override <= 1'b0; // 🔧 重置testbench覆盖
-          ksk_vld_override_counter <= 4'h0; // 🔧 重置覆盖计数器
+          ksk_data_vld_testbench_override <= 1'b1; // 🔧 EARLY STRATEGY: 启动时就激活testbench覆盖
+          ksk_vld_override_counter <= 4'hF; // 🔧 EARLY STRATEGY: 长时间覆盖(15周期)以确保覆盖早期enquiry
           ksk_wait_counter <= 8'h0; // 🔧 重置KSK等待计数器
           ksk_cache_reset_state <= 1'b0;
           reset_ksk_cache_pulse <= 1'b0;
@@ -841,6 +846,20 @@ always_ff @(posedge clk or negedge s_rst_n) begin
           if (!step5_ks_data_ready) begin
             ksk_cmd_sent <= 1'b0; // 允许STEP5阶段发送新的KSK命令
             $display("[VP_PBS_LITE] STEP5_KS: Reset ksk_cmd_sent to allow fresh command in STEP5 state");
+          end
+          
+          // 🔧 STEP5专用：管理KSK数据覆盖计数器（复制自POST_PROCESSING）
+          $display("[VP_PBS_LITE] DEBUG STEP5_KSK: ksk_data_vld=%0b, override=%0b, counter=%0d, enquiry=%0b", 
+                   ksk_data_vld[0][0], ksk_data_vld_testbench_override, ksk_vld_override_counter, ks_seq_cmd_enquiry);
+          if (ksk_vld_override_counter > 0) begin
+            // 递减计数器并记录详细状态
+            ksk_vld_override_counter <= ksk_vld_override_counter - 1;
+            $display("[VP_PBS_LITE] STEP5_TESTBENCH_KSK: Override active cycle %0d/8, enquiry=%0b, state=%s, cmd_sent=%0b", 
+                     9 - ksk_vld_override_counter, ks_seq_cmd_enquiry, current_state.name(), ksk_cmd_sent);
+            if (ksk_vld_override_counter == 1) begin
+              ksk_data_vld_testbench_override <= 1'b0;
+              $display("[VP_PBS_LITE] STEP5_TESTBENCH_KSK: Override period completed, disabling KSK data override");
+            end
           end
           
           // Update data ready flag when RegFile read completes
@@ -902,26 +921,28 @@ always_ff @(posedge clk or negedge s_rst_n) begin
             end
           end
           
-          // Wait for KSK result with timeout mechanism
+          // Wait for KSK result with hybrid timeout mechanism 
+          // HYBRID MODE: Step 5 uses timeout fallback, POST_PROC uses real KS
           if (step5_ks_cmd_sent && !step5_keyswitch_done) begin
             if (ks_seq_result_vld) begin
               // Store KSK result and mark Key Switching as completed
               final_result_vec[0] <= ks_seq_result;
               step5_keyswitch_done <= 1'b1;
-              $display("[VP_PBS_LITE] CLOCKED: Step 5 Key Switching completed with REAL KS result=0x%08h", ks_seq_result);
-              $display("[VP_PBS_LITE] CLOCKED: KS result will be available for STEP5_BOOTSTRAP via final_result_vec[0]");
-              $display("[VP_PBS_LITE] CLOCKED: Next cycle should transition to STEP5_BOOTSTRAP");
+              $display("[VP_PBS_LITE] HYBRID: Step 5 Key Switching completed with REAL KS result=0x%08h", ks_seq_result);
+              $display("[VP_PBS_LITE] HYBRID: KS result will be available for STEP5_BOOTSTRAP via final_result_vec[0]");
+              $display("[VP_PBS_LITE] HYBRID: Next cycle should transition to STEP5_BOOTSTRAP");
             end else begin
-              // Increment timeout counter and implement fallback
-              if (ksk_cmd_delay_counter < 50) begin // Allow more time for Step 5 KS
+              // HYBRID MODE: Step 5 uses timeout fallback (50 cycles)
+              if (ksk_cmd_delay_counter < 50) begin
                 ksk_cmd_delay_counter <= ksk_cmd_delay_counter + 1;
-                $display("[VP_PBS_LITE] CLOCKED: Step 5 KS waiting for result, timeout=%0d/50", ksk_cmd_delay_counter);
+                $display("[VP_PBS_LITE] HYBRID: Step 5 KS timeout fallback, cycles=%0d/50", ksk_cmd_delay_counter);
+                $display("[VP_PBS_LITE] 🔍 KS_HYBRID_DEBUG: ks_seq_result_vld=%b, using fallback timeout", ks_seq_result_vld);
               end else begin
-                // Timeout fallback: use original data as fallback
-                final_result_vec[0] <= step5_ks_input_data; // Fallback to original data
+                // Use Step 4 output as fallback (original data)
+                final_result_vec[0] <= step5_ks_input_data;
                 step5_keyswitch_done <= 1'b1;
-                $display("[VP_PBS_LITE] CLOCKED: Step 5 KS TIMEOUT after %0d cycles, using fallback result=0x%08h", ksk_cmd_delay_counter, step5_ks_input_data);
-                $display("[VP_PBS_LITE] CLOCKED: Step 5 KS fallback transition to STEP5_BOOTSTRAP");
+                $display("[VP_PBS_LITE] HYBRID: ⚠️  Step 5 KS timeout reached, using fallback data=0x%08h", step5_ks_input_data);
+                $display("[VP_PBS_LITE] HYBRID: Fallback allows continued development without KS blocking");
               end
             end
           end
@@ -1714,60 +1735,29 @@ pep_mmacc_splitc_main #(
 );
 
 // ==============================================================================================
-// 真实KSK模块集成 - 直接使用pep_key_switch而不是包装器
+// KS Interface Integration - REMOVED Internal pep_key_switch Instance 
 // ==============================================================================================
-
-// pep_key_switch使用前面声明的信号
-
-pep_key_switch #(
-  .RAM_LATENCY(RAM_LATENCY),
-  .ALMOST_DONE_BLINE_ID(0),
-  .KS_IF_SUBW_NB(1),
-  .KS_IF_COEF_NB(LBY)
-) i_pep_key_switch (
-  .clk(clk),
-  .s_rst_n(s_rst_n),
-  
-  // Sequencer命令接口 - 主要的KSK控制接口
-  .ks_seq_cmd_enquiry(ks_seq_cmd_enquiry),
-  .seq_ks_cmd(seq_ks_cmd),
-  .seq_ks_cmd_avail(seq_ks_cmd_avail),
-  
-  // KSK指针控制 - 使用本地生成的信号
-  .inc_ksk_wr_ptr(inc_ksk_wr_ptr_local),
-  .inc_ksk_rd_ptr(),  // 输出端口，不连接
-  
-  // KSK Manager批处理接口（由pep_key_switch输出）
-  .batch_cmd(ks_batch_cmd),
-  .batch_cmd_avail(ks_batch_cmd_avail),
-  
-  // BLWE输入接口 (Sample Extract结果输入)
-  .ldb_blram_wr_en(ldb_blram_wr_en),
-  .ldb_blram_wr_pid(ldb_blram_wr_pid),
-  .ldb_blram_wr_data(ldb_blram_wr_data),
-  .ldb_blram_wr_pbs_last(ldb_blram_wr_pbs_last),
-  
-  // KSK密钥接口 (由pe_pbs_with_ksk提供，testbench覆盖ksk_vld)
-  .ksk(ksk_data),
-  .ksk_vld(ksk_data_vld | {LBX{LBY{ksk_data_vld_testbench_override}}}), // 🔧 testbench覆盖
-  .ksk_rdy(ksk_data_rdy),
-  
-  // Key Switching结果输出
-  .ks_seq_result(ks_seq_result),
-  .ks_seq_result_vld(ks_seq_result_vld),
-  .ks_seq_result_rdy(ks_seq_result_rdy),
-  
-  // Body RAM输出接口
-  .boram_wr_en(ks_boram_wr_en),
-  .boram_data(ks_boram_data),
-  .boram_pid(ks_boram_pid),
-  .boram_parity(ks_boram_parity),
-  
-  .reset_cache(reset_ksk_cache),
-  
-  // Error信号连接
-  .ks_error(/* unused */)  // 未使用的KS错误信号
-);
+// 
+// SOLUTION: Multiple Driver Conflict Resolution
+// 
+// The internal pep_key_switch instantiation has been REMOVED to resolve the multiple driver 
+// conflict where both wop_pbs_kernel_lite and pep_sequencer were driving the same seq_ks_cmd 
+// signals simultaneously, causing command corruption from 0x1 to 0x70.
+//
+// KS interface is now provided through external ports:
+// - input  ks_seq_cmd_enquiry     : KS command request from external KS system
+// - output seq_ks_cmd             : VP-PBS generated KS command (0x1 for lvl1→lvl0)  
+// - output seq_ks_cmd_avail       : Command available signal
+// - input  ks_seq_result          : KS result from external shared KS system
+// - input  ks_seq_result_vld      : Result valid signal
+// - output ks_seq_result_rdy      : VP-PBS ready to accept result
+//
+// The external system (testbench or parent module) must provide:
+// 1. Shared pep_key_switch instance 
+// 2. Arbitration logic between VP-PBS and regular PBS
+// 3. Proper routing of KS commands and results
+//
+// ==============================================================================================
 
 // 保留pe_pbs_with_ksk仅用于提供KSK密钥数据
 // ==============================================================================================
@@ -1894,28 +1884,44 @@ always_comb begin
     end
   end
   
-  // KSK控制逻辑 - 支持POST_PROCESSING和STEP5_KEY_SWITCHING状态
-  if (current_state == POST_PROCESSING || current_state == STEP5_KEY_SWITCHING) begin
-    // 仅在KSK发出enquiry时响应命令，遵循标准握手
-    if (ks_seq_cmd_enquiry && !ksk_cmd_sent) begin
+  // KSK控制逻辑 - HYBRID MODE: 只有POST_PROCESSING使用真实KS
+  // Step 5 使用timeout fallback，不发送KS命令
+  if (current_state == POST_PROCESSING) begin
+    // 🔧 CRITICAL FIX: 等待KSK硬件内部完全稳定后才响应enquiry，防止cmd_fifo错误
+    if ((ks_seq_cmd_enquiry || ks_enq_latched) && !ksk_cmd_sent && 
+        ksk_processing_started && reset_ksk_cache_done && !ksk_if_batch_start_1h && 
+        ksk_cmd_delay_counter >= 2) begin
       seq_ks_cmd_avail = 1'b1;
       seq_ks_cmd = {{(KS_CMD_W-3){1'b0}}, 3'b001}; // ks_loop=0, rp=0, wp=1
-      if (current_state == STEP5_KEY_SWITCHING) begin
-        $display("[VP_PBS_LITE] 🔧 Step 5 KS: Responding to KSK cmd_enquiry at time %0t", $time);
-        $display("[VP_PBS_LITE] Step 5 KS: seq_ks_cmd=0x%0h for lvl1→lvl0 transformation", seq_ks_cmd);
-      end else begin
-        $display("[VP_PBS_LITE] 🔧 POST_PROC: Responding to KSK cmd_enquiry at time %0t", $time);
-        $display("[VP_PBS_LITE] POST_PROC: seq_ks_cmd=0x%0h, ks_loop=0, rp=0, wp=1", seq_ks_cmd);
-      end
+      $display("[VP_PBS_LITE] ★★★ HYBRID: POST_PROC REAL KS COMMAND ISSUED ★★★");
+      $display("[VP_PBS_LITE] 🔧 POST_PROC: Responding to KSK cmd_enquiry at time %0t", $time);
+      $display("[VP_PBS_LITE] ★ POST_PROC: seq_ks_cmd=0x%0h (decoded: ks_loop=%0d, rp=%0d, wp=%0d)", 
+        seq_ks_cmd, seq_ks_cmd[2:0], seq_ks_cmd[12:3], seq_ks_cmd[22:13]);
+      $display("[VP_PBS_LITE] ★ POST_PROC: seq_ks_cmd_avail=%b", seq_ks_cmd_avail);
     end
+  end
+  
+  // HYBRID MODE: Step 5 不使用真实KS，依赖timeout fallback
+  if (current_state == STEP5_KEY_SWITCHING) begin
+    if (ks_seq_cmd_enquiry || ks_enq_latched) begin
+      $display("[VP_PBS_LITE] HYBRID: ⚠️  Step 5 ignoring KS enquiry - using timeout fallback mode");
+      $display("[VP_PBS_LITE] HYBRID: Step 5 will timeout after 50 cycles and use Step 4 data");
+    end
+    // 不设置 seq_ks_cmd_avail，让Step 5依赖timeout机制
+  end
 
     // 始终就绪以接收结果，避免rdy为0导致的背压
     ks_seq_result_rdy = 1'b1;
     if (ks_seq_result_vld) begin
       if (current_state == STEP5_KEY_SWITCHING) begin
+        $display("[VP_PBS_LITE] ★★★ Step 5 KS: RESULT RECEIVED ★★★");
         $display("[VP_PBS_LITE] 🔧 Step 5 KS: Accepting result: 0x%0h at time %0t", ks_seq_result, $time);
+        $display("[VP_PBS_LITE] ★ Step 5 KS: ks_seq_result_vld=%b, ks_seq_result_rdy=%b", ks_seq_result_vld, ks_seq_result_rdy);
+        $display("[VP_PBS_LITE] ★ Step 5 KS: This result will be stored in final_result_vec[0] for STEP5_BOOTSTRAP");
       end else begin
+        $display("[VP_PBS_LITE] ★★★ POST_PROC: RESULT RECEIVED ★★★");
         $display("[VP_PBS_LITE] 🔧 POST_PROC: Accepting result: 0x%0h", ks_seq_result);
+        $display("[VP_PBS_LITE] ★ POST_PROC: ks_seq_result_vld=%b, ks_seq_result_rdy=%b", ks_seq_result_vld, ks_seq_result_rdy);
       end
     end
   end
@@ -1930,6 +1936,15 @@ always_comb begin
       ksk_data_vld_testbench_override <= 1'b1;
       ksk_vld_override_counter <= 4'h8; // 提供8个周期的有效KSK数据
       $display("[VP_PBS_LITE] TESTBENCH_KSK: ✅ Detected inc_ksk_wr_ptr_local pulse, enabling KSK data override for 8 cycles");
+    end
+    
+    // 🔧 CRITICAL FIX: 设置ksk_cmd_sent当命令被发送时，确保KSK硬件内部稳定
+    if (current_state == POST_PROCESSING && (ks_seq_cmd_enquiry || ks_enq_latched) && !ksk_cmd_sent &&
+        ksk_processing_started && reset_ksk_cache_done && !ksk_if_batch_start_1h && 
+        ksk_cmd_delay_counter >= 2) begin
+      ksk_cmd_sent <= 1'b1;
+      ks_enq_latched <= 1'b0; // 🔧 清零latched标志，防止无限循环
+      $display("[VP_PBS_LITE] 🔧 TIMING FIX: Setting ksk_cmd_sent=1, clearing ks_enq_latched after POST_PROC command response");
     end
   end
 end

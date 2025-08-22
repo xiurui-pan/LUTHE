@@ -123,13 +123,26 @@ module pep_ks_control
   );
 
 // pragma translate_off
-  always_ff @(posedge clk)
+  // Enhanced debug prints for KS control flow tracking
+  always_ff @(posedge clk) begin
     if (seq_ks_cmd_vld) begin
       assert(seq_ks_cmd_rdy)
       else begin
         $fatal(1, "%t > ERROR: s0_cmd_fifo_element is not ready for KS command!", $time);
       end
+      // Debug: Command received and processing
+      $display("[KS_CTRL] ★ Command processing: seq_ks_cmd=0x%0h rdy=%0d", seq_ks_cmd, seq_ks_cmd_rdy);
+      $display("[KS_CTRL]   - Raw command decode: ks_loop=%0d rp=%0d wp=%0d", 
+        seq_ks_cmd[2:0], seq_ks_cmd[12:3], seq_ks_cmd[22:13]);
     end
+    
+    // Track command forwarding to result formatter and body mapper
+    if (ctrl_res_cmd_vld && ctrl_res_cmd_rdy)
+      $display("[KS_CTRL] ★ Command sent to result formatter: cmd=0x%0h", ctrl_res_cmd);
+    
+    if (ctrl_bmap_cmd_vld && ctrl_bmap_cmd_rdy)  
+      $display("[KS_CTRL] ★ Command sent to body mapper: cmd=0x%0h", ctrl_bmap_cmd);
+  end
 // pragma translate_on
 
   //== Fork the command between the main path and the other paths
@@ -348,19 +361,43 @@ module pep_ks_control
     end
 
 // pragma translate_off
-  // SIM-ONLY debug: trace enquiry and reset behavior
+  // Enhanced debug prints for KS control dataflow tracking
   logic ks_seq_cmd_enquiry_q;
+  logic batch_cmd_avail_q;
   always_ff @(posedge clk) begin
     if (!s_rst_n) begin
       ks_seq_cmd_enquiry_q <= 1'b0;
+      batch_cmd_avail_q <= 1'b0;
     end else begin
       if (reset_loop) begin
-        $display("[KSCtrl] reset_loop=1 (reset_cache asserted)");
+        $display("[KS_CTRL] ★ reset_loop=1 (reset_cache asserted)");
       end
+      
       if (ks_seq_cmd_enquiryD && !ks_seq_cmd_enquiry_q) begin
-        $display("[KSCtrl] ENQ asserted: enq_init_msb=%0b pending_cmd=%0b proc_almost_done=%0b", enq_init[ENQ_DEPTH-1], pending_cmd, proc_almost_done);
+        $display("[KS_CTRL] ★ ENQ asserted: enq_init_msb=%0b pending_cmd=%0b proc_almost_done=%0b", 
+          enq_init[ENQ_DEPTH-1], pending_cmd, proc_almost_done);
       end
+      
+      // Track batch command generation to KSK manager
+      if (batch_cmd_avail && !batch_cmd_avail_q) begin
+        $display("[KS_CTRL] ★ Batch command generated: batch_cmd=0x%0h", batch_cmd);
+        $display("[KS_CTRL]   - Batch decode: slot_1h=0x%0h first_pid=%0d pbs_cnt_max=%0d", 
+          batch_cmd[7:0], batch_cmd[19:8], batch_cmd[31:20]);
+      end
+      
+      // Track FIFO operations
+      if (ffifo_in_vld && ffifo_in_rdy) begin
+        $display("[KS_CTRL] ★ FIFO input: first_pid=%0d ks_loop=%0d pbs_cnt_max=%0d", 
+          ffifo_in_pcmd.first_pid, ffifo_in_pcmd.ks_loop, ffifo_in_pcmd.pbs_cnt_max);
+      end
+      
+      if (ffifo_out_vld && ffifo_out_rdy) begin
+        $display("[KS_CTRL] ★ FIFO output: first_pid=%0d ks_loop=%0d pbs_cnt_max=%0d", 
+          ffifo_out_pcmd.first_pid, ffifo_out_pcmd.ks_loop, ffifo_out_pcmd.pbs_cnt_max);
+      end
+      
       ks_seq_cmd_enquiry_q <= ks_seq_cmd_enquiryD;
+      batch_cmd_avail_q <= batch_cmd_avail;
     end
   end
 // pragma translate_on

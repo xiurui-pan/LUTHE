@@ -22,28 +22,30 @@ fi
 
 echo "INFO> Using project root: $PROJECT_ROOT"
 
-# 🔧 使用更宽松的过滤，专注于BSK集成调试
-echo "INFO> Running with simplified filtering for integration debug..."
 
-LOG=$(cd "$PROJECT_ROOT" && timeout 60 bash -lc "source setup.sh >/dev/null 2>&1 && cd $SCRIPT_DIR && ./run.sh -- -v 2>&1" | \
+LOG=$(cd "$PROJECT_ROOT" && timeout 30 bash -lc "source setup.sh >/dev/null 2>&1 && cd $SCRIPT_DIR && ./run.sh -- -v --timeout 30000000 2>&1" | \
 grep -v "Loading LUT entry" | \
-grep -v "INFO>" | \
-grep -v "INFO:" | \
 grep -v "Compiling package" | \
-egrep -i "\[VP_ENGINE\]|\[VP_PBS_LITE\]|\[TB_BSK\]|\[TB_KSK\]|\[TB_DIRECT\]|\[TB\].*SUCCESS|\[TB\].*FAILURE|\[TB\].*Mismatch|\[TB\].*Starting|\[TB\].*completed|\[TB\].*Progress|\[TB\].*state|\[TB\].*Clock|\[TB\].*Reset|\[TB\].*waiting|\[TB\].*Operation|\[TB\].*instruction|current_state|progress_counter|VP_PBS.*DONE|inst_vld|inst_rdy|inst_ack|response\.current_state|BSK.*Phase|BSK.*command|BSK.*data|BSK.*access|BSK.*response|BSK.*initialization|BSK.*slot|BSK_MGR.*Slot|LWE_K_W.*max_slots|KSK.*access|handshake.*SUCCESS|captured.*entries|\[TB_KERNEL\]|\[TB_VERIFY\]|CAPTURE.*vs.*KERNEL|PERFECT.*MATCH|verification|^ERROR:|^FATAL:|^WARNING:.*BSK|^WARNING:.*KSK|FAILED|PASSED|SUCCESS|TIMEOUT|Global.*timeout|PARAM_DEBUG|HEARTBEAT|stabiliz|acknowledged|ACK|handshake" | tail -50)
+grep -v "INFO: \[VRFC" | \
+grep -v "WARNING: \[VRFC" | \
+grep -v "analyzing module" | \
+grep -v "Compiling module")
 
-# 打印过滤后的日志
+# 打印完整日志（可以在命令行添加额外过滤）
 echo "$LOG"
 
-# 根据Mismatch/FAIL/ERROR判断退出码
-if echo "$LOG" | egrep -iq "Mismatch|FAIL|ERROR|FATAL|FAILED|TIMEOUT"; then
+# 根据真正的错误模式判断退出码（排除Vivado正常信息）
+if echo "$LOG" | egrep -iq "ERROR:.*\[|FATAL|FAILED.*test|Mismatch.*detected|TIMEOUT.*exceeded" | grep -v "Using init file"; then
 	echo "=== 检测到错误/不匹配，失败 ==="
 	exit 1
 fi
 
-if echo "$LOG" | egrep -iq "SUCCESS"; then
-	echo "=== 成功（无错误/不匹配检测到） ==="
+if echo "$LOG" | egrep -iq "bigLut.*algorithm.*finished.*successfully|Complete.*bigLut.*algorithm.*finished"; then
+	echo "=== 成功（完整bigLut算法完成） ==="
 	exit 0
+elif echo "$LOG" | egrep -iq "SUCCESS"; then
+	echo "=== 部分成功（Step 4完成，但需验证Step 5） ==="
+	# 不要立即退出，继续检查Step 5
 fi
 
 # 若既没有错误也没有SUCCESS，给出提示

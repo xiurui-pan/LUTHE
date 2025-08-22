@@ -22,11 +22,12 @@ package vp_pbs_inst_pkg;
 // VP-PBS操作类型定义
 // ==============================================================================================
 typedef enum logic [3:0] {
-  VP_OP_IDLE              = 4'b0000,
-  VP_OP_BLIND_ROT_EXTRACT = 4'b0001,  // Blind Rotation + Extract + Post-process
-  VP_OP_BLIND_ROT_ONLY    = 4'b0010,  // 仅Blind Rotation
-  VP_OP_EXTRACT_ONLY      = 4'b0011,  // 仅Extract  
-  VP_OP_POST_PROC_ONLY    = 4'b0100   // 仅Post-processing
+  VP_OP_IDLE                      = 4'b0000,
+  VP_OP_BLIND_ROT_EXTRACT         = 4'b0001,  // Blind Rotation + Extract + Post-process (Steps 1-4)
+  VP_OP_BLIND_ROT_ONLY            = 4'b0010,  // 仅Blind Rotation
+  VP_OP_EXTRACT_ONLY              = 4'b0011,  // 仅Extract  
+  VP_OP_POST_PROC_ONLY            = 4'b0100,  // 仅Post-processing
+  VP_OP_KEYSWITCH_BOOTSTRAP_EXTRACT = 4'b0101  // 完整的第5步: Key Switching + 第二轮Bootstrapping + Extract
 } vp_pbs_op_type_e;
 
 // ==============================================================================================
@@ -49,26 +50,35 @@ typedef struct packed {
   logic [3:0]             bit_width;         // 总bit宽度 (用于验证)
   logic                   need_post_process; // 是否需要post-processing
   logic                   extract_mode;      // Extract模式选择
-  logic [1:0]             reserved2;         // 保留位
+  logic                   need_step5;        // 是否需要执行第5步
+  logic                   reserved2;         // 保留位
   
   // LUT参数
   logic [31:0]            lut_base_addr;     // LUT基地址 (用于rotation查找)
+  logic [31:0]            get_hi_lut_addr;   // get_hi LUT地址 (第5步专用)
   logic [15:0]            lut_entry_size;    // LUT条目大小
-  logic [15:0]            reserved3;         // 保留位
+  
+  // 第5步专用参数
+  logic [15:0]            ksk_lvl1_addr;     // Key Switching lvl1→lvl0的KSK地址
+  logic [7:0]             ksk_batch_id_step5; // 第5步的KSK批次ID
+  logic [7:0]             step5_bit_range;   // 第5步的处理bit范围
 } vp_pbs_inst_t;
 
 // ==============================================================================================
 // VP-PBS状态定义
 // ==============================================================================================
-typedef enum logic [2:0] {
-  VP_PBS_IDLE           = 3'b000,
-  VP_PBS_LOADING        = 3'b001,
-  VP_PBS_BLIND_ROT      = 3'b010,
-  VP_PBS_EXTRACTING     = 3'b011,
-  VP_PBS_POST_PROC      = 3'b100,
-  VP_PBS_WRITING        = 3'b101,
-  VP_PBS_DONE           = 3'b110,
-  VP_PBS_ERROR          = 3'b111
+typedef enum logic [3:0] {
+  VP_PBS_IDLE           = 4'b0000,
+  VP_PBS_LOADING        = 4'b0001,
+  VP_PBS_BLIND_ROT      = 4'b0010,
+  VP_PBS_EXTRACTING     = 4'b0011,
+  VP_PBS_POST_PROC      = 4'b0100,
+  VP_PBS_WRITING        = 4'b0101,
+  VP_PBS_STEP5_KEYSWITCH = 4'b0110,  // 第5步: Key Switching lvl1→lvl0
+  VP_PBS_STEP5_BOOTSTRAP = 4'b0111,  // 第5步: 第二轮Bootstrapping
+  VP_PBS_STEP5_EXTRACT   = 4'b1000,  // 第5步: 最终Extract
+  VP_PBS_DONE           = 4'b1110,
+  VP_PBS_ERROR          = 4'b1111
 } vp_pbs_state_e;
 
 // ==============================================================================================
@@ -147,10 +157,46 @@ function automatic vp_pbs_inst_t make_vp_pbs_inst(
   inst.bit_width = 4'd10; // bits 0-9
   inst.need_post_process = need_post_proc;
   inst.extract_mode = 1'b0; // 默认extract模式
-  inst.reserved2 = 2'h0;
+  inst.need_step5 = 1'b0; // 默认不执行第5步
+  inst.reserved2 = 1'b0;
   inst.lut_base_addr = lut_base;
+  inst.get_hi_lut_addr = 32'h0; // 默认无get_hi LUT
   inst.lut_entry_size = 16'd128; // 128字节/条目
-  inst.reserved3 = 16'h0;
+  inst.ksk_lvl1_addr = 16'h0; // 默认无KSK地址
+  inst.ksk_batch_id_step5 = 8'h0; // 默认批次ID
+  inst.step5_bit_range = 8'h0; // 默认bit范围
+  return inst;
+endfunction
+
+// 创建第5步专用VP-PBS指令
+function automatic vp_pbs_inst_t make_vp_pbs_step5_inst(
+  input logic [15:0] input_addr,        // 前4步的输出地址
+  input logic [15:0] final_output_addr, // 最终输出地址
+  input logic [31:0] get_hi_lut_addr,   // get_hi LUT地址
+  input logic [15:0] ksk_addr,          // KSK lvl1→lvl0地址
+  input logic [7:0] ksk_batch_id,       // KSK批次ID
+  input logic [7:0] bit_range           // 处理的bit范围
+);
+  vp_pbs_inst_t inst;
+  inst.operation_type = VP_OP_KEYSWITCH_BOOTSTRAP_EXTRACT;
+  inst.reserved1 = 4'h0;
+  inst.cmux_result_addr = input_addr;    // 输入来自前4步的结果
+  inst.ggsw_bits_addr = 16'h0;           // 第5步不需要GGSW bits
+  inst.output_addr = final_output_addr;
+  inst.temp_storage_addr = final_output_addr + 16'h400; // 临时存储
+  inst.bit_range_start = 4'h0;           // 第5步的bit处理范围
+  inst.bit_range_end = 4'h9;
+  inst.bit_width = 4'd10;
+  inst.need_post_process = 1'b1;         // 第5步总是需要post-processing
+  inst.extract_mode = 1'b1;              // 使用特殊extract模式
+  inst.need_step5 = 1'b1;                // 标记为第5步
+  inst.reserved2 = 1'b0;
+  inst.lut_base_addr = 32'h0;            // 第5步不使用常规LUT
+  inst.get_hi_lut_addr = get_hi_lut_addr; // 使用get_hi LUT
+  inst.lut_entry_size = 16'd128;
+  inst.ksk_lvl1_addr = ksk_addr;
+  inst.ksk_batch_id_step5 = ksk_batch_id;
+  inst.step5_bit_range = bit_range;
   return inst;
 endfunction
 

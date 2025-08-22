@@ -263,15 +263,25 @@ else
 fi
 
 echo "INFO> Running simulation (keep work) via edalize"
-$run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -d $(pwd) -k keep \
-  -P MOD_Q_W int $MOD_Q_W \
-  -P MAX_BIT_WIDTH int $MAX_BIT_WIDTH \
-  -P N_LVL1 int $N_LVL1 \
-  -P ELL_LVL1 int $ELL_LVL1 \
-  -P BSK_PC int $BSK_PC \
-  -P KSK_PC int $KSK_PC \
-  -F APPLICATION APPLI_simu \
-  -F REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ} \
-  $run_edalize_args 2>&1  || echo "Simulation completed"
+# $run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -d $(pwd) -k keep \
+#   -P MOD_Q_W int $MOD_Q_W \
+#   -P MAX_BIT_WIDTH int $MAX_BIT_WIDTH \
+#   -P N_LVL1 int $N_LVL1 \
+#   -P ELL_LVL1 int $ELL_LVL1 \
+#   -P BSK_PC int $BSK_PC \
+#   -P KSK_PC int $KSK_PC \
+#   -F APPLICATION APPLI_simu \
+#   -F REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ} \
+
+  $run_edalize -m ${module} -t ${PROJECT_SIMU_TOOL} -d $(pwd) -k keep \
+    -P MOD_Q_W int $MOD_Q_W \
+    -P MAX_BIT_WIDTH int $MAX_BIT_WIDTH \
+    -P N_LVL1 int $N_LVL1 \
+    -P ELL_LVL1 int $ELL_LVL1 \
+    -P BSK_PC int $BSK_PC \
+    -P KSK_PC int $KSK_PC \
+    -F APPLICATION APPLI_simu \
+    -F REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ} \
+    $run_edalize_args 2>&1 | egrep -v "WARNING> Same file given several times|INFO: \[VRFC 10-311\]|INFO: \[VRFC 10-2263\]|Compiling package|Compiling module|instead of:|analyzing module|Time Resolution|Starting static elaboration|Pass Through|Completed static elaboration|Starting simulation data flow|Completed simulation data flow" | tee run_output.log
 
 exit $?

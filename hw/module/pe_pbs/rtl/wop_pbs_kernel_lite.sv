@@ -187,6 +187,7 @@ typedef enum logic [3:0] {
   STEP5_KEY_SWITCHING,   // 第5步: Key Switching lvl1→lvl0
   STEP5_BOOTSTRAP,       // 第5步: 第二轮Bootstrapping (使用get_hi LUT)
   STEP5_EXTRACT,         // 第5步: 最终Extract
+  STEP5_WRITE_KS_RESULT, // 第5步: 写入KS结果到临时存储
   DONE                   // 完成
 } vp_pbs_lite_state_e;
 
@@ -861,6 +862,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
               final_result_vec[0] <= ks_seq_result;
               step5_keyswitch_done <= 1'b1;
               $display("[VP_PBS_LITE] CLOCKED: Step 5 Key Switching completed with REAL KS result=0x%08h", ks_seq_result);
+              $display("[VP_PBS_LITE] CLOCKED: KS result will be available for STEP5_BOOTSTRAP via final_result_vec[0]");
               $display("[VP_PBS_LITE] CLOCKED: Next cycle should transition to STEP5_BOOTSTRAP");
             end else begin
               // Increment timeout counter and implement fallback
@@ -875,6 +877,27 @@ always_ff @(posedge clk or negedge s_rst_n) begin
                 $display("[VP_PBS_LITE] CLOCKED: Step 5 KS fallback transition to STEP5_BOOTSTRAP");
               end
             end
+          end
+        end
+      end
+      STEP5_EXTRACT: begin
+        // Stage 8: tLwe32ExtractSample_lvl1 implementation in clocked logic
+        if (current_state == STEP5_EXTRACT) begin
+          // Process RegFile read results from second-round bootstrap
+          if (pep_regf_rd_req_vld && regf_pep_rd_data_avail[0] && !step5_extract_done) begin
+            // tLwe32ExtractSample_lvl1 algorithm based on C++ reference:
+            // Extract LWE sample from TLWE result at position 0
+            
+            // The bootstrap result is a TLWE polynomial, extract coefficient 0 as LWE sample
+            final_result_vec[0] <= regf_pep_rd_data[0];  // Extract first coefficient
+            step5_extract_done <= 1'b1;
+            
+            $display("[VP_PBS_LITE] CLOCKED: Step 5 Extract completed - tLwe32ExtractSample_lvl1");
+            $display("[VP_PBS_LITE] CLOCKED: Extracted LWE sample=0x%08h from bootstrap result", regf_pep_rd_data[0]);
+            $display("[VP_PBS_LITE] CLOCKED: Next cycle should transition to WRITE_RESULT");
+          end else if (!step5_extract_done) begin
+            $display("[VP_PBS_LITE] CLOCKED: Step 5 Extract waiting for RegFile read: req_vld=%b, data_avail=%b", 
+                     pep_regf_rd_req_vld, regf_pep_rd_data_avail[0]);
           end
         end
       end
@@ -917,6 +940,19 @@ always_ff @(posedge clk or negedge s_rst_n) begin
           modswitch_applied <= 1'b0; // 进入阶段时清零，确保只执行一次
           // 🔧 不重置ksk_cmd_delay_counter，让它继续计数以便触发超时
           $display("[VP_PBS_LITE] POST_PROCESSING entered, preserving ksk_cmd_delay_counter=%0d", ksk_cmd_delay_counter);
+        end
+      end
+      
+      STEP5_WRITE_KS_RESULT: begin
+        if (current_state != next_state) begin
+          $display("[VP_PBS_LITE] Starting Step 5 KS Result Write to temp storage");
+        end
+      end
+      
+      STEP5_EXTRACT: begin
+        if (current_state != next_state) begin
+          $display("[VP_PBS_LITE] Starting Step 5 Extract (tLwe32ExtractSample_lvl1)");
+          step5_extract_done <= 1'b0;
         end
       end
       
@@ -974,12 +1010,21 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       pbs_ggsw_bit_counter <= 4'h0;
       pbs_blind_rotation_done <= 1'b0;
       pbs_inst_sent <= 1'b0;
-      // Set addresses based on VP instruction
-      current_lut_gid <= vp_inst_decoded.lut_base_addr[GID_W-1:0];
+      // Set addresses based on VP instruction - FIXED: Proper GID address mapping  
+      // Apply same GID mapping fix for lut_base_addr to avoid similar truncation issues
+      // Map 0x20000+ addresses to valid GID range (0x800+) to avoid truncation to 0x0
+      if (vp_inst_decoded.lut_base_addr >= 32'h20000) begin
+        current_lut_gid <= (vp_inst_decoded.lut_base_addr - 32'h20000 + 32'h800)[GID_W-1:0];
+      end else begin
+        current_lut_gid <= vp_inst_decoded.lut_base_addr[GID_W-1:0];
+      end
+      
       pbs_src_addr <= vp_inst_decoded.cmux_result_addr;
       pbs_dst_addr <= vp_inst_decoded.temp_storage_addr;
-      $display("[VP_PBS_LITE] Stage 7: Initializing PBS addresses: LUT_GID=0x%0h, src=0x%0h, dst=0x%0h", 
-               vp_inst_decoded.lut_base_addr[GID_W-1:0], vp_inst_decoded.cmux_result_addr, vp_inst_decoded.temp_storage_addr);
+      $display("[VP_PBS_LITE] Stage 8: FIXED GID mapping - Initializing PBS addresses:");
+      $display("[VP_PBS_LITE] Stage 8: Original lut_base_addr=0x%0h, mapped_GID=0x%0h", 
+               vp_inst_decoded.lut_base_addr, current_lut_gid);
+      $display("[VP_PBS_LITE] Stage 8: src=0x%0h, dst=0x%0h", vp_inst_decoded.cmux_result_addr, vp_inst_decoded.temp_storage_addr);
     end
     
     if (current_state == BLIND_ROTATION) begin
@@ -1014,12 +1059,23 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     if (current_state != STEP5_BOOTSTRAP && next_state == STEP5_BOOTSTRAP) begin
       pbs_step5_bootstrap_done <= 1'b0;
       pbs_inst_sent <= 1'b0;
-      // Set addresses for Step 5 bootstrap
-      current_lut_gid <= vp_inst_decoded.get_hi_lut_addr[GID_W-1:0];
-      pbs_src_addr <= vp_inst_decoded.temp_storage_addr;
-      pbs_dst_addr <= vp_inst_decoded.output_addr;
-      $display("[VP_PBS_LITE] Stage 7: Initializing Step5 PBS addresses: get_hi_LUT_GID=0x%0h, src=0x%0h, dst=0x%0h", 
-               vp_inst_decoded.get_hi_lut_addr[GID_W-1:0], vp_inst_decoded.temp_storage_addr, vp_inst_decoded.output_addr);
+      // Set addresses for Step 5 bootstrap - FIXED: Proper GID address mapping
+      // Fix LUT GID mapping issue: 0x20000→0x0 caused by GID_W truncation
+      // GID_W=12 bits can only hold 0x0-0xFFF, but get_hi_lut_addr can be 0x20000
+      // Solution: Map high addresses to valid GID range
+      if (vp_inst_decoded.get_hi_lut_addr >= 32'h20000) begin
+        current_lut_gid <= (vp_inst_decoded.get_hi_lut_addr - 32'h20000 + 32'h800)[GID_W-1:0];
+      end else begin
+        current_lut_gid <= vp_inst_decoded.get_hi_lut_addr[GID_W-1:0];
+      end
+      
+      pbs_src_addr <= vp_inst_decoded.temp_storage_addr;  // KS result stored here by STEP5_KEY_SWITCHING
+      pbs_dst_addr <= vp_inst_decoded.output_addr;        // Final bootstrap result
+      $display("[VP_PBS_LITE] Stage 8: FIXED GID mapping - Enhanced Step5 Bootstrap initialization:");
+      $display("[VP_PBS_LITE] Stage 8: Original get_hi_lut_addr=0x%0h, mapped_GID=0x%0h", 
+               vp_inst_decoded.get_hi_lut_addr, current_lut_gid);
+      $display("[VP_PBS_LITE] Stage 8: src_addr=0x%0h (KS result input), dst_addr=0x%0h (bootstrap output)", 
+               vp_inst_decoded.temp_storage_addr, vp_inst_decoded.output_addr);
     end
     
     if (current_state == STEP5_BOOTSTRAP) begin
@@ -1287,17 +1343,40 @@ always_comb begin
          end
        end
        
-       // 强制转换测试：验证状态机逻辑是否工作
+       // Enhanced Stage 8: Transition through intermediate write state for proper data flow
        if (step5_ks_cmd_sent && step5_ks_data_ready) begin
-         next_state = STEP5_BOOTSTRAP;
-         $display("[VP_PBS_LITE] *** FORCED TRANSITION: Key Switching logic executed, moving to Bootstrap ***");
+         next_state = STEP5_WRITE_KS_RESULT;
+         $display("[VP_PBS_LITE] *** ENHANCED TRANSITION: Key Switching logic executed, moving to write KS result ***");
          $display("[VP_PBS_LITE] Transition based on step5_ks_cmd_sent=%b, step5_ks_data_ready=%b", step5_ks_cmd_sent, step5_ks_data_ready);
        end else if (step5_keyswitch_done) begin
-         next_state = STEP5_BOOTSTRAP;
-         $display("[VP_PBS_LITE] *** STATE TRANSITION: Key Switching completed, moving to Bootstrap ***");
-         $display("[VP_PBS_LITE] step5_keyswitch_done=%b, will transition to STEP5_BOOTSTRAP", step5_keyswitch_done);
+         next_state = STEP5_WRITE_KS_RESULT;
+         $display("[VP_PBS_LITE] *** ENHANCED TRANSITION: Key Switching completed, moving to write KS result ***");
+         $display("[VP_PBS_LITE] step5_keyswitch_done=%b, will write KS result then Bootstrap", step5_keyswitch_done);
        end else begin
          $display("[VP_PBS_LITE] DEBUG: NOT transitioning - step5_keyswitch_done=%b", step5_keyswitch_done);
+       end
+     end
+     
+     STEP5_WRITE_KS_RESULT: begin
+       // Stage 8: Write Key Switching result to temp_storage_addr for STEP5_BOOTSTRAP
+       vp_response.current_state = VP_PBS_STEP5_KEYSWITCH;
+       
+       // Write KS result to RegFile at temp_storage_addr
+       pep_regf_wr_req_vld = 1'b1;
+       pep_regf_wr_data_vld[0] = 1'b1;
+       pep_regf_wr_req = (step5_intermediate_addr >> 5);  // temp_storage_addr
+       pep_regf_wr_data[0] = final_result_vec[0];         // KS result
+       
+       $display("[VP_PBS_LITE] Stage 8: Writing KS result=0x%08h to temp_storage addr=0x%0h", 
+                final_result_vec[0], step5_intermediate_addr);
+       
+       // Transition to STEP5_BOOTSTRAP after successful write
+       if (pep_regf_wr_req_rdy && pep_regf_wr_data_rdy[0]) begin
+         next_state = STEP5_BOOTSTRAP;
+         $display("[VP_PBS_LITE] Stage 8: KS result written successfully, transitioning to STEP5_BOOTSTRAP");
+       end else begin
+         $display("[VP_PBS_LITE] Stage 8: Waiting for RegFile write: req_rdy=%b, data_rdy=%b", 
+                  pep_regf_wr_req_rdy, pep_regf_wr_data_rdy[0]);
        end
      end
      
@@ -1323,37 +1402,15 @@ always_comb begin
        // 第5步: 最终Extract (tLwe32ExtractSample_lvl1)
        vp_response.current_state = VP_PBS_STEP5_EXTRACT;
        
-       // Stage 8: 改进的tLwe32ExtractSample_lvl1逻辑
+       // Stage 8: 改进的tLwe32ExtractSample_lvl1逻辑 - 移到clocked logic处理
        if (!step5_extract_done) begin
          // 基于C++参考：tLwe32ExtractSample_lvl1(result, rotate_lut, env)
          // 从第二轮Bootstrap的TLWE结果中提取LWE样本
-         automatic logic [31:0] bootstrap_result_b;
-         automatic logic [31:0] bootstrap_result_a0;
          
-         // 获取第二轮Bootstrap的结果 (via PBS service interface)
-         // In real implementation, this would come from PBS service response
-         bootstrap_result_b = final_result_vec[0];  // Current sample extract result as base
-         bootstrap_result_a0 = final_result_vec[1]; // Next coefficient as noise term
-         
-         // Stage 8: Enhanced LWE sample construction
-         // 实现更接近C++参考的TLWE->LWE sample extraction
-         for (int i = 0; i < N_LVL1; i++) begin
-           if (i == 0) begin
-             // b部分 (message part) 
-             final_result_vec[i] = bootstrap_result_b;
-           end else if (i < 32) begin
-             // a部分 (noise coefficients) - simplified but more realistic
-             final_result_vec[i] = bootstrap_result_a0 ^ (i * 32'h12345678);
-           end else begin
-             // Higher coefficients set to zero for simplified implementation
-             final_result_vec[i] = 32'h0;
-           end
-         end
-         
-         step5_extract_done = 1'b1;
-         $display("[VP_PBS_LITE] Stage 8: Enhanced Step 5 Extract (tLwe32ExtractSample_lvl1) completed");
-         $display("[VP_PBS_LITE] - Enhanced LWE sample[0] (message): 0x%08h", final_result_vec[0]);
-         $display("[VP_PBS_LITE] - Enhanced LWE sample[1] (noise): 0x%08h", final_result_vec[1]);
+         // Request RegFile read to get bootstrap result (implemented in clocked logic)
+         pep_regf_rd_req_vld = 1'b1;
+         pep_regf_rd_req = (pbs_dst_addr >> 5);  // Bootstrap result address
+         $display("[VP_PBS_LITE] Stage 8: Step 5 Extract reading bootstrap result from addr=0x%0h", (pbs_dst_addr >> 5));
        end
        
        if (step5_extract_done) begin
@@ -1716,18 +1773,20 @@ always_comb begin
   end
   
   // PBS Service Calls for STEP5_BOOTSTRAP using get_hi LUT
-  // Fixed: Remove dependency on step5_bs_lut_loaded - let PBS service handle LUT loading
+  // Stage 8: Enhanced PBS service integration with proper get_hi LUT handling
   if (current_state == STEP5_BOOTSTRAP) begin
     if (pbs_inst_rdy && !pbs_inst_sent) begin
       // Use standard PBS service interface for second-round bootstrap  
       pbs_inst = make_pbs_inst(
-        current_lut_gid,           // get_hi LUT GID
-        pbs_src_addr[RID_W-1:0],   // Source: KS result
-        pbs_dst_addr[RID_W-1:0]    // Destination: bootstrap result
+        current_lut_gid,           // get_hi LUT GID for second-round bootstrap
+        pbs_src_addr[RID_W-1:0],   // Source: KS result address
+        pbs_dst_addr[RID_W-1:0]    // Destination: final bootstrap result
       );
       pbs_inst_vld = 1'b1;
-      $display("[VP_PBS_LITE] FIXED: PBS STEP5_BOOTSTRAP: get_hi LUT_GID=0x%0h, src=0x%0h, dst=0x%0h", 
-               current_lut_gid, pbs_src_addr, pbs_dst_addr);
+      $display("[VP_PBS_LITE] Stage 8: Enhanced STEP5_BOOTSTRAP PBS call:");
+      $display("[VP_PBS_LITE] Stage 8: get_hi_LUT_GID=0x%0h for second-round bootstrap", current_lut_gid);
+      $display("[VP_PBS_LITE] Stage 8: src_addr=0x%0h (KS result), dst_addr=0x%0h (final result)", pbs_src_addr, pbs_dst_addr);
+      $display("[VP_PBS_LITE] Stage 8: PBS service will handle get_hi LUT access and bootstrap automatically");
     end
   end
   

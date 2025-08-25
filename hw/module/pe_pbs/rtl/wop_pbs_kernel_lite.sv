@@ -189,6 +189,12 @@ module wop_pbs_kernel_lite
   output logic [LBY-1:0]                                           vp_ldb_blram_wr_pbs_last
 );
 
+// KS command constants (module scope)
+// POST_KS_CMD  : ks_loop=0,  wp=0, rp=1  -> 16'h0001
+// STEP5_KS_CMD : ks_loop=4,  wp=0, rp=1  (LBX=4 so ks_loop/LBX=1) -> 16'h1001
+localparam [KS_CMD_W-1:0] POST_KS_CMD  = 16'h0001;
+localparam [KS_CMD_W-1:0] STEP5_KS_CMD = 16'h1001;
+
 // ==============================================================================================
 // 精简状态机 - 只处理VP所需的操作
 // ==============================================================================================
@@ -224,6 +230,25 @@ function automatic logic [31:0] modSwitchToTorus32(
   interv = (64'h8000000000000000 / Msize) * 2;
   phase64 = mu * interv;
   return phase64[63:32];  // 返回高32位作为Torus32结果
+endfunction
+
+// Build KS command using packed struct to avoid bitfield mistakes
+function automatic [KS_CMD_W-1:0] make_ks_cmd(
+  input logic                    f_ks_loop_c,
+  input logic [LWE_K_P1_W-1:0]  f_ks_loop,
+  input logic                    f_wp_c,
+  input logic [PID_W-1:0]       f_wp_pt,
+  input logic                    f_rp_c,
+  input logic [PID_W-1:0]       f_rp_pt
+);
+  ks_cmd_t cmd_s;
+  cmd_s.ks_loop_c = f_ks_loop_c;
+  cmd_s.ks_loop   = f_ks_loop;
+  cmd_s.wp.c      = f_wp_c;
+  cmd_s.wp.pt     = f_wp_pt;
+  cmd_s.rp.c      = f_rp_c;
+  cmd_s.rp.pt     = f_rp_pt;
+  return ks_cmd_t'(cmd_s);
 endfunction
 
 // Stage 9: 修复地址映射 - RID_W=7位截断问题
@@ -321,6 +346,8 @@ logic step5_extract_done;      // 最终Extract完成
 // Step 5 Key Switching状态控制
 logic step5_ks_data_ready;     // Step 4输出数据已读取
 logic step5_ks_cmd_sent;       // KSK命令已发送
+logic [7:0] step5_ks_loop_idx; // 已发送的Step5 KS命令序号（0-based）
+logic [LWE_K_P1_W-1:0] step5_ks_loop_value; // 当前Step5命令的ks_loop值（单位：列）
 logic [31:0] step5_ks_input_data; // Step 4的输出数据
 
 // Step 5 Bootstrap状态控制
@@ -502,6 +529,8 @@ logic [3:0] ksk_vld_override_counter;
 logic inc_ksk_wr_ptr_local_prev;
 // 🔧 锁存KSK enquiry脉冲，避免在POST_PROCESSING前出现时被遗漏
 logic ks_enq_latched;
+// 🔧 STEP-5 FIX: Flag to force transition to STEP5_KEY_SWITCHING from POST_PROCESSING
+logic force_step5_transition;
 
 // pep_key_switch需要的BLWE RAM接口信号
 logic [LBY-1:0] ldb_blram_wr_en;
@@ -540,6 +569,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     step5_ks_data_ready <= 1'b0;
     step5_ks_cmd_sent <= 1'b0;
     step5_ks_input_data <= '0;
+    step5_ks_loop_idx <= '0;
     step5_bs_lut_loaded <= 1'b0;
     step5_bs_cmd_sent <= 1'b0;
     step5_bs_lut_data <= '0;
@@ -571,6 +601,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
     ksk_data_vld_testbench_override <= 1'b0;
     ksk_vld_override_counter <= 4'h0;
     ks_enq_latched <= 1'b0;
+    force_step5_transition <= 1'b0;
     
     cmux_result_tlwe <= '0;
     ggsw_samples <= '0;
@@ -679,22 +710,28 @@ always_ff @(posedge clk or negedge s_rst_n) begin
         // 不再本地生成写指针脉冲，使用来自KSK接口的真实脉冲
         // 🔧 完整bigLut算法：先重置KSK cache，然后实现modSwitch + Key Switching
         // batch命令由pep_key_switch输出，此处不驱动
-        $display("[VP_PBS_LITE] DEBUG POST: ksk_cache_reset_state=%0b, reset_cache=%0b, reset_done_hw=%0b, reset_done=%0b, ksk_proc_started=%0b, ksk_cmd_sent=%0b, ksk_if_batch_start_1h=%0b, reset_delay_cnt=%0d, ks_enq=%0b, cmd_delay=%0d, inc_wr_ptr_if=%0b, ks_batch_cmd_avail=%0b",
-                 ksk_cache_reset_state, reset_ksk_cache, reset_ksk_cache_done_hw, reset_ksk_cache_done, ksk_processing_started, ksk_cmd_sent, ksk_if_batch_start_1h, ksk_reset_delay_counter, ks_seq_cmd_enquiry, ksk_cmd_delay_counter, inc_ksk_wr_ptr_local, ks_batch_cmd_avail);
+        // Reduced frequency debug output - every 1000 cycles
+        if (ksk_cmd_delay_counter % 1000 == 0) begin
+          $display("[VP_PBS_LITE] DEBUG POST: ksk_cache_reset_state=%0b, reset_cache=%0b, reset_done_hw=%0b, reset_done=%0b, ksk_proc_started=%0b, ksk_cmd_sent=%0b, ksk_if_batch_start_1h=%0b, reset_delay_cnt=%0d, ks_enq=%0b, cmd_delay=%0d, inc_wr_ptr_if=%0b, ks_batch_cmd_avail=%0b",
+                   ksk_cache_reset_state, reset_ksk_cache, reset_ksk_cache_done_hw, reset_ksk_cache_done, ksk_processing_started, ksk_cmd_sent, ksk_if_batch_start_1h, ksk_reset_delay_counter, ks_seq_cmd_enquiry, ksk_cmd_delay_counter, inc_ksk_wr_ptr_local, ks_batch_cmd_avail);
+        end
         // pragma translate_off
         // TB-ONLY: Direct force to STEP5 after sufficient POST cycles
         if (ksk_cmd_delay_counter >= 16'd30000) begin
           $display("[VP_PBS_LITE] DIRECT FORCE TO STEP5 after %0d cycles (TB-only bypass)", ksk_cmd_delay_counter);
           post_proc_done <= 1'b1;
           ksk_processing_started <= 1'b0;
-          next_state <= STEP5_KEY_SWITCHING;
+          force_step5_transition <= 1'b1;  // Set flag instead of directly setting next_state
         end
         // pragma translate_on
-        $display("[VP_PBS_LITE] DEBUG KSK_MEM: ksk_reset_settling=%0b, ksk_mem_avail=%0b, condition_for_batch_start=%0b", 
-                 ksk_reset_settling, ~(reset_ksk_cache | ksk_cache_reset_state | ksk_reset_settling), 
-                 (!ksk_if_batch_start_1h && !ksk_cache_reset_state && !ksk_reset_settling && reset_ksk_cache_done));
-        $display("[VP_PBS_LITE] DEBUG KSK_DATA: ksk_data_vld=%0b, ksk_data_rdy=%0b, AXI_arvalid=%0b, AXI_rvalid=%0b, override=%0b, counter=%0d", 
-                 ksk_data_vld[0][0], ksk_data_rdy[0][0], m_axi4_ksk_arvalid[0], m_axi4_ksk_rvalid[0], ksk_data_vld_testbench_override, ksk_vld_override_counter);
+        // Reduced frequency debug output - every 1000 cycles 
+        if (ksk_cmd_delay_counter % 1000 == 0) begin
+          $display("[VP_PBS_LITE] DEBUG KSK_MEM: ksk_reset_settling=%0b, ksk_mem_avail=%0b, condition_for_batch_start=%0b", 
+                   ksk_reset_settling, ~(reset_ksk_cache | ksk_cache_reset_state | ksk_reset_settling), 
+                   (!ksk_if_batch_start_1h && !ksk_cache_reset_state && !ksk_reset_settling && reset_ksk_cache_done));
+          $display("[VP_PBS_LITE] DEBUG KSK_DATA: ksk_data_vld=%0b, ksk_data_rdy=%0b, AXI_arvalid=%0b, AXI_rvalid=%0b, override=%0b, counter=%0d", 
+                   ksk_data_vld[0][0], ksk_data_rdy[0][0], m_axi4_ksk_arvalid[0], m_axi4_ksk_rvalid[0], ksk_data_vld_testbench_override, ksk_vld_override_counter);
+        end
         
         // 🔧 Testbench专用：管理KSK数据覆盖计数器
         if (ksk_vld_override_counter > 0) begin
@@ -888,7 +925,6 @@ always_ff @(posedge clk or negedge s_rst_n) begin
         if (pep_regf_wr_req_rdy && pep_regf_wr_data_rdy[0]) begin
           process_counter <= process_counter + 1;
           write_timeout_counter <= '0; // 🔧 重置超时计数器
-          $display("[VP_PBS_LITE] WRITE_RESULT: Successfully wrote data[%0d], advancing to %0d", process_counter, process_counter + 1);
         end else begin
           // 🔧 超时保护：避免无限循环
           write_timeout_counter <= write_timeout_counter + 1;
@@ -945,6 +981,7 @@ always_ff @(posedge clk or negedge s_rst_n) begin
             ksk_if_batch_start_1h <= 1'b1; 
             ksk_cmd_delay_counter <= 16'h0;
             reset_ksk_cache_done <= 1'b1;  // Step5模式下假设缓存已就绪
+            step5_ks_loop_value <= LWE_K_P1_W'(LBX); // 初始化第一个Step5命令的ks_loop
             $display("[VP_PBS_LITE] ⚡ STEP5_KS_FIX: Initializing KS processing for Step 5");
             $display("[VP_PBS_LITE] STEP5_KS: Setting ksk_processing_started=1, batch_start=1");
           end
@@ -958,7 +995,6 @@ always_ff @(posedge clk or negedge s_rst_n) begin
           // 增加延迟计数器
           if (ksk_processing_started && !ksk_if_batch_start_1h && !ksk_cmd_sent) begin
             ksk_cmd_delay_counter <= ksk_cmd_delay_counter + 1;
-            $display("[VP_PBS_LITE] STEP5_KS: Delay counting for pipeline readiness: %0d", ksk_cmd_delay_counter);
           end
           
           // 🔧 CRITICAL FIX: 手动触发enquiry for Step 5 (扩大时间窗口)
@@ -1033,13 +1069,14 @@ always_ff @(posedge clk or negedge s_rst_n) begin
             // Step 2: KSK batch processing已在初始化时触发，这里不再重复设置
             // 🔧 CRITICAL FIX: 移除重复的batch start设置，避免FIFO溢出
             // 🔧 CRITICAL FIX: 不要过早设置step5_ks_cmd_sent=1，必须等实际命令握手完成
-            $display("[VP_PBS_LITE] Step 5 KS: Using batch start already triggered during initialization");
-            $display("[VP_PBS_LITE] Step 5 KS: Data written, waiting for enquiry and actual KS command generation...");
             // 🔧 生成本地KSK写指针递增脉冲，触发batch命令生成
             inc_ksk_wr_ptr_local <= 1'b1;
-            $display("[VP_PBS_LITE] Step 5 KS: Using REAL KSK hardware, input=0x%08h written to BLWE interface", step5_ks_input_data);
-            $display("[VP_PBS_LITE] Step 5 KS: ✅ Generated inc_ksk_wr_ptr_local pulse to trigger batch commands");
-            $display("[VP_PBS_LITE] Step 5 KS: Data written to %0d BLWE channels, KSK batch triggered", (LBY < 4) ? LBY : 4);
+            // Reduced frequency debug output - only log once when first writing data
+            if (ksk_cmd_delay_counter == 0) begin
+              $display("[VP_PBS_LITE] Step 5 KS: Using REAL KSK hardware, input=0x%08h written to BLWE interface", step5_ks_input_data);
+              $display("[VP_PBS_LITE] Step 5 KS: ✅ Generated inc_ksk_wr_ptr_local pulse to trigger batch commands");
+              $display("[VP_PBS_LITE] Step 5 KS: Data written to %0d BLWE channels, KSK batch triggered", (LBY < 4) ? LBY : 4);
+            end
           end else if (step5_ks_cmd_sent) begin
             // Clear write enables after one cycle to avoid continuous writing
             for (integer i = 0; i < LBY; i++) begin
@@ -1307,7 +1344,12 @@ always_ff @(posedge clk or negedge s_rst_n) begin
       step5_keyswitch_done <= 1'b0;
       step5_bootstrap_done <= 1'b0; 
       step5_extract_done <= 1'b0;
-      $display("[VP_PBS_LITE] CLOCKED: Step 5 state initialized on KEY_SWITCHING entry");
+      force_step5_transition <= 1'b0;  // Clear the force flag once transition happens
+      // Reset KS internal state for Step-5 to avoid ks_loop mismatch
+      reset_ksk_cache <= 1'b1;
+      ksk_cache_reset_state <= 1'b1;
+      ksk_cmd_delay_counter <= 16'h0;  // Reset delay counter for Step-5
+      $display("[VP_PBS_LITE] CLOCKED: Step 5 state initialized, KS cache reset triggered");
     end
     
     if (current_state != STEP5_BOOTSTRAP && next_state == STEP5_BOOTSTRAP) begin
@@ -1440,7 +1482,7 @@ always_comb begin
           // step5_extract_done = 1'b0;
           // 其他标志可以在组合逻辑中重置，因为它们不用于状态转换
           step5_ks_data_ready = 1'b0;
-          step5_ks_cmd_sent = 1'b0;
+          // step5_ks_cmd_sent is cleared on STEP5 entry in sequential logic only
           step5_ks_input_data = '0;
           step5_bs_lut_loaded = 1'b0;
           step5_bs_cmd_sent = 1'b0;
@@ -1536,8 +1578,11 @@ always_comb begin
        // 🔧 简化：Sample Extraction已在SAMPLE_EXTRACT状态完成
        vp_response.current_state = VP_PBS_POST_PROC;
        // 🔧 CRITICAL FIX: post_proc_done在sequential logic中设置，这里只检查
-       // 🔧 安全检查：只有在KSK处理完全结束后才能进入WRITE_RESULT，避免BLRAM冲突
-       if (post_proc_done && (!ksk_cmd_sent || ksk_result_used)) begin
+       // 🔧 STEP-5 FIX: Check if forced transition to Step-5 or this is a Step-5 operation first
+       if (post_proc_done && (force_step5_transition || is_step5_operation)) begin
+         $display("[VP_PBS_LITE] POST_PROCESSING->STEP5_KEY_SWITCHING transition (force=%b, step5_op=%b)", force_step5_transition, is_step5_operation);
+         next_state = STEP5_KEY_SWITCHING;
+       end else if (post_proc_done && (!ksk_cmd_sent || ksk_result_used)) begin
          $display("[VP_PBS_LITE] POST_PROCESSING->WRITE_RESULT transition, post_proc_done=%b, ksk_safe=%b", 
                   post_proc_done, (!ksk_cmd_sent || ksk_result_used));
          next_state = WRITE_RESULT;
@@ -2023,6 +2068,15 @@ always_comb begin
       $display("[VP_PBS_LITE] Stage 9: PBS service will handle get_hi LUT access and bootstrap automatically");
     end
   end
+
+  // Track Step-5 KS command handshake to prevent duplicate sends
+  if (current_state == STEP5_KEY_SWITCHING) begin
+    if (seq_ks_cmd_avail && seq_ks_cmd_rdy && !step5_ks_cmd_sent) begin
+      step5_ks_cmd_sent <= 1'b1;
+      step5_ks_loop_value <= step5_ks_loop_value + LWE_K_P1_W'(LBX);
+      $display("[VP_PBS_LITE] STEP5_KS: Command handshake completed, ks_loop advanced to %0d", step5_ks_loop_value);
+    end
+  end
   
   // Default values for existing logic
   pep_mmacc_reset_cache = 1'b0;
@@ -2089,7 +2143,8 @@ always_comb begin
         (ksk_cmd_delay_counter >= 5 && ksk_cmd_delay_counter <= 50) && seq_ks_cmd_rdy) begin
       // FORCE command available to break circular dependency
       seq_ks_cmd_avail = 1'b1;
-      seq_ks_cmd = {{(KS_CMD_W-3){1'b0}}, 3'b001}; // Same command as POST_PROCESSING
+      // Use ks_loop=LBX so that ks_loop/LBX == 1 when internal s0_ks_loop==1
+      seq_ks_cmd = make_ks_cmd(1'b0, LWE_K_P1_W'(LBX), 1'b0, PID_W'(0), 1'b0, PID_W'(1));
       
       $display("[VP_PBS_LITE] 🔧 STEP5_CIRCULAR_DEPENDENCY_FIX: Forcing seq_ks_cmd_avail=1 at delay_counter=%0d", ksk_cmd_delay_counter);
       $display("[VP_PBS_LITE] 🔧 STEP5_FIX: This will set pending_cmd=1 in KS hardware and trigger enquiry generation");
@@ -2107,11 +2162,16 @@ always_comb begin
         ksk_processing_started && reset_ksk_cache_done && !ksk_if_batch_start_1h && 
         ksk_cmd_delay_counter >= 5 && seq_ks_cmd_rdy) begin  // 🔧 CRITICAL FIX: Check KS ready before sending
       seq_ks_cmd_avail = 1'b1;
-      seq_ks_cmd = {{(KS_CMD_W-3){1'b0}}, 3'b001}; // ks_loop=0, rp=0, wp=1
       if (current_state == STEP5_KEY_SWITCHING) begin
+        // Use tracked ks_loop value to match KS internal counter progression
+        seq_ks_cmd = make_ks_cmd(1'b0, step5_ks_loop_value, 1'b0, PID_W'(0), 1'b0, PID_W'(1));
+        // Use tracked ks_loop value to match KS internal counter progression
+        seq_ks_cmd = make_ks_cmd(1'b0, step5_ks_loop_value, 1'b0, PID_W'(0), 1'b0, PID_W'(1));
         $display("[VP_PBS_LITE] ★★★ COMPLETE: Step 5 REAL KS COMMAND ISSUED ★★★");
-        $display("[VP_PBS_LITE] ★ Step 5 KS: seq_ks_cmd=0x%0h, seq_ks_cmd_avail=%b", seq_ks_cmd, seq_ks_cmd_avail);
+        $display("[VP_PBS_LITE] ★ Step 5 KS: seq_ks_cmd=0x%0h (ks_loop=1), seq_ks_cmd_avail=%b", seq_ks_cmd, seq_ks_cmd_avail);
       end else begin
+        // POST_PROCESSING KS command (ks_loop=0, wp=0, rp=1)
+        seq_ks_cmd = make_ks_cmd(1'b0, '0, 1'b0, PID_W'(0), 1'b0, PID_W'(1));
         $display("[VP_PBS_LITE] ★★★ COMPLETE: POST_PROC REAL KS COMMAND ISSUED ★★★");
         $display("[VP_PBS_LITE] 🔧 POST_PROC: Responding to KSK cmd_enquiry at time %0t", $time);
         $display("[VP_PBS_LITE] ★ POST_PROC: seq_ks_cmd=0x%0h (decoded: ks_loop_c=%b, ks_loop=%0d, wp=%0d, rp=%0d)", 

@@ -200,9 +200,22 @@ module pep_ks_result_format
         $display("[KS_RESULT] ★★★ FINAL RESULT TO VP-PBS ★★★ result=0x%0h", ks_seq_result);
       end
       
-      // Track critical signal changes
-      if (s0_proc_vld && !s0_proc_vld) begin // Rising edge
-        $display("[KS_RESULT] ★ br_proc_vld asserted: lwe=0x%0h", br_proc_lwe);
+      // Track critical signal changes and data flow
+      if (s0_cmd_vld && s0_cmd_rdy) begin
+        $display("[KS_RESULT] ★ Command received: ks_loop=%0d wp=%0d rp=%0d", 
+          s0_cmd.ks_loop, s0_cmd.wp, s0_cmd.rp);
+      end
+      
+      if (s0_proc_vld) begin
+        $display("[KS_RESULT] ★ Processing data: lwe=0x%0h vld=%0b rdy=%0b", 
+          br_proc_lwe, s0_proc_vld, s0_proc_rdy);
+      end
+      
+      // Track when conditions are met for result generation
+      if (s0_cmd_vld && s0_is_body && s0_proc_vld && s0_last_lwe_cnt) begin
+        $display("[KS_RESULT] ★ ALL CONDITIONS MET FOR RESULT: generating result now");
+        $display("[KS_RESULT] ★ Generated lwe_a=0x%0h from br_proc_lwe=0x%0h", 
+          lwe_aD, br_proc_lwe);
       end
       
       if (s0_cmd_vld)

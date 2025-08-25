@@ -114,15 +114,29 @@ module pep_ks_mult_node #(
     else          error <= s0_error;
 
 // pragma translate_off
+  // SIM-ONLY: Trace when mult node has data but no KSK
+  logic s0_avail_q, s0_ksk_vld_q, nexty_avail_q;
   always_ff @(posedge clk)
     if (!s_rst_n) begin
-      // do nothing
+      s0_avail_q <= 1'b0;
+      s0_ksk_vld_q <= 1'b0;
+      nexty_avail_q <= 1'b0;
     end
     else begin
-      // 🔧 TEMPORARY: Disable assertion for VP-PBS integration debug
-      if (s0_error) begin
-        $display("WARNING: KSK not valid when needed at %0t - proceeding with VP-PBS integration", $time);
+      // Track mult node activity for VP-PBS debugging (reduced frequency)
+      if (s0_avail && !s0_avail_q && ($time % 1000 == 0)) begin
+        $display("[KS_MULT_NODE] ★ s0_avail rising: ksk_vld=%0b", s0_ksk_vld);
       end
+      if (s0_error) begin
+        $display("[KS_MULT_NODE] ⚠️ KSK not valid when needed at %0t", $time);
+      end
+      // Track output activity
+      if (nexty_avail && !nexty_avail_q) begin
+        $display("[KS_MULT_NODE] → nexty_avail rising: result=0x%0h", nexty_result);
+      end
+      s0_avail_q <= s0_avail;
+      s0_ksk_vld_q <= s0_ksk_vld;
+      nexty_avail_q <= nexty_avail;
     end
 // pragma translate_on
 

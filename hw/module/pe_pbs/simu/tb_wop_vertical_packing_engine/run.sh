@@ -282,6 +282,6 @@ echo "INFO> Running simulation (keep work) via edalize"
     -P KSK_PC int $KSK_PC \
     -F APPLICATION APPLI_simu \
     -F REGF_STRUCT REGF_STRUCT_reg${REGF_REG_NB}_coef${REGF_COEF_NB}_seq${REGF_SEQ} \
-    $run_edalize_args 2>&1 | egrep -v "WARNING> Same file given several times|INFO|xdc|Compiling package|Compiling module|instead of:|analyzing module|Time Resolution|Starting static elaboration|Pass Through|Completed static elaboration|Starting simulation data flow|Completed simulation data flow|use:.*definition_pkg\.sv|WARNING.*Same file given|WARNING.*instead of|^  use:|^  instead of:|===|Running: |Copyright|timescale|directory|Parse|xvlog -work work" | tee run_output.log
+    $run_edalize_args 2>&1 | egrep -v "WARNING> Same file given several times|INFO|xdc|Compiling package|Compiling module|instead of:|analyzing module|Time Resolution|Starting static elaboration|Pass Through|Completed static elaboration|Starting simulation data flow|Completed simulation data flow|use:.*definition_pkg\.sv|WARNING.*Same file given|WARNING.*instead of|^  use:|^  instead of:|===|Running: |Copyright|timescale|directory|Parse|xvlog -work work|APPLICATION|REGF_STRUCT|MOD_Q_W : |MAX_BIT_WIDTH : |N_LVL1 : |ELL_LVL1 : |BSK_PC : |KSK_PC : |Multi-threading |-----" | tee run_output.log
 
 exit $?

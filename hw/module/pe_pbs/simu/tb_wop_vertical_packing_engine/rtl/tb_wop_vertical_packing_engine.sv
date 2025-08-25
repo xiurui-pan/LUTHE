@@ -489,8 +489,8 @@ module tb_wop_vertical_packing_engine
     // 设置随机种子与C++ baseline一致 (context.cpp第16行)
     // XSim兼容：使用$random()替代$urandom()
     begin
-      integer seed = 19260817;
-      integer rand_val = $random(seed);
+      automatic integer seed = 19260817;
+      automatic integer rand_val = $random(seed);
     end
     
     // Generate LUT table using C++ baseline algorithm
@@ -1247,9 +1247,9 @@ always_comb begin
   // Format conversion: VP-PBS [LBY-1:0] lanes -> KS [TB_KS_IF_SUBW_NB-1:0][TB_KS_IF_COEF_NB-1:0]
   // Aggregate enables within each subword group and choose PID from the first active lane in the group
   for (int subw = 0; subw < TB_KS_IF_SUBW_NB; subw++) begin
-    int base = subw*TB_KS_IF_COEF_NB;
-    bit any_en = 1'b0;
-    int first_active_idx = -1;
+    automatic int base = subw*TB_KS_IF_COEF_NB;
+    automatic bit any_en = 1'b0;
+    automatic int first_active_idx = -1;
     // Bound-check base against LBY
     if (base < LBY) begin
       for (int coef = 0; coef < TB_KS_IF_COEF_NB && (base + coef) < LBY; coef++) begin

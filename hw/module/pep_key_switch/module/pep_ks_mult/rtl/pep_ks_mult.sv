@@ -290,6 +290,22 @@ module pep_ks_mult
       assign s0_result_avail = s0_update_buff & s0_node_res_info.last_iter;
       assign s0_clear_buff   = s0_result_avail;
 
+// pragma translate_off
+      // SIM-ONLY: Trace framing signals that control result availability
+      logic s0_node_res_avail_q;
+      always_ff @(posedge clk) begin
+        if (!s_rst_n) begin
+          s0_node_res_avail_q <= 1'b0;
+        end else begin
+          if (s0_node_res_avail && !s0_node_res_avail_q) begin
+            $display("[KS_MULT[%0d]] ★ Node result: eol=%0b last_iter=%0b → result_avail=%0b", 
+                     gen_x, s0_node_res_info.eol, s0_node_res_info.last_iter, s0_result_avail);
+          end
+          s0_node_res_avail_q <= s0_node_res_avail;
+        end
+      end
+// pragma translate_on
+
       //----------------------
       // s1: update buffer
       //----------------------
@@ -382,6 +398,22 @@ module pep_ks_mult
     mult_outp_last_pbs <= mult_outp_last_iterD;
     mult_outp_batch_id <= mult_outp_batch_idD;
   end
+
+// pragma translate_off
+  // SIM-ONLY: Trace KS mult outputs for VP-PBS integration
+  logic mult_outp_avail_q;
+  always_ff @(posedge clk) begin
+    if (!s_rst_n) begin
+      mult_outp_avail_q <= 1'b0;
+    end else begin
+      if (mult_outp_avail[0] && !mult_outp_avail_q) begin
+        $display("[KS_MULT] ★★★ MULT OUT READY ★★★ data[0]=0x%0h last_pbs=%0b batch_id=%0d", 
+                 mult_outp_data[0], mult_outp_last_pbs[0], mult_outp_batch_id[0]);
+      end
+      mult_outp_avail_q <= mult_outp_avail[0];
+    end
+  end
+// pragma translate_on
 
 //===============================================
 // Error

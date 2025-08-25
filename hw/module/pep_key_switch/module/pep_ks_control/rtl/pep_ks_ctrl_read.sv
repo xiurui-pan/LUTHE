@@ -68,9 +68,15 @@ module pep_ks_ctrl_read
     end
 
   always_ff @(posedge clk) begin
-    next_add         <= prev_add;
-    next_data_side   <= prev_data_side;
-    next_data_last_y <= prev_data_last_y;
+    if (!s_rst_n) begin
+      next_add         <= '0;
+      next_data_side   <= '0;
+      next_data_last_y <= 1'b0;
+    end else begin
+      next_add         <= prev_add;
+      next_data_side   <= prev_data_side;
+      next_data_last_y <= prev_data_last_y;
+    end
   end
 
 //=================================================================================================
@@ -93,9 +99,15 @@ module pep_ks_ctrl_read
     end
 
   always_ff @(posedge clk) begin
-    s0_add    <= prev_add;
-    r0_side   <= prev_data_side;
-    r0_last_y <= prev_data_last_y;
+    if (!s_rst_n) begin
+      s0_add    <= '0;
+      r0_side   <= '0;
+      r0_last_y <= 1'b0;
+    end else begin
+      s0_add    <= prev_add;
+      r0_side   <= prev_data_side;
+      r0_last_y <= prev_data_last_y;
+    end
   end
 
 //=================================================================================================
@@ -184,8 +196,13 @@ module pep_ks_ctrl_read
     end
 
   always_ff @(posedge clk) begin
-    r1_out_data <= r1_out_dataD;
-    r1_side     <= r1_sideD;
+    if (!s_rst_n) begin
+      r1_out_data <= '0;
+      r1_side     <= '0;
+    end else begin
+      r1_out_data <= r1_out_dataD;
+      r1_side     <= r1_sideD;
+    end
   end
 
 // pragma translate_off
@@ -227,9 +244,16 @@ module pep_ks_ctrl_read
     else          ctrl_mult_avail <= ctrl_mult_availD;
 
   always_ff @(posedge clk) begin
-    ctrl_mult_data <= ctrl_mult_dataD;
-    ctrl_mult_sign <= ctrl_mult_signD;
-    ctrl_mult_side <= ctrl_mult_sideD;
-    ctrl_mult_eol  <= ctrl_mult_eolD;
+    if (!s_rst_n) begin
+      ctrl_mult_data <= '0;
+      ctrl_mult_sign <= '0;
+      ctrl_mult_side <= '0;
+      ctrl_mult_eol  <= 1'b0;
+    end else begin
+      ctrl_mult_data <= ctrl_mult_dataD;
+      ctrl_mult_sign <= ctrl_mult_signD;
+      ctrl_mult_side <= ctrl_mult_sideD;
+      ctrl_mult_eol  <= ctrl_mult_eolD;
+    end
   end
 endmodule

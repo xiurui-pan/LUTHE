@@ -302,12 +302,14 @@ module pep_ks_control
 
 // pragma translate_off
   always_ff @(posedge clk)
-    if (s0_cmd_vld && s0_cmd_rdy)
+    if (s0_cmd_vld && s0_cmd_rdy) begin
+      $display("[KS_CTRL] LOOP_DEBUG: LBX=%0d, cmd.ks_loop=%0d, internal s0_ks_loop=%0d", LBX, s0_cmd.ks_loop, s0_ks_loop);
       // In the command, ks_loop indicates the LWE_K_P1 column.
       assert(s0_ks_loop == s0_cmd.ks_loop / LBX)
       else begin
         $fatal(1,"%t > ERROR: ks_loop mismatch: internal_counter=%0d, command=%0d", $time,s0_ks_loop, s0_cmd.ks_loop / LBX);
       end
+    end
 // pragma translate_on
 
 //-------------------------------------------------------------------------------------------------
@@ -351,6 +353,36 @@ module pep_ks_control
 
     .proc_almost_done           (proc_almost_done)
   );
+
+// pragma translate_off
+  // SIM-ONLY: Trace feed path activity to debug missing mult/result activity
+  logic [LBY-1:0] ctrl_mult_avail_q;
+  logic [LBY-1:0] blram_ctrl_rd_data_avail_q;
+  logic           ffifo_out_vld_q, ffifo_out_rdy_q;
+  always_ff @(posedge clk) begin
+    if (!s_rst_n) begin
+      ctrl_mult_avail_q <= '0;
+      blram_ctrl_rd_data_avail_q <= '0;
+      ffifo_out_vld_q <= 1'b0;
+      ffifo_out_rdy_q <= 1'b0;
+    end else begin
+      if ((|ctrl_mult_avail) && !(|ctrl_mult_avail_q)) begin
+        $display("[KS_CTRL][FEED] ★ ctrl_mult_avail asserted: 0x%0h eol=%0b eoy=%0b last_iter=%0b", 
+                 ctrl_mult_avail, ctrl_mult_last_eol, ctrl_mult_last_eoy, ctrl_mult_last_last_iter);
+      end
+      if ((|blram_ctrl_rd_data_avail) && !(|blram_ctrl_rd_data_avail_q)) begin
+        $display("[KS_CTRL][FEED] ★ BLWE data avail: 0x%0h", blram_ctrl_rd_data_avail);
+      end
+      if ((ffifo_out_vld && ffifo_out_rdy) && !(ffifo_out_vld_q && ffifo_out_rdy_q)) begin
+        $display("[KS_CTRL][FEED] ★ FFIFO OUT handshake: vld=1 rdy=1 ks_loop=%0d", ffifo_out_pcmd.ks_loop);
+      end
+      ctrl_mult_avail_q <= ctrl_mult_avail;
+      blram_ctrl_rd_data_avail_q <= blram_ctrl_rd_data_avail;
+      ffifo_out_vld_q <= ffifo_out_vld;
+      ffifo_out_rdy_q <= ffifo_out_rdy;
+    end
+  end
+// pragma translate_on
 
 //-------------------------------------------------------------------------------------------------
 // Enquiry
@@ -444,9 +476,8 @@ module pep_ks_control
       
       // Track batch command generation to KSK manager
       if (batch_cmd_avail && !batch_cmd_avail_q) begin
-        $display("[KS_CTRL] ★ Batch command generated: batch_cmd=0x%0h", batch_cmd);
-        $display("[KS_CTRL]   - Batch decode: slot_1h=0x%0h first_pid=%0d pbs_cnt_max=%0d", 
-          batch_cmd[7:0], batch_cmd[19:8], batch_cmd[31:20]);
+        // Print as raw vector to avoid mismatched field indexing during debug
+        $display("[KS_CTRL] ★ Batch command generated (raw)=0x%0h", batch_cmd);
       end
       
       // Track FIFO operations

@@ -518,6 +518,21 @@ module pep_ks_out_process
       end // for gen_b
   endgenerate
 
+// pragma translate_off
+  // SIM-ONLY: Trace BR_PROC dataflow for VP-PBS integration
+  logic br_proc_vld_q;
+  always_ff @(posedge clk) begin
+    if (!s_rst_n) begin
+      br_proc_vld_q <= 1'b0;
+    end else begin
+      if (br_proc_vld[0] && !br_proc_vld_q) begin
+        $display("[KS_OUT] ★★★ BR_PROC DATA READY ★★★ br_proc_lwe[0]=0x%0h rdy=%0b", br_proc_lwe[0], br_proc_rdy[0]);
+      end
+      br_proc_vld_q <= br_proc_vld[0];
+    end
+  end
+// pragma translate_on
+
 // ============================================================================================== --
 // br bfifo
 // ============================================================================================== --

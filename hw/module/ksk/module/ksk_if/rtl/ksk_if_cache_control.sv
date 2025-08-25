@@ -158,7 +158,8 @@ module ksk_if_cache_control
   logic                      qfifo_out_rdy;
   logic [TOTAL_BATCH_NB-1:0] qfifo_out_start_1h;
 
-  assign qfifo_in_vld      = |s0_batch_start_1h;
+  // Backpressure-safe enqueue: accept batch_start only when FIFO is ready
+  assign qfifo_in_vld      = (|s0_batch_start_1h) & qfifo_in_rdy;
 
   fifo_reg #(
    .WIDTH       (TOTAL_BATCH_NB),

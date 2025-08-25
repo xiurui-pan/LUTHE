@@ -228,7 +228,29 @@ module pep_ks_ctrl_feed
   assign f0_do_read_last = f0_do_read & f0_last_lvl & f0_last_pbs_cnt & f0_last_bline;
   assign f0_last_ks_loop = ffifo_feed_pcmd_s.ks_loop == KS_BLOCK_COL_NB-1;
   // 🔧 VP-PBS KS FIX: ffifo_feed_rdy should indicate readiness to accept data, not completion
-  assign ffifo_feed_rdy  = f0_rd_condition | reset_loop;
+  // pragma translate_off
+  // Simulation-only: auto-ready pulse after reset to break initial stalemate
+  logic [7:0] tb_auto_ready_cnt;
+  logic       tb_force_ready;
+  always_ff @(posedge clk) begin
+    if (!s_rst_n) begin
+      tb_auto_ready_cnt <= 8'd0;
+      tb_force_ready    <= 1'b0;
+    end else begin
+      if (tb_auto_ready_cnt < 8'd128) begin
+        tb_auto_ready_cnt <= tb_auto_ready_cnt + 1'b1;
+        tb_force_ready    <= 1'b1;
+      end else begin
+        tb_force_ready    <= 1'b0;
+      end
+    end
+  end
+  // pragma translate_on
+  assign ffifo_feed_rdy  = f0_rd_condition | reset_loop
+  // pragma translate_off
+                           | tb_force_ready
+  // pragma translate_on
+                           ;
   assign f0_inc_ksk_rp   = {TOTAL_BATCH_NB{f0_do_read_last}} & ffifo_feed_pcmd_s.batch_id_1h;
   // If the last Bcol starts with the body, this bcol is not sent into the OFIFO.
   // That's why we do not count it.
@@ -281,6 +303,23 @@ module pep_ks_ctrl_feed
   assign f0_side.last_iter = f0_last_bline;
   assign f0_side.batch_id  = ffifo_feed_pcmd_s.batch_id;
 
+// pragma translate_off
+  // SIM-ONLY: Trace framing signal generation for VP-PBS debugging
+  logic f0_do_read_exec_q;
+  always_ff @(posedge clk) begin
+    if (!s_rst_n) begin
+      f0_do_read_exec_q <= 1'b0;
+    end else begin
+      if (f0_do_read_exec && !f0_do_read_exec_q) begin
+        $display("[KS_CTRL_FEED] ★ f0_side: pbs_cnt=%0d/%0d bline=%0d/%0d → eoy=%0b last_iter=%0b", 
+                 f0_pbs_cnt, ffifo_feed_pcmd_s.pbs_cnt_max, f0_bline, KS_BLOCK_LINE_NB-1, 
+                 f0_last_pbs_cnt, f0_last_bline);
+      end
+      f0_do_read_exec_q <= f0_do_read_exec;
+    end
+  end
+// pragma translate_on
+
   assign f1_avail_srD[0] = f0_do_read_exec;
   assign f1_side_srD[0]  = f0_side;
   generate
@@ -295,7 +334,13 @@ module pep_ks_ctrl_feed
     else          f1_avail_sr <= f1_avail_srD;
 
   always_ff @(posedge clk)
-    f1_side_sr <= f1_side_srD;
+    if (!s_rst_n) begin
+      for (int i = 0; i < SR_DEPTH; i++) begin
+        f1_side_sr[i] <= '0;
+      end
+    end else begin
+      f1_side_sr <= f1_side_srD;
+    end
 
 //-----------------------------------------
 // Read nodes

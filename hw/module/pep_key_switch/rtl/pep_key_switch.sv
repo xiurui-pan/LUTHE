@@ -399,6 +399,7 @@ end
   logic ks_seq_result_vld_q;
   logic ks_seq_result_rdy_q;
   logic ks_seq_cmd_enquiry_q;
+  logic ctrl_mult_any_q;
   always_ff @(posedge clk) begin
     if (!s_rst_n) begin
       seq_ks_cmd_avail_q <= 1'b0;
@@ -407,6 +408,7 @@ end
       ks_seq_result_vld_q <= 1'b0;
       ks_seq_result_rdy_q <= 1'b0;
       ks_seq_cmd_enquiry_q <= 1'b0;
+      ctrl_mult_any_q <= 1'b0;
     end else begin
       // Command enquiry from VP-PBS - Enhanced for VP-PBS integration debugging
       if (ks_seq_cmd_enquiry && !ks_seq_cmd_enquiry_q) begin
@@ -438,6 +440,23 @@ end
       if (blram_ctrl_rd_data_avail[0])
         $display("[KS_TOP] ★ BLWE data ready: blram_ctrl_rd_data_avail[0]=1 data[0]=0x%0h", blram_ctrl_rd_data[0]);
       
+      // Trace when multiplier feed first becomes available (rising edge) to reduce log volume
+      if ((|ctrl_mult_avail) && !ctrl_mult_any_q) begin
+        int ksk_vld_count;
+        ksk_vld_count = 0;
+        for (int xi = 0; xi < LBX; xi++) begin
+          for (int yi = 0; yi < LBY; yi++) begin
+            if (ksk_vld[xi][yi]) ksk_vld_count++;
+          end
+        end
+        if (ksk_vld_count == 0) begin
+          $display("[KS_TOP] ⚠️  KSK not valid while ctrl_mult_avail rising (0x%0h) — multiplier stalled", ctrl_mult_avail);
+        end else begin
+          $display("[KS_TOP] 🔎 KSK valid lanes=%0d at ctrl_mult_avail rising (0x%0h)", ksk_vld_count, ctrl_mult_avail);
+        end
+      end
+      ctrl_mult_any_q <= |ctrl_mult_avail;
+
       // Result handshake with VP-PBS
       if (ks_seq_result_vld && !ks_seq_result_vld_q)
         $display("[KS_TOP] ★ Result valid: ks_seq_result_vld=1→ result=0x%0h", ks_seq_result);

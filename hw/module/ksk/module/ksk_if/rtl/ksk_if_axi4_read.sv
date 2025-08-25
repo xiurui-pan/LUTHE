@@ -483,7 +483,10 @@ module ksk_if_axi4_read
       assign s0_axi.arburst = AXI4B_INCR;
       assign s0_axi.araddr  = s0_add;
       assign s0_axi.arlen   = s0_axi_word_nb - 1;
-      assign s0_axi_arvalid = s0_cctrl_rd_vld & s0_recp_cmd_sent;
+      
+      // 🔧 VP-PBS AXI X-state fix: Add X-state protection for AXI valid signal
+      // Only assert arvalid when both control signals are properly defined (not X)
+      assign s0_axi_arvalid = ksk_mem_avail && (s0_cctrl_rd_vld === 1'b1) && (s0_recp_cmd_sent === 1'b1);
 
       assign s0_cctrl_rd_rdy = s0_axi_arready & s0_last_axi_word_remain & s0_last_x_idx & s0_recp_cmd_sent;
 

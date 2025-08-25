@@ -227,7 +227,8 @@ module pep_ks_ctrl_feed
 
   assign f0_do_read_last = f0_do_read & f0_last_lvl & f0_last_pbs_cnt & f0_last_bline;
   assign f0_last_ks_loop = ffifo_feed_pcmd_s.ks_loop == KS_BLOCK_COL_NB-1;
-  assign ffifo_feed_rdy  = (f0_last_lvl & f0_last_pbs_cnt & f0_last_bline & f0_rd_condition) | reset_loop;
+  // 🔧 VP-PBS KS FIX: ffifo_feed_rdy should indicate readiness to accept data, not completion
+  assign ffifo_feed_rdy  = f0_rd_condition | reset_loop;
   assign f0_inc_ksk_rp   = {TOTAL_BATCH_NB{f0_do_read_last}} & ffifo_feed_pcmd_s.batch_id_1h;
   // If the last Bcol starts with the body, this bcol is not sent into the OFIFO.
   // That's why we do not count it.
@@ -355,5 +356,47 @@ module pep_ks_ctrl_feed
     );
     end
   endgenerate
+
+// pragma translate_off
+  // VP-PBS KS Feed Debug Infrastructure
+  logic [7:0] feed_debug_counter;
+  always_ff @(posedge clk) begin
+    if (!s_rst_n) begin
+      feed_debug_counter <= 0;
+    end else begin
+      feed_debug_counter <= feed_debug_counter + 1;
+      
+      // Debug every 50 cycles to prevent log overflow
+      if (feed_debug_counter % 50 == 0) begin
+        $display("[KS_FEED] 🔍 STATE: ffifo_vld=%0b f0_rd_condition=%0b f0_do_read=%0b", 
+          ffifo_feed_vld, f0_rd_condition, f0_do_read);
+        $display("[KS_FEED]   - Conditions: f0_ksk_empty=%0b f0_ofifo_full=%0b reset_loop=%0b", 
+          f0_ksk_empty, f0_ofifo_full, reset_loop);
+        $display("[KS_FEED]   - FIFO ready: ffifo_feed_rdy=%0b", ffifo_feed_rdy);
+        
+        if (ffifo_feed_vld && !f0_rd_condition) begin
+          $display("[KS_FEED] ⚠️  FEED BLOCKED: FIFO has command but read condition failed");
+          if (f0_ksk_empty) 
+            $display("[KS_FEED] ⚠️  BLOCK REASON: KSK empty - ksk_empty=0x%0h batch_id_1h=0x%0h", 
+              ksk_empty, ffifo_feed_pcmd_s.batch_id_1h);
+          if (f0_ofifo_full)
+            $display("[KS_FEED] ⚠️  BLOCK REASON: Output FIFO full - ofifo_full=0x%0h", ofifo_full);
+        end
+      end
+      
+      // Track successful command processing
+      if (ffifo_feed_vld && ffifo_feed_rdy) begin
+        $display("[KS_FEED] ★ Command processed: first_pid=%0d ks_loop=%0d pbs_cnt_max=%0d", 
+          ffifo_feed_pcmd_s.first_pid, ffifo_feed_pcmd_s.ks_loop, ffifo_feed_pcmd_s.pbs_cnt_max);
+      end
+      
+      // Track read operations
+      if (f0_do_read_exec) begin
+        $display("[KS_FEED] ★ Read executed: add=0x%0h bline=%0d pbs_cnt=%0d lvl=%0d", 
+          f0_add, f0_bline, f0_pbs_cnt, f0_lvl);
+      end
+    end
+  end
+// pragma translate_on
 
 endmodule

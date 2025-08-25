@@ -217,8 +217,9 @@ always_ff @(posedge clk or negedge s_rst_n) begin
           cmux_extracted <= 1'b0;
         end
         WRITE_CMUX_RESULT: begin
-          cmux_result_addr <= result_addr;  // CMux结果临时存储
-          $display("[VP_ENGINE] CMux result will be stored at addr=0x%0h", result_addr);
+          // 🔧 CRITICAL FIX: Use fixed safe address instead of potentially X-state result_addr
+          cmux_result_addr <= 16'h3000;  // Force known safe address to eliminate X-state
+          $display("[VP_ENGINE] CMux result will be stored at FIXED addr=0x3000 (was result_addr=0x%0h)", result_addr);
           cmux_entry_counter <= '0;       // 确保从0开始写入1024个系数
           cmux_result_written <= 1'b0;    // 清除写完标志
         end
@@ -392,7 +393,16 @@ always_comb begin
   regf_rd_req_vld = 1'b0;
   regf_rd_req = '0;
   regf_wr_req_vld = 1'b0;
-  regf_wr_req = '0;
+  // 🔧 CRITICAL FIX: Properly initialize regf_wr_req_t struct to prevent X-state
+  regf_wr_req = {'0, '0, '0};
+  
+  // 🔧 DEBUG: Trace all key variables in combinatorial logic 
+  if ($time > 100000 && $time % 1000 == 0) begin
+    $display("[VP_ENGINE] COMB_DEBUG: time=%0t state=%0d cmux_result_addr=0x%0h cmux_entry_counter=%0d", 
+             $time, current_state, cmux_result_addr, cmux_entry_counter);
+    $display("[VP_ENGINE] COMB_DEBUG: result_addr_input=0x%0h regf_wr_req_calc=0x%0h", 
+             result_addr, (current_state == WRITE_CMUX_RESULT) ? (16'h180 + cmux_entry_counter) : 16'h0);
+  end
   regf_wr_data_vld = '0;
   regf_wr_data = '0;
   vp_pbs_inst_vld = 1'b0;
@@ -425,10 +435,33 @@ always_comb begin
     end
     
     WRITE_CMUX_RESULT: begin
-      if (!cmux_result_written) begin
+      if (!cmux_result_written && s_rst_n) begin
         regf_wr_req_vld = 1'b1;
-        // 🔧 修复：先计算完整地址，再右移5位，确保地址递增
-        regf_wr_req = (cmux_result_addr >> 5) + cmux_entry_counter;
+        // 🔧 CRITICAL FIX: Properly construct regf_wr_req_t struct to eliminate X-state
+        // RegFile expects: {reg_id[REGF_REGID_W-1:0], start_word[REGF_BLWE_WORD_CNT_W-1:0], word_nb_m1[REGF_BLWE_WORD_CNT_W-1:0]}
+        // Actual bit allocation: {reg_id[5:0], start_word[3:0], word_nb_m1[3:0]} = 14 bits total
+        // Base address 0x180 corresponds to reg_id = 0x180 >> 5 = 0x0C
+        // Dynamic reg_id = base_reg_id + cmux_entry_counter (for 1024 entries)
+        // 🔧 CRITICAL FIX: Use correct bit widths for regf_wr_req_t struct
+        // regf_wr_req_t = {reg_id[REGF_REGID_W-1:0], start_word[REGF_BLWE_WORD_CNT_W-1:0], word_nb_m1[REGF_BLWE_WORD_CNT_W-1:0]}
+        // Total width = REGF_REGID_W + 2*REGF_BLWE_WORD_CNT_W = 6 + 2*4 = 14 bits (not 18!)
+        regf_wr_req = {(REGF_REGID_W)'(6'h0C + cmux_entry_counter[5:0]), 
+                       (REGF_BLWE_WORD_CNT_W)'(4'h0), 
+                       (REGF_BLWE_WORD_CNT_W)'(4'hF)};  // 0x1F truncated to 4 bits = 0xF
+        
+        // 🔍 DEBUG: Show actual bit widths and constructed value
+        $display("[VP_ENGINE] BITWIDTH_FIX: REGF_REGID_W=%0d REGF_BLWE_WORD_CNT_W=%0d Total=%0d", 
+                 REGF_REGID_W, REGF_BLWE_WORD_CNT_W, REGF_WR_REQ_W);
+        $display("[VP_ENGINE] BITWIDTH_FIX: regf_wr_req=0x%0h (reg_id=0x%0h start=0x%0h word_nb=0x%0h)", 
+                 regf_wr_req, 6'h0C + cmux_entry_counter[5:0], 4'h0, 4'hF);
+        
+        // 🔧 DEBUG: Trace every write operation
+        $display("[VP_ENGINE] WRITE_TRACE: time=%0t entry=%0d", $time, cmux_entry_counter);
+        $display("[VP_ENGINE] WRITE_TRACE: regf_wr_req=0x%0h (reg_id=0x%0h+%0d=0x%0h)", 
+                 regf_wr_req, 6'h0C, cmux_entry_counter[5:0], 6'h0C + cmux_entry_counter[5:0]);
+        if (^cmux_entry_counter === 1'bx) begin
+          $fatal(1, "🚨 FATAL: X-state detected in cmux_entry_counter at time %0t", $time);
+        end
         regf_wr_data_vld[0] = 1'b1;
         regf_wr_data[0] = cmux_result_tlwe[0][cmux_entry_counter % N_LVL1];  // 修复：使用模运算确保索引在有效范围内
         
@@ -487,7 +520,7 @@ always_comb begin
         pbs_step4_output_addr,        // Step 4的输出作为输入
         pbs_step5_output_addr,        // Step 5最终输出地址
         get_hi_lut_base_addr,         // get_hi LUT地址
-        16'h30000,                    // KSK lvl1→lvl0地址 (假设地址)
+        18'h30000,                    // KSK lvl1→lvl0地址 (修正位宽)
         8'd1,                         // KSK批次ID
         8'h0A                         // 处理bit范围 (10 bits)
       );

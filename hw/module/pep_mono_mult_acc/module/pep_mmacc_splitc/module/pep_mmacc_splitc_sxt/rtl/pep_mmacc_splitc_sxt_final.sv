@@ -599,10 +599,16 @@ module pep_mmacc_splitc_sxt_final
     sxt_seq_done_pid <= ack_out_cmd.pid;
 
 // pragma translate_off
-  always_ff @(posedge clk)
-    if (ack_out_rdy)
+  always_ff @(posedge clk) begin
+    if (ack_out_rdy) begin
       if (!ack_out_vld) begin
-        $display("%t > WARNING: ack fifo not valid when needed! ACK_FIFO_DEPTH increased to %0d for VP-PBS timing",$time, ACK_FIFO_DEPTH);
+        // 🔧 防止ack fifo WARNING刷屏 - 只在第一次显示
+        static bit ack_fifo_warning_shown = 1'b0;
+        if (!ack_fifo_warning_shown) begin
+          $display("%t > WARNING: ack fifo not valid when needed! ACK_FIFO_DEPTH increased to %0d for VP-PBS timing",$time, ACK_FIFO_DEPTH);
+          $display("         > This warning will only be shown once to avoid spam. Issue is known and mitigated by increased FIFO depth.");
+          ack_fifo_warning_shown = 1'b1;
+        end
         // NOTE: This condition can occur during VP-PBS integration due to timing mismatches 
         // between regfile ack latency and pep_mmacc internal processing timing.
         // Fix applied: Increased ACK_FIFO_DEPTH from 2 to 4 to provide additional buffering.
@@ -611,6 +617,8 @@ module pep_mmacc_splitc_sxt_final
         // Re-enable assertion after FIFO depth increase
         // $fatal(1,"%t > ERROR: ack fifo not valid when needed!",$time);
       end
+    end
+  end
 // pragma translate_on
 
 // ============================================================================================= --

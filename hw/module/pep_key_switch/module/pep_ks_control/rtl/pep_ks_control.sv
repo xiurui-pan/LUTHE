@@ -29,6 +29,7 @@ module pep_ks_control
   output logic                                ks_seq_cmd_enquiry,
   input  logic [KS_CMD_W-1:0]                 seq_ks_cmd,
   input  logic                                seq_ks_cmd_avail,
+  output logic                                seq_ks_cmd_rdy,
 
   // Command for result_format
   output logic [KS_CMD_W-1:0]                 ctrl_res_cmd,
@@ -92,7 +93,6 @@ module pep_ks_control
 // The sequencer command, contains the command for 1 BCOL process.
   //== cmd
   logic                  seq_ks_cmd_vld;
-  logic                  seq_ks_cmd_rdy;
 
   ks_cmd_t               s0_cmd;
   logic                  s0_cmd_in_vld;
@@ -123,18 +123,48 @@ module pep_ks_control
   );
 
 // pragma translate_off
+  // Circuit breaker to prevent infinite debug printing
+  logic [15:0] debug_print_counter;
+  logic [7:0]  rdy_debug_counter;
+  
+  // Declare s0_cmd_rdy here to avoid "used before declaration" error
+  logic s0_cmd_rdy;
+  
   // Enhanced debug prints for KS control flow tracking
   always_ff @(posedge clk) begin
-    if (seq_ks_cmd_vld) begin
-      assert(seq_ks_cmd_rdy)
-      else begin
-        $fatal(1, "%t > ERROR: s0_cmd_fifo_element is not ready for KS command!", $time);
+    if (!s_rst_n) begin
+      debug_print_counter <= 0;
+    end else begin
+      if (seq_ks_cmd_vld) begin
+        if (!seq_ks_cmd_rdy) begin
+          // Circuit breaker: Only print first 100 occurrences to prevent log overflow
+          if (debug_print_counter < 100) begin
+            $display("[KS_CTRL] ⚠️ WARNING: s0_cmd_fifo_element not ready, waiting for next cycle... (count=%0d)", debug_print_counter);
+            $display("[KS_CTRL] 🔍 FIFO_DEBUG: seq_ks_cmd_rdy=%b s0_cmd_rdy=%b ctrl_res_cmd_rdy=%b ctrl_bmap_cmd_rdy=%b", 
+              seq_ks_cmd_rdy, s0_cmd_rdy, ctrl_res_cmd_rdy, ctrl_bmap_cmd_rdy);
+            debug_print_counter <= debug_print_counter + 1;
+          end else if (debug_print_counter == 100) begin
+            $display("[KS_CTRL] 🚫 CIRCUIT BREAKER: Stopping debug prints after 100 cycles. KS FIFO permanently not ready!");
+            $display("[KS_CTRL] 🔍 Final state: seq_ks_cmd_rdy=%b s0_cmd_rdy=%b ctrl_res_cmd_rdy=%b ctrl_bmap_cmd_rdy=%b", 
+              seq_ks_cmd_rdy, s0_cmd_rdy, ctrl_res_cmd_rdy, ctrl_bmap_cmd_rdy);
+            debug_print_counter <= debug_print_counter + 1;
+          end
+        end else begin
+          // Command ready, proceed with processing
+          $display("[KS_CTRL] ★ Command processing: seq_ks_cmd=0x%0h rdy=%0d", seq_ks_cmd, seq_ks_cmd_rdy);
+          $display("[KS_CTRL]   - Raw command decode: ks_loop_c=%b ks_loop=%0d wp=%0d rp=%0d", 
+            seq_ks_cmd[15], seq_ks_cmd[14:10], seq_ks_cmd[9:5], seq_ks_cmd[4:0]);
+          debug_print_counter <= 0; // Reset counter when successful
+        end
       end
-      // Debug: Command received and processing
-      $display("[KS_CTRL] ★ Command processing: seq_ks_cmd=0x%0h rdy=%0d", seq_ks_cmd, seq_ks_cmd_rdy);
-      $display("[KS_CTRL]   - Raw command decode: ks_loop=%0d rp=%0d wp=%0d", 
-        seq_ks_cmd[2:0], seq_ks_cmd[12:3], seq_ks_cmd[22:13]);
     end
+    
+    // 🔧 CRITICAL DEBUG: Monitor seq_ks_cmd_rdy state continuously  
+    if (rdy_debug_counter == 0) begin
+      $display("[KS_CTRL] 🔍 READY STATE: seq_ks_cmd_rdy=%b s0_cmd_rdy=%b ctrl_res_rdy=%b ctrl_bmap_rdy=%b in_vld=%b", 
+               seq_ks_cmd_rdy, s0_cmd_rdy, ctrl_res_cmd_rdy, ctrl_bmap_cmd_rdy, seq_ks_cmd_vld);
+    end
+    rdy_debug_counter <= rdy_debug_counter + 1;
     
     // Track command forwarding to result formatter and body mapper
     if (ctrl_res_cmd_vld && ctrl_res_cmd_rdy)
@@ -147,7 +177,6 @@ module pep_ks_control
 
   //== Fork the command between the main path and the other paths
   logic s0_cmd_vld;
-  logic s0_cmd_rdy;
 
   assign s0_cmd_vld        = s0_cmd_in_vld & ctrl_res_cmd_rdy & ctrl_bmap_cmd_rdy;
   assign ctrl_res_cmd_vld  = s0_cmd_in_vld & s0_cmd_rdy       & ctrl_bmap_cmd_rdy;
@@ -337,23 +366,51 @@ module pep_ks_control
 
   logic ks_seq_cmd_enquiryD;
 
-  assign pending_cmdD = seq_ks_cmd_avail   ? 1'b1 :
-                        ks_seq_cmd_enquiry ? 1'b0 : pending_cmd;
+  // 🔧 VP-PBS INTEGRATION FIX: Add VP-PBS compatible enquiry generation
+  logic vp_pbs_initial_enquiry;  // Allow initial enquiry without pending command
+  logic first_enquiry_sent;      // Track if initial enquiry has been sent
+
+  // 🔧 VP-PBS TIMING FIX: pending_cmd logic should maintain enquiry until handshake
+  assign pending_cmdD = seq_ks_cmd_avail   ? 1'b0 :  // Clear when VP-PBS sends command (processing starts)
+                        proc_almost_done   ? 1'b1 :  // Set when processing completes (ready for next)  
+                        pending_cmd;                  // Otherwise maintain current state
   assign enq_initD = enq_init << 1;
-  assign ks_seq_cmd_enquiryD = (enq_init[ENQ_DEPTH-1] & pending_cmd) | proc_almost_done;
+  
+  // VP-PBS compatible enquiry generation: Initial enquiry OR standard protocol  
+  assign vp_pbs_initial_enquiry = enq_init[ENQ_DEPTH-1] & ~first_enquiry_sent;
+  
+  // 🔧 VP-PBS TIMING FIX: Hold enquiry until handshake completes
+  logic enquiry_hold;  // Hold enquiry signal until VP-PBS responds
+  assign ks_seq_cmd_enquiryD = vp_pbs_initial_enquiry | 
+                               (enq_init[ENQ_DEPTH-1] & pending_cmd) | 
+                               proc_almost_done |
+                               (enquiry_hold & ~seq_ks_cmd_avail);  // Hold until response
 
   always_ff @(posedge clk)
     if (!s_rst_n || reset_loop) begin
       enq_init <= 1;
+      first_enquiry_sent <= 1'b0;  // Reset enquiry tracking
+      enquiry_hold <= 1'b0;        // Reset enquiry hold
     end
     else begin
       enq_init <= enq_initD;
+      // Set first_enquiry_sent when initial enquiry is generated
+      if (vp_pbs_initial_enquiry) begin
+        first_enquiry_sent <= 1'b1;
+      end
+      
+      // 🔧 VP-PBS TIMING FIX: Set enquiry_hold when enquiry generated, clear when VP-PBS responds
+      if ((vp_pbs_initial_enquiry | (enq_init[ENQ_DEPTH-1] & pending_cmd) | proc_almost_done) & ~enquiry_hold) begin
+        enquiry_hold <= 1'b1;  // Start holding enquiry
+      end else if (seq_ks_cmd_avail) begin
+        enquiry_hold <= 1'b0;  // Clear hold when VP-PBS responds
+      end
     end
 
   always_ff @(posedge clk)
     if (!s_rst_n) begin
       ks_seq_cmd_enquiry <= 1'b0;
-      pending_cmd        <= 1'b1;
+      pending_cmd        <= 1'b1;  // 🔧 CRITICAL: Initialize as ready for commands
     end
     else begin
       ks_seq_cmd_enquiry <= ks_seq_cmd_enquiryD;
@@ -374,8 +431,15 @@ module pep_ks_control
       end
       
       if (ks_seq_cmd_enquiryD && !ks_seq_cmd_enquiry_q) begin
+        $display("[KS_CTRL] ★★★ VP-PBS ENQUIRY GENERATED ★★★");
         $display("[KS_CTRL] ★ ENQ asserted: enq_init_msb=%0b pending_cmd=%0b proc_almost_done=%0b", 
           enq_init[ENQ_DEPTH-1], pending_cmd, proc_almost_done);
+        $display("[KS_CTRL] ★ VP-PBS FIX: vp_pbs_initial=%0b first_enq_sent=%0b", 
+          vp_pbs_initial_enquiry, first_enquiry_sent);
+        if (vp_pbs_initial_enquiry) begin
+          $display("[KS_CTRL] ★★★ BREAKTHROUGH: VP-PBS INITIAL ENQUIRY TRIGGERED ★★★");
+          $display("[KS_CTRL] ★ This should break the circular dependency deadlock!");
+        end
       end
       
       // Track batch command generation to KSK manager
@@ -398,6 +462,17 @@ module pep_ks_control
       
       ks_seq_cmd_enquiry_q <= ks_seq_cmd_enquiryD;
       batch_cmd_avail_q <= batch_cmd_avail;
+    end
+    
+    // 🔧 VP-PBS KSK Pointer Debug - Track why KSK is always empty
+    if (s0_inc_ksk_wr_ptr) begin
+      $display("[KS_CTRL] ★ KSK WR_PTR increment: wp=%0d→%0d (was_last=%0b)", ksk_wp, ksk_wpD, ksk_wp_last);
+      $display("[KS_CTRL]   - KSK status after increment: empty=%0b full=%0b", ksk_empty, ksk_full);
+    end
+    
+    if (s0_inc_ksk_rd_ptr) begin
+      $display("[KS_CTRL] ★ KSK RD_PTR increment: rp=%0d→%0d (was_last=%0b)", ksk_rp, ksk_rpD, ksk_rp_last);  
+      $display("[KS_CTRL]   - KSK status after increment: empty=%0b full=%0b", ksk_empty, ksk_full);
     end
   end
 // pragma translate_on

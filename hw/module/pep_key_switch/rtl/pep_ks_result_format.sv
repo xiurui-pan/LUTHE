@@ -170,17 +170,48 @@ module pep_ks_result_format
   assign s0_result.rp      = s0_cmd.rp;
 
 // pragma translate_off
-  always_ff @(posedge clk)
+  // VP-PBS Result Format Debug Infrastructure
+  logic [7:0] result_debug_counter;
+  always_ff @(posedge clk) begin
     if (!s_rst_n || reset_loop) begin
-      // do nothing
-    end
-    else begin
+      result_debug_counter <= 0;
+    end else begin
+      result_debug_counter <= result_debug_counter + 1;
+      
+      // Debug every 100 cycles to prevent log overflow
+      if (result_debug_counter % 100 == 0) begin
+        $display("[KS_RESULT] 🔍 RESULT_STATE: s0_result_vld=%0b ks_seq_result_vld=%0b", 
+          s0_result_vld, ks_seq_result_vld);
+        $display("[KS_RESULT]   - Conditions: cmd_vld=%0b is_body=%0b proc_vld=%0b last_lwe=%0b reset=%0b", 
+          s0_cmd_vld, s0_is_body, s0_proc_vld, s0_last_lwe_cnt, reset_loop);
+        $display("[KS_RESULT]   - Counters: ks_loop=%0d x=%0d lwe_cnt=%0d/%0d", 
+          s0_ks_loop, s0_x, s0_lwe_cnt, s0_lwe_cnt_max);
+      end
+      
+      // Track result generation attempts
+      if (s0_result_vld && s0_result_rdy) begin
+        $display("[KS_RESULT] ★★★ RESULT GENERATED ★★★");
+        $display("[KS_RESULT] ★ Internal result: ks_loop=%0d x=%0d wp=%0d rp=%0d", 
+          s0_ks_loop, s0_x, s0_cmd.wp, s0_cmd.rp);
+      end
+      
+      // Track final output
+      if (ks_seq_result_vld && ks_seq_result_rdy) begin
+        $display("[KS_RESULT] ★★★ FINAL RESULT TO VP-PBS ★★★ result=0x%0h", ks_seq_result);
+      end
+      
+      // Track critical signal changes
+      if (s0_proc_vld && !s0_proc_vld) begin // Rising edge
+        $display("[KS_RESULT] ★ br_proc_vld asserted: lwe=0x%0h", br_proc_lwe);
+      end
+      
       if (s0_cmd_vld)
         assert((s0_cmd.ks_loop / LBX) == s0_ks_loop)
         else begin
           $fatal(1,"%t > ERROR: local and command ks_loop mismatch. cmd=%0d local=%0d", $time, (s0_cmd.ks_loop / LBX), s0_ks_loop);
         end
     end
+  end
 // pragma translate_on
 
 // ============================================================================================== --

@@ -84,12 +84,23 @@ module tb_wop_vertical_packing_engine
   logic pbs_inst_load_blwe_ack;
   
   // KS interface - shared between VP-PBS and regular PBS  
-  logic ks_seq_cmd_enquiry;
+  logic ks_seq_cmd_enquiry_from_ks;  // 🔧 CRITICAL FIX: KS hardware output enquiry
+  logic ks_seq_cmd_enquiry;          // Internal signal for u_dut input
   logic [KS_CMD_W-1:0] seq_ks_cmd;
   logic seq_ks_cmd_avail;
+  logic seq_ks_cmd_rdy_tb;           // 🔧 CRITICAL FIX: Add missing testbench signal
   logic [KS_RESULT_W-1:0] ks_seq_result;
   logic ks_seq_result_vld;
   logic ks_seq_result_rdy;
+
+  // BLWE interface - VP-PBS to KS hardware data path  
+  logic [LBY-1:0] vp_ldb_blram_wr_en;
+  logic [LBY-1:0][PID_W-1:0] vp_ldb_blram_wr_pid;
+  logic [LBY-1:0][MOD_Q_W-1:0] vp_ldb_blram_wr_data;
+  logic [LBY-1:0] vp_ldb_blram_wr_pbs_last;
+
+  // 🔧 CRITICAL FIX: Connect KS hardware enquiry output to VP-PBS enquiry input
+  assign ks_seq_cmd_enquiry = ks_seq_cmd_enquiry_from_ks;
 
   // Real pe_pbs_with_ks interface signals
   // KSK coefficient interface
@@ -427,9 +438,16 @@ module tb_wop_vertical_packing_engine
     .ks_seq_cmd_enquiry(ks_seq_cmd_enquiry),
     .seq_ks_cmd(seq_ks_cmd), 
     .seq_ks_cmd_avail(seq_ks_cmd_avail),
+    .seq_ks_cmd_rdy(seq_ks_cmd_rdy_tb),    // 🔧 CRITICAL FIX: Connect missing ready signal
     .ks_seq_result(ks_seq_result),
     .ks_seq_result_vld(ks_seq_result_vld),
-    .ks_seq_result_rdy(ks_seq_result_rdy)
+    .ks_seq_result_rdy(ks_seq_result_rdy),
+
+    // BLWE Interface - Connect VP-PBS data to KS hardware BLWE RAM
+    .vp_ldb_blram_wr_en(vp_ldb_blram_wr_en),
+    .vp_ldb_blram_wr_pid(vp_ldb_blram_wr_pid),
+    .vp_ldb_blram_wr_data(vp_ldb_blram_wr_data),
+    .vp_ldb_blram_wr_pbs_last(vp_ldb_blram_wr_pbs_last)
   );
   
   // ==============================================================================================
@@ -758,8 +776,21 @@ assign vp_regf_wr_data_rdy = '1;   // 写数据始终ready
 always_ff @(posedge clk) begin
   // VP Engine RegFile写入 (使用阻塞赋值兼容Vivado)
   if (vp_regf_wr_req_vld && vp_regf_wr_data_vld[0]) begin
-    regfile_memory[vp_regf_wr_req[15:0]] = vp_regf_wr_data[0];
-    $display("[TB] VP Engine wrote 0x%08h to RegFile addr 0x%04h", vp_regf_wr_data[0], vp_regf_wr_req[15:0]);
+    // 🔧 CRITICAL DEBUG: X-state detection for regf_wr_req_t struct (14-bit total)
+    // Correct bit mapping: {reg_id[13:8], start_word[7:4], word_nb_m1[3:0]}
+    if ($isunknown(vp_regf_wr_req)) begin
+      $display("🚨 FATAL: X-state detected in vp_regf_wr_req struct at time %0t", $time);
+      $display("🚨 Struct field analysis (14-bit total):");
+      $display("   reg_id = 0x%0h [13:8]", vp_regf_wr_req[13:8]);  // REGF_REGID_W = 6 bits  
+      $display("   start_word = %0d [7:4]", vp_regf_wr_req[7:4]);  // REGF_BLWE_WORD_CNT_W = 4 bits
+      $display("   word_nb_m1 = %0d [3:0]", vp_regf_wr_req[3:0]);  // REGF_BLWE_WORD_CNT_W = 4 bits
+      $display("   full vp_regf_wr_req = 0x%0h (width=%0d)", vp_regf_wr_req, $bits(vp_regf_wr_req));
+      $fatal(1, "X-state in RegFile struct - terminating simulation for debugging");
+    end
+    // 🔧 CRITICAL FIX: Properly decode regf_wr_req_t struct with correct bit ranges
+    regfile_memory[{8'h00, vp_regf_wr_req[13:8]}] = vp_regf_wr_data[0];  // Use reg_id[5:0] as key
+    $display("[TB] VP Engine wrote 0x%08h to RegFile struct=0x%03h reg_id=0x%02h width=%0d", 
+             vp_regf_wr_data[0], vp_regf_wr_req, vp_regf_wr_req[13:8], $bits(vp_regf_wr_req));
   end
 end
 
@@ -822,12 +853,13 @@ always_ff @(posedge clk) begin
       test_lut_table[0][0][(lut_addr_index + 1) % N_LVL1],
       test_lut_table[0][0][lut_addr_index % N_LVL1]
     };
-    $display("[TB] VP LUT data provided: addr=0x%08h, data={0x%08h,0x%08h,0x%08h,0x%08h}", 
-             vp_lut_addr, 
-             test_lut_table[0][0][(lut_addr_index + 3) % N_LVL1],
-             test_lut_table[0][0][(lut_addr_index + 2) % N_LVL1],
-             test_lut_table[0][0][(lut_addr_index + 1) % N_LVL1],
-             test_lut_table[0][0][lut_addr_index % N_LVL1]);
+    // 过多刷屏，暂时屏蔽
+    // $display("[TB] VP LUT data provided: addr=0x%08h, data={0x%08h,0x%08h,0x%08h,0x%08h}", 
+    //          vp_lut_addr, 
+    //          test_lut_table[0][0][(lut_addr_index + 3) % N_LVL1],
+    //          test_lut_table[0][0][(lut_addr_index + 2) % N_LVL1],
+    //          test_lut_table[0][0][(lut_addr_index + 1) % N_LVL1],
+    //          test_lut_table[0][0][lut_addr_index % N_LVL1]);
   end else begin
     vp_lut_data_avail <= #2 1'b0;
   end
@@ -1026,6 +1058,24 @@ pep_inst_t decoded_inst;
 // PBS service ready logic
 assign pbs_inst_rdy = !pbs_processing;
 
+// 🔧 CRITICAL FIX: KS ready signal simulation
+// In real hardware, this comes from pep_key_switch module
+// For testbench, simulate KS hardware being ready after reset
+logic ks_ready_delay_counter;
+always_ff @(posedge clk or negedge s_rst_n) begin
+  if (!s_rst_n) begin
+    ks_ready_delay_counter <= 1'b0;
+    seq_ks_cmd_rdy_tb <= 1'b0;
+  end else begin
+    // After reset, wait a few cycles then assert KS ready
+    if (!ks_ready_delay_counter) begin
+      ks_ready_delay_counter <= 1'b1;
+      seq_ks_cmd_rdy_tb <= 1'b1;  // KS module ready to accept commands
+      $display("[TB] 🔧 KS READY: seq_ks_cmd_rdy_tb asserted at time %0t", $time);
+    end
+  end
+end
+
 // PBS service mock implementation
 always_ff @(posedge clk or negedge s_rst_n) begin
   if (!s_rst_n) begin
@@ -1117,9 +1167,47 @@ end
 assign seq_ldb_cmd = '0;
 assign seq_ldb_vld = 1'b0;
 
-// Reset cache control
+// 🔧 VP-PBS AXI X-state fix: Proper KSK hardware initialization sequence
+logic ksk_mem_avail;
+logic [7:0] ksk_init_delay_counter;
+
+// Reset cache control with proper sequencing
 assign reset_ks_cache = ~s_rst_n;
-assign inc_ksk_wr_ptr = 1'b0; // Controlled by KS module
+
+// KSK memory available signal - assert after reset release with delay for proper initialization
+always_ff @(posedge clk)
+  if (!s_rst_n) begin
+    ksk_init_delay_counter <= 8'b0;
+    ksk_mem_avail <= 1'b0;
+  end
+  else if (ksk_init_delay_counter < 8'd50) begin // 50 cycle startup delay
+    ksk_init_delay_counter <= ksk_init_delay_counter + 1;
+    ksk_mem_avail <= 1'b0;
+  end
+  else begin
+    ksk_mem_avail <= 1'b1; // KSK memory is available after initialization delay
+  end
+
+// 🔧 VP-PBS KSK FIX: Generate KSK write pointer increments to indicate key availability
+logic [3:0] ksk_init_counter;
+logic ksk_data_loaded;
+
+always_ff @(posedge clk) begin
+  if (!s_rst_n) begin
+    ksk_init_counter <= 0;
+    ksk_data_loaded <= 1'b0;
+  end else begin
+    // Generate KSK write pulses for first few cycles to populate KSK FIFO
+    if (ksk_init_counter < 4) begin
+      ksk_init_counter <= ksk_init_counter + 1;
+      ksk_data_loaded <= 1'b1;
+    end else begin
+      ksk_data_loaded <= 1'b0;
+    end
+  end
+end
+
+assign inc_ksk_wr_ptr = ksk_data_loaded;
 
 // RegFile read arbitration - KS has priority over VP-PBS DUT
 // Only one module can access RegFile at a time
@@ -1129,6 +1217,61 @@ assign pep_dut_regf_rd_req_rdy = pep_regf_rd_req_rdy && !pep_ks_regf_rd_req_vld;
 // Mux the requests to shared RegFile interface
 assign pep_regf_rd_req_vld = pep_ks_regf_rd_req_vld || pep_dut_regf_rd_req_vld;
 assign pep_regf_rd_req = pep_ks_regf_rd_req_vld ? pep_ks_regf_rd_req : pep_dut_regf_rd_req;
+
+// ==============================================================================================
+// CRITICAL FIX: Connect VP-PBS BLWE data to KS hardware - Format Conversion
+// ==============================================================================================
+// Convert VP-PBS BLWE interface to format expected by pe_pbs_with_ks
+// Use constants instead of parameters that may not be available in testbench scope
+localparam int TB_KS_IF_SUBW_NB = (LBY < REGF_COEF_NB) ? 1 : REGF_SEQ;
+localparam int TB_KS_IF_COEF_NB = (LBY < REGF_COEF_NB) ? LBY : REGF_SEQ_COEF_NB;
+
+logic [TB_KS_IF_SUBW_NB-1:0] ks_ldb_blram_wr_en;
+logic [TB_KS_IF_SUBW_NB-1:0][PID_W-1:0] ks_ldb_blram_wr_pid;
+logic [TB_KS_IF_SUBW_NB-1:0][TB_KS_IF_COEF_NB-1:0][MOD_Q_W-1:0] ks_ldb_blram_wr_data;
+logic [TB_KS_IF_SUBW_NB-1:0] ks_ldb_blram_wr_pbs_last;
+
+always_comb begin
+  // Default assignments
+  ks_ldb_blram_wr_en = '0;
+  ks_ldb_blram_wr_pid = '0;
+  ks_ldb_blram_wr_data = '0;
+  ks_ldb_blram_wr_pbs_last = '0;
+
+  // CRITICAL DEBUG: Monitor VP-PBS BLWE data flow
+  if (|vp_ldb_blram_wr_en) begin
+    $display("[TB] DEBUG: VP-PBS BLWE WRITE DETECTED: en[0]=%b, data[0]=0x%08h, data[1]=0x%08h", 
+             vp_ldb_blram_wr_en[0], vp_ldb_blram_wr_data[0], vp_ldb_blram_wr_data[1]);
+  end
+  
+  // Format conversion: VP-PBS [LBY-1:0] lanes -> KS [TB_KS_IF_SUBW_NB-1:0][TB_KS_IF_COEF_NB-1:0]
+  // Aggregate enables within each subword group and choose PID from the first active lane in the group
+  for (int subw = 0; subw < TB_KS_IF_SUBW_NB; subw++) begin
+    int base = subw*TB_KS_IF_COEF_NB;
+    bit any_en = 1'b0;
+    int first_active_idx = -1;
+    // Bound-check base against LBY
+    if (base < LBY) begin
+      for (int coef = 0; coef < TB_KS_IF_COEF_NB && (base + coef) < LBY; coef++) begin
+        // Map data lanes directly
+        ks_ldb_blram_wr_data[subw][coef] = vp_ldb_blram_wr_data[base + coef];
+        // Aggregate enable and pbs_last
+        if (vp_ldb_blram_wr_en[base + coef]) begin
+          any_en = 1'b1;
+          if (first_active_idx == -1) first_active_idx = base + coef;
+        end
+        if (vp_ldb_blram_wr_pbs_last[base + coef]) begin
+          ks_ldb_blram_wr_pbs_last[subw] = 1'b1;
+        end
+      end
+      ks_ldb_blram_wr_en[subw] = any_en;
+      if (first_active_idx != -1) begin
+        // Align PID with KS command rp=1 observed for POST_PROCESSING path
+        ks_ldb_blram_wr_pid[subw] = PID_W'(1);
+      end
+    end
+  end
+end
 
 pe_pbs_with_ks #(
   .MOD_MULT_TYPE(set_mod_mult_type(MOD_NTT_TYPE)),
@@ -1169,7 +1312,7 @@ pe_pbs_with_ks #(
   .ldb_seq_done(ldb_seq_done),
   
   // KS interface - connect to VP-PBS external interface
-  .ks_seq_cmd_enquiry(ks_seq_cmd_enquiry),
+  .ks_seq_cmd_enquiry(ks_seq_cmd_enquiry_from_ks),  // 🔧 CRITICAL FIX: KS output
   .seq_ks_cmd(seq_ks_cmd),
   .seq_ks_cmd_avail(seq_ks_cmd_avail),
   .ks_seq_result(ks_seq_result),
@@ -1192,7 +1335,13 @@ pe_pbs_with_ks #(
   // Error and info
   .pep_error(pep_ks_error),
   .pep_rif_info(pep_ks_info),
-  .pep_rif_counter_inc(pep_ks_counter_inc)
+  .pep_rif_counter_inc(pep_ks_counter_inc),
+
+  // BLWE Interface - Connect VP-PBS data to KS hardware BLWE RAM
+  .ext_ldb_blram_wr_en(ks_ldb_blram_wr_en),
+  .ext_ldb_blram_wr_pid(ks_ldb_blram_wr_pid),
+  .ext_ldb_blram_wr_data(ks_ldb_blram_wr_data),
+  .ext_ldb_blram_wr_pbs_last(ks_ldb_blram_wr_pbs_last)
 );
 
 // ==============================================================================================

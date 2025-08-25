@@ -75,6 +75,12 @@ module pe_pbs_with_ks
   input  logic                                                         regf_pep_rd_is_body,
   input  logic                                                         regf_pep_rd_last_mask,
 
+  //== BLWE Interface for VP-PBS Data Input
+  input  logic [KS_IF_SUBW_NB-1:0]                                     ext_ldb_blram_wr_en,
+  input  logic [KS_IF_SUBW_NB-1:0][PID_W-1:0]                          ext_ldb_blram_wr_pid,
+  input  logic [KS_IF_SUBW_NB-1:0][KS_IF_COEF_NB-1:0][MOD_Q_W-1:0]     ext_ldb_blram_wr_data,
+  input  logic [KS_IF_SUBW_NB-1:0]                                     ext_ldb_blram_wr_pbs_last,
+
   //== KSK coefficients
   input  logic [LBX-1:0][LBY-1:0][LBZ-1:0][MOD_KSK_W-1:0]              ksk,
   input  logic [LBX-1:0][LBY-1:0]                                      ksk_vld,
@@ -133,6 +139,30 @@ module pe_pbs_with_ks
   logic [KS_IF_SUBW_NB-1:0][KS_IF_COEF_NB-1:0][MOD_Q_W-1:0]   ldb_blram_wr_data;
   logic [KS_IF_SUBW_NB-1:0]                                   ldb_blram_wr_pbs_last;
 
+  // Internal signals from pep_load_blwe
+  logic [KS_IF_SUBW_NB-1:0]                                   internal_ldb_blram_wr_en;
+  logic [KS_IF_SUBW_NB-1:0][PID_W-1:0]                        internal_ldb_blram_wr_pid;
+  logic [KS_IF_SUBW_NB-1:0][KS_IF_COEF_NB-1:0][MOD_Q_W-1:0]   internal_ldb_blram_wr_data;
+  logic [KS_IF_SUBW_NB-1:0]                                   internal_ldb_blram_wr_pbs_last;
+
+  // Multiplex between internal BLWE load and external VP-PBS data
+  always_comb begin
+    // Priority: VP-PBS external data overrides internal BLWE load
+    if (|ext_ldb_blram_wr_en) begin
+      // VP-PBS is writing data - use external signals
+      ldb_blram_wr_en = ext_ldb_blram_wr_en;
+      ldb_blram_wr_pid = ext_ldb_blram_wr_pid;
+      ldb_blram_wr_data = ext_ldb_blram_wr_data;
+      ldb_blram_wr_pbs_last = ext_ldb_blram_wr_pbs_last;
+    end else begin
+      // Normal operation - use internal BLWE load signals
+      ldb_blram_wr_en = internal_ldb_blram_wr_en;
+      ldb_blram_wr_pid = internal_ldb_blram_wr_pid;
+      ldb_blram_wr_data = internal_ldb_blram_wr_data;
+      ldb_blram_wr_pbs_last = internal_ldb_blram_wr_pbs_last;
+    end
+  end
+
 // ============================================================================================== --
 // ERROR
 // ============================================================================================== --
@@ -141,6 +171,7 @@ module pe_pbs_with_ks
 
   pep_ks_error_t      ks_error;
   logic               ldb_rcp_dur;
+  logic               seq_ks_cmd_rdy;    // Internal signal: KS ready to accept commands
   always_comb begin
     pep_errorD           = '0;
     pep_rif_counter_incD = '0;
@@ -188,10 +219,10 @@ module pe_pbs_with_ks
     .regf_pep_rd_is_body    (regf_pep_rd_is_body),
     .regf_pep_rd_last_mask  (regf_pep_rd_last_mask),
 
-    .pep_blram_wr_en        (ldb_blram_wr_en),
-    .pep_blram_wr_pid       (ldb_blram_wr_pid),
-    .pep_blram_wr_data      (ldb_blram_wr_data),
-    .pep_blram_wr_pbs_last  (ldb_blram_wr_pbs_last),
+    .pep_blram_wr_en        (internal_ldb_blram_wr_en),
+    .pep_blram_wr_pid       (internal_ldb_blram_wr_pid),
+    .pep_blram_wr_data      (internal_ldb_blram_wr_data),
+    .pep_blram_wr_pbs_last  (internal_ldb_blram_wr_pbs_last),
 
     .ldb_rif_rcp_dur        (ldb_rcp_dur)
   );
@@ -212,6 +243,7 @@ module pe_pbs_with_ks
     .ks_seq_cmd_enquiry    (ks_seq_cmd_enquiry),
     .seq_ks_cmd            (seq_ks_cmd),
     .seq_ks_cmd_avail      (seq_ks_cmd_avail),
+    .seq_ks_cmd_rdy        (seq_ks_cmd_rdy),
 
     .inc_ksk_wr_ptr        (inc_ksk_wr_ptr),
     .inc_ksk_rd_ptr        (inc_ksk_rd_ptr),

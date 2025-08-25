@@ -567,11 +567,18 @@ module ksk_if_cache_control
       end
     end
     
-    for (int i=0; i<KSK_SLOT_NB; i=i+1) begin
-      if (cinfo_a[i].status == SLOT_EMPTY) begin
-        $display("[CACHE] slot_%0d: EMPTY available at time %0t", i, $time);
-        break; // 只显示第一个EMPTY slot避免输出过多
+    // 🔧 减少CACHE调试输出频率，避免刷屏
+    begin
+      static int empty_debug_counter = 0;
+      if (empty_debug_counter == 0) begin
+        for (int i=0; i<KSK_SLOT_NB; i=i+1) begin
+          if (cinfo_a[i].status == SLOT_EMPTY) begin
+            $display("[CACHE] slot_%0d: EMPTY available at time %0t", i, $time);
+            break; // 只显示第一个EMPTY slot避免输出过多
+          end
+        end
       end
+      empty_debug_counter = (empty_debug_counter + 1) % 1000; // 每1000次only输出一次
     end
   end
 
@@ -802,6 +809,11 @@ module ksk_if_cache_control
   assign cout_vld             = cin_st_send & c2_miss;
   assign cin_rdy              = cin_st_send;
 
+  // 🔧 VP-PBS AXI X-state fix: Add KSK enable control to prevent X-state propagation
+  logic ksk_enable_internal;
+  logic cctrl_rd_vld_internal;
+  logic [KSK_READ_CMD_W-1:0] cctrl_rd_cmd_internal;
+
   fifo_reg #(
    .WIDTH       (KSK_READ_CMD_W),
    .DEPTH       (RFIFO_DEPTH),
@@ -814,10 +826,24 @@ module ksk_if_cache_control
     .in_vld   (cout_vld),
     .in_rdy   (cout_rdy),
 
-    .out_data (cctrl_rd_cmd),
-    .out_vld  (cctrl_rd_vld),
+    .out_data (cctrl_rd_cmd_internal),
+    .out_vld  (cctrl_rd_vld_internal),
     .out_rdy  (cctrl_rd_rdy)
   );
+
+  // 🔧 VP-PBS AXI X-state fix: Only enable KSK commands after proper initialization
+  // Wait for ksk_mem_avail and reset_cache_done before allowing commands
+  always_ff @(posedge clk)
+    if (!s_rst_n || do_clear_cache) begin
+      ksk_enable_internal <= 1'b0;
+    end
+    else if (ksk_mem_avail && reset_cache_done) begin
+      ksk_enable_internal <= 1'b1;
+    end
+
+  // 🔧 VP-PBS AXI X-state fix: Gate outputs to prevent X-state when not enabled
+  assign cctrl_rd_vld = ksk_enable_internal ? cctrl_rd_vld_internal : 1'b0;
+  assign cctrl_rd_cmd = ksk_enable_internal ? cctrl_rd_cmd_internal : '0;
 
 // ============================================================================================== //
 // Query

@@ -118,6 +118,8 @@ module pep_ks_blram_format
   logic [SUBW_NB-1:0][BLWE_SUBW_NB-1:0]   w1_bsubw_mask;
   logic [SUBW_NB-1:0][BLWE_RAM_ADD_W-1:0] w1_ram_wr_add;
   logic [SUBW_NB-1:0][SUBW_COEF_NB-1:0][KS_DECOMP_W-1:0] w1_blwe_ram_wr_data;
+  // Per-coefficient availability from decomp to avoid writing X values into RAM
+  logic [SUBW_NB-1:0][SUBW_COEF_NB-1:0]   w1_coef_avail;
 
   logic [TOTAL_BATCH_NB-1:0]              w2_bfifo_wr_en;
   logic [OP_W-1:0]                        w2_bfifo_wr_data;
@@ -172,6 +174,10 @@ module pep_ks_blram_format
           .out_avail (w1_blwe_ram_wr_en_tmp[gen_i]),
           .out_side  (w1_side[gen_i])
         );
+        // Expose per-coefficient availability for external write gating
+        always_comb begin
+          w1_coef_avail[gen_s][gen_i] = w1_blwe_ram_wr_en_tmp[gen_i];
+        end
       end
 
     // ---------------------------------------------------------------------------------------------- --
@@ -199,7 +205,9 @@ module pep_ks_blram_format
       end
 
       assign w1_add_batch_ofs     = w1_blwe_ram_wr_pid_ofs;
-      assign w1_ram_wr_en[gen_s]  = w1_blwe_ram_wr_en & ((gen_s != 0) | ~w1_blwe_ram_wr_pbs_last);
+      // Write BLWE data for all subwords including subword 0 even when pbs_last is asserted,
+      // to ensure BLRAM contains valid data for any subsequent read access.
+      assign w1_ram_wr_en[gen_s]  = w1_blwe_ram_wr_en;
       assign w1_ram_wr_add[gen_s] = w1_add_batch_ofs + w1_add_ofs + w1_add;
 
       assign w1_last_bsubw    = w1_bsubw_mask_l[BLWE_SUBW_NB-1];
@@ -279,7 +287,8 @@ module pep_ks_blram_format
     for (int i=0; i<BLWE_SUBW_NB; i=i+1)
       for (int k=0; k<SUBW_NB; k=k+1)
         for (int j=0; j<SUBW_COEF_NB; j=j+1) begin
-          w1_ext_wr_en[i*(SUBW_NB*SUBW_COEF_NB) + k*SUBW_COEF_NB + j]   = w1_ram_wr_en[k] & w1_bsubw_mask[k][i];
+          // Restore per-coefficient availability gating to avoid writing unknown digits
+          w1_ext_wr_en[i*(SUBW_NB*SUBW_COEF_NB) + k*SUBW_COEF_NB + j]   = w1_ram_wr_en[k] & w1_bsubw_mask[k][i] & w1_coef_avail[k][j];
           w1_ext_wr_add[i*(SUBW_NB*SUBW_COEF_NB) + k*SUBW_COEF_NB + j]  = w1_ram_wr_add[k];
           w1_ext_wr_data[i*(SUBW_NB*SUBW_COEF_NB) + k*SUBW_COEF_NB + j] = w1_blwe_ram_wr_data[k][j];
         end

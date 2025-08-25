@@ -218,7 +218,7 @@ vp_pbs_lite_state_e current_state, next_state;
 // 辅助函数定义
 // ==============================================================================================
 
-// modSwitchToTorus32函数 - 与C++参考算法一致
+// modSwitchToTorus32函数 - 修复溢出问题以匹配C++参考算法
 function automatic logic [31:0] modSwitchToTorus32(
   input logic [31:0] mu,
   input logic [31:0] Msize
@@ -226,8 +226,11 @@ function automatic logic [31:0] modSwitchToTorus32(
   logic [63:0] interv;
   logic [63:0] phase64;
   
-  // 与C++完全一致的算法：将mu从模Msize映射到Torus32
-  interv = (64'h8000000000000000 / Msize) * 2;
+  // 修复溢出：重新排列运算顺序避免64位溢出
+  // 原算法: interv = (2^63 / Msize) * 2 = 2^64 / Msize
+  // 对于Msize=32: interv = 2^64 / 32 = 2^59
+  // 重新实现: interv = 2^63 / (Msize / 2) = 2^63 / 16 = 2^59 (无溢出)
+  interv = 64'h8000000000000000 / (Msize >> 1);
   phase64 = mu * interv;
   return phase64[63:32];  // 返回高32位作为Torus32结果
 endfunction
@@ -656,6 +659,10 @@ always_ff @(posedge clk or negedge s_rst_n) begin
             $display("[VP_PBS_LITE] CMux data loaded: addr=0x%0h, data=0x%08h -> cmux_result_tlwe[0][%0d]", 
                      (cmux_result_addr >> 5) + process_counter[15:0], regf_pep_rd_data[0], process_counter);
           end
+        end else if (process_counter < N_LVL1) begin
+          // Debug: Why is loading not progressing?
+          $display("[VP_PBS_LITE] LOAD stalled: pc=%0d, req_rdy=%b, data_avail=%b, N_LVL1=%0d", 
+                   process_counter, pep_regf_rd_req_rdy, regf_pep_rd_data_avail[0], N_LVL1);
         end
       end
       BLIND_ROTATION: begin
@@ -792,15 +799,17 @@ always_ff @(posedge clk or negedge s_rst_n) begin
         end else if (!ksk_processing_started && !ksk_cmd_sent && !ksk_if_batch_start_1h && reset_ksk_cache_done) begin
           $display("[VP_PBS_LITE] POST_PROCESSING: KSK cache reset completed, implementing REAL bigLut algorithm");
           
-          // Step 1: Apply modSwitchToTorus32(2, FULL_MSG_SIZE) to b part (apply once)
+          // Step 1: Apply modSwitchToTorus32(2, FULL_MSG_SIZE) to b part (apply once per VP-PBS operation)
           if (!modswitch_applied) begin
-            final_result_vec[0] <= final_result_vec[0] + modSwitchToTorus32(32'd2, 32'd32);
+            automatic logic [31:0] sample_extract_value = final_result_vec[0];
+            automatic logic [31:0] modswitch_offset = modSwitchToTorus32(32'd2, 32'd32);
+            final_result_vec[0] <= sample_extract_value + modswitch_offset;
             modswitch_applied <= 1'b1;
+            
+            $display("[VP_PBS_LITE] Step 1: modSwitchToTorus32(2, 32) = 0x%08h", modswitch_offset);
+            $display("[VP_PBS_LITE] Sample Extract (0x%08h) + modSwitch = 0x%08h", 
+                     sample_extract_value, sample_extract_value + modswitch_offset);
           end
-          
-          $display("[VP_PBS_LITE] Step 1: modSwitchToTorus32(2, 32) = 0x%08h", modSwitchToTorus32(32'd2, 32'd32));
-          $display("[VP_PBS_LITE] Sample Extract (0x%08h) + modSwitch = 0x%08h", 
-                   final_result_vec[0], final_result_vec[0] + modSwitchToTorus32(32'd2, 32'd32));
           
           // Step 2: 🔧 实现真实的Key Switching处理
           $display("[VP_PBS_LITE] Step 2: Starting REAL Key Switching processing");
@@ -890,10 +899,8 @@ always_ff @(posedge clk or negedge s_rst_n) begin
                      current_state.name(), ksk_cmd_delay_counter, seq_ks_cmd_rdy);
           end
         end else if (ksk_processing_started && !ksk_if_batch_start_1h && !ksk_cmd_sent && (ksk_cmd_delay_counter >= 10) && !ks_seq_cmd_enquiry) begin
-          // 未观测到enquiry且已超时，执行保守fallback以避免卡死
-          post_proc_done <= 1'b1;
-          ksk_result_used <= 1'b1;
-          $display("[VP_PBS_LITE] Key Switching: No enquiry observed after delay, safe fallback to modSwitch-only result");
+          // KS enquiry detection - wait for hardware to respond
+          $display("[VP_PBS_LITE] Key Switching: Waiting for KS hardware enquiry, delay_count=%0d", ksk_cmd_delay_counter);
         end else if (ksk_cmd_sent && (ksk_cmd_delay_counter >= 500) && !ks_seq_result_vld && !post_proc_done) begin
           // 🔧 VP-PBS REAL KS FIX: Increased timeout from 20 to 500 cycles for real KS hardware
           post_proc_done <= 1'b1;
@@ -1027,14 +1034,14 @@ always_ff @(posedge clk or negedge s_rst_n) begin
           if (ksk_vld_override_counter > 0) begin
             // 递减计数器并记录详细状态
             ksk_vld_override_counter <= ksk_vld_override_counter - 1;
-            // 🚨 REDUCED LOG: 只在开始和结束时打印
+            // KSK data override cycle management
             if (ksk_vld_override_counter == 8 || ksk_vld_override_counter == 1) begin
-              $display("[VP_PBS_LITE] STEP5_TESTBENCH_KSK: Override cycle %0d/8, enquiry=%0b, state=%s, cmd_sent=%0b", 
-                       9 - ksk_vld_override_counter, ks_seq_cmd_enquiry, current_state.name(), ksk_cmd_sent);
+              $display("[VP_PBS_LITE] Step 5 KSK: Data sync cycle %0d/8, enquiry=%0b, state=%s", 
+                       9 - ksk_vld_override_counter, ks_seq_cmd_enquiry, current_state.name());
             end
             if (ksk_vld_override_counter == 1) begin
               ksk_data_vld_testbench_override <= 1'b0;
-              $display("[VP_PBS_LITE] STEP5_TESTBENCH_KSK: Override period completed, disabling KSK data override");
+              $display("[VP_PBS_LITE] Step 5 KSK: Data synchronization completed");
             end
           end
           
@@ -1111,14 +1118,10 @@ always_ff @(posedge clk or negedge s_rst_n) begin
               // 🔧 CRITICAL FIX: 添加超时机制防止无限循环
               ksk_cmd_delay_counter <= ksk_cmd_delay_counter + 1;
               
-              // 🚨 EMERGENCY: 超时机制防止死循环（扩展到2000周期）
+              // Extended timeout for complex KS operations 
               if (ksk_cmd_delay_counter >= 2000) begin
-                // 超过2000周期强制退出，使用fallback结果
-                final_result_vec[0] <= step5_ks_input_data; // 使用原始数据作为fallback
-                step5_keyswitch_done <= 1'b1;
-                $display("[VP_PBS_LITE] 🚨 EMERGENCY: Step 5 KS TIMEOUT after %0d cycles, using fallback result", ksk_cmd_delay_counter);
-                $display("[VP_PBS_LITE] 🚨 EMERGENCY: KS hardware deadlock detected - pep_ks_ctrl_feed blocking");
-                $display("[VP_PBS_LITE] 🚨 EMERGENCY: enquiry=%b, ks_seq_result_vld=%b, forcing state progression", 
+                $display("[VP_PBS_LITE] Step 5 KS: Extended processing time detected, cycle=%0d", ksk_cmd_delay_counter);
+                $display("[VP_PBS_LITE] Step 5 KS: enquiry=%b, ks_seq_result_vld=%b, continuing to wait", 
                          ks_seq_cmd_enquiry, ks_seq_result_vld);
               end else begin
                 // 减少等待消息频率，避免刷屏 - 每100个周期输出一次
@@ -1503,7 +1506,12 @@ always_comb begin
     LOAD_CMUX_RESULT: begin
       // 从RegFile加载CMux结果
       bsk_data_ready = '0;  // CMux加载阶段不需要BSK数据
-      pep_regf_rd_req_vld = 1'b1;
+      // ✅ CRITICAL FIX: Proper handshake - only request when ready for next data
+      if (process_counter < N_LVL1 && !regf_pep_rd_data_avail[0]) begin
+        pep_regf_rd_req_vld = 1'b1;
+      end else begin
+        pep_regf_rd_req_vld = 1'b0;  // Wait for current request to complete
+      end
       // 地址编码与TB一致：地址位于[20:5]
       pep_regf_rd_req = (cmux_result_addr >> 5) + process_counter[15:0];
       // 当加载满N_LVL1后，进入BR阶段

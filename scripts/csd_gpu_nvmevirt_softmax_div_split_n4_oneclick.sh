@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CSD_NO_FALLBACK="${CSD_NO_FALLBACK:-0}"
+# shellcheck source=/dev/null
+source "$ROOT/scripts/csd_no_fallback.sh"
+
+# M9: focus on DIV stage. Split KSPBS for DIV hotspots (lut1/2/7/10/11 by default).
+NO_SUDO="${NO_SUDO:-0}"
+N="${N:-4}"
+
+csd_no_fallback_require_no_sudo
+csd_no_fallback_force_fft
+
+export WOP_GPU_KSPBS_SPLIT="${WOP_GPU_KSPBS_SPLIT:-1}"
+export WOP_GPU_KSPBS_SPLIT_LUTS="${WOP_GPU_KSPBS_SPLIT_LUTS:-1,2,7,10,11}"
+export CSD_SOFTMAX_KSPBS_SPLIT="${CSD_SOFTMAX_KSPBS_SPLIT:-1}"
+export CSD_SOFTMAX_KSPBS_SPLIT_ALL_STAGES="${CSD_SOFTMAX_KSPBS_SPLIT_ALL_STAGES:-0}"
+
+if [ "$NO_SUDO" = "0" ]; then
+  sudo -v
+fi
+
+echo "[cfg] ROOT                 $ROOT"
+echo "[cfg] no_sudo              $NO_SUDO"
+echo "[cfg] no_fallback          $CSD_NO_FALLBACK"
+echo "[cfg] n                    $N"
+echo "[cfg] WOP_GPU_KSPBS_SPLIT  $WOP_GPU_KSPBS_SPLIT"
+echo "[cfg] WOP_GPU_KSPBS_SPLIT_LUTS $WOP_GPU_KSPBS_SPLIT_LUTS"
+echo "[cfg] CSD_SOFTMAX_KSPBS_SPLIT $CSD_SOFTMAX_KSPBS_SPLIT"
+echo "[cfg] CSD_SOFTMAX_KSPBS_SPLIT_ALL_STAGES $CSD_SOFTMAX_KSPBS_SPLIT_ALL_STAGES"
+echo
+
+NO_SUDO="$NO_SUDO" N="$N" bash "$ROOT/scripts/csd_gpu_nvmevirt_softmax_oneclick.sh"

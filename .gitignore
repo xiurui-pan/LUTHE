@@ -1,4 +1,13 @@
 output*
+!hw/output/
+hw/output/*
+!hw/output/golden/
+hw/output/golden/*
+!hw/output/golden/README.md
+!hw/output/golden/woks/
+hw/output/golden/woks/*
+!hw/output/golden/woks/README.md
+!hw/output/golden/woks/*.bin
 *_gen
 gen
 .vscode/
@@ -11,6 +20,8 @@ __pycache__/
 *.log
 *.sage.py
 *.store
+*.pyc
+core.*
 sw/bin/tv_hw/latest
 sw/bin/gtv/latest
 sw/bin/hw-hpu/latest
@@ -23,6 +34,7 @@ amc_bsp
 *.mod
 *.o
 *.bin
+!hw/output/golden/woks/*.bin
 *.ko
 *.symvers
 *.order
@@ -32,3 +44,46 @@ xrt/kernel/*/xml/*.xml
 verdiLog/
 novas*
 log*
+hpu_fpga/bin/*
+hpu_fpga/lib/*
+hpu_fpga/lib64
+hpu_fpga/pyvenv.cfg
+edalize
+*log*
+xsim/*
+*.pb
+CLAUDE.md
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/simple_cb_test/*
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/direct_cb_test.tcl
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/cb_test/*
+*.pid
+backup_archive_disabled_*/
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/qpid
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/config_cleaned.mk
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/scripts/run.sh.backup
+# GPU perf analysis outputs
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/reports/gpu_perf_summary_*
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/reports/wop_gpu_perf_report_*.json
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/reports/wop_gpu_perf_report.json
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/reports/wop_gpu_perf_report_be*.csv
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/reports/wop_gpu_perf_report_new.csv
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/reports/wop_gpu_perf_report_partial.csv
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/scripts/gpu_perf_matrix_*.csv
+
+# Local large assets / build outputs
+tmp_assets/
+tmp/
+sw/gpu_runtime_service/build-clean/
+sw/gpu_runtime_service/build-*/
+sw/gpu_runtime_service/overlays/
+
+# Local manual dumps (keep prefixed goldens tracked)
+hw/output/golden/woks/manual_*.bin
+
+# Local NVCC/host experiment binaries
+tmp_ifft_test
+tools/poly_ifft_formula_host
+tools/poly_ifft_generic_host
+tools/poly_ifft_host_debug
+tools/poly_ifft_spqlios_host
+hw/module/pe_pbs/simu/tb_wop_circuit_bootstrap_woks_engine/reports/*

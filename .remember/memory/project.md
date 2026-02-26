@@ -1,0 +1,348 @@
+# 项目记忆（压缩版）
+
+> Last update: 2026-02-06  
+> 目标：继续推进“文档级 GPU‑CSD nvmevirt e2e”，并逐步从“GPU 一口气算完整段”过渡到 `docs/storyline.md` 的细粒度分工。
+> 状态：除 OpenSSD 实物上板外，软件/仿真链路已闭环；以下“风险/需/待”字样仅为历史记录，不再作为待办。
+> 更新（2026-02-02）：日志审阅报告已生成（`docs/gpu_csd_e2e_audit_20260202.md`），确认 nvmevirt+GPU+WOPBS/FTL/flash 映射闭环证据齐全；当时“流水线重叠优化”暂无可核验证据。
+> 更新（2026-02-05）：重启后回归与 deep‑nn L2 复跑完成，pipeline overlap 取证落盘；大文件统一迁移到 `/mnt/n0n1/hpu_fpga_fin/tmp_assets` 并用软链接回填 `tmp_assets/`（示例：`wop_keyset_concrete_poly512_k3_n0718_n2512.bin`→`/mnt/n0n1/hpu_fpga_fin/tmp_assets/wop_keyset_concrete_poly512_k3_n0718_n2512.bin`）。
+> 更新（2026-02-06）：he3db trace replay 重启后复跑完成（`/home/pxr/workspace/hpu_fpga_fin/tmp/overlap_he3db_20260205_101746/`），`trace_4096`/`trace_16384` 均产出 `replay.log` summary 与 `pipeline_stats.{json,txt}`；nvmevirt 侧“流水线重叠优化”证据已补齐。
+
+## 0) 一句话判据（停止条件）
+- `NO_SUDO=0 bash scripts/csd_gpu_nvmevirt_softmax_oneclick.sh` 能走完整 nvmevirt e2e，并在末尾 softmax 容差校验 `fail=0`。
+- `GPU_WOKS_NATIVE=1 bash scripts/csd_gpu_nvmevirt_oneclick.sh` 的 `vp/exp/soft` 三案均 `GLWE matches golden`。
+- VP KeySwitch 下沉取证（mode=0）：`CSD_VP_KS_ON_BACKEND=1 GPU_WOKS_NATIVE=1 NO_SUDO=0 bash scripts/csd_gpu_nvmevirt_oneclick.sh`
+  - 判据：`*_backend.log` 出现 `metrics ... vp_split=1`，且 `flags=0x08`（vp）/`flags=0x0c`（exp/soft）。
+- BE KeySwitch 下沉取证（mode=1）：`NO_SUDO=0 bash scripts/csd_gpu_nvmevirt_be_split_oneclick.sh`
+  - 判据：`e2e.log` 出现 `GLWE matches golden`，且 `backend.log` 含 `metrics ... be_split=1 ...`（bit‑exact 对齐 `cpu_reference_runner --mode 1` golden）。
+  - 无 sudo 快跑：`NO_SUDO=1 bash scripts/csd_gpu_nvmevirt_be_split_oneclick.sh`（等价于 `scripts/csd_gpu_be_split_backend_smoke.sh`）。
+- `GPU_WOKS_NATIVE=1 NO_SUDO=0 bash scripts/csd_gpu_nvmevirt_cb_step4only_oneclick.sh`：CB `step4_only` 分工闭环通过（GPU Step4，后端模拟 Step5）。
+- OpenSSD 无硬件的“密钥在 flash”验证：`CSD_KEYSET_IN_FLASH=1 GPU_WOKS_NATIVE=1 NO_SUDO=0 bash scripts/csd_gpu_nvmevirt_regression_oneclick.sh`
+  - 判据：末尾 `[PASS] nvmevirt regression OK`，且各用例 `e2e.log`/控制台出现 `Provision keyset into nvmevirt flash + loopdev` 与 `cfg keyset(loopdev) /dev/loop*`（说明 keyset 从 nvmevirt 的 LBA/FTL 数据通路读取）。
+  - 备注：keyset 约 3.1GiB，回归脚本会在首案后自动 `SKIP_RELOAD=1`，避免每个子用例都重刷 keyset。
+  - 提速/稳态：默认启用 `CSD_KEEP_SESSION=1`（可手动设 0 关闭），复用同一个 `keyset(loopdev)` 与 `gpu_runtime_service`，避免每个子用例都重新导入多 GB keyset（典型节省 ~20s+，降低系统 ABRT/抖动风险）。
+  - 提速/稳态：默认启用 `CSD_KEEP_BACKEND=1`（可手动设 0 关闭），复用同一个 `csd_sw_backend.py`（key mmap/caches 常驻），减少反复 python 启动与重复 mmap 抖动；取证：`e2e.log` 出现 `[SESSION] reuse csd_sw_backend`，回归汇总 `flash_*` 行会额外打印 `reuse_backend=1`。
+  - keyset 一致性：当 `CSD_KEEP_SESSION=1` 时必须保证所有步骤使用同一份 keyset；回归脚本已固定 `KEYSET` 并透传给各步骤（`GPU_WOKS_NATIVE=1` 且未显式设置 `KEYSET` 时会自动生成 `OUT_DIR/wop_keyset.bin`）。
+- OpenSSD 无硬件的“全 flash 数据通路”验证：`CSD_KEYSET_IN_FLASH=1 CSD_TLWE_IN_FLASH=1 CSD_GLWE_OUT_FLASH=1 GPU_WOKS_NATIVE=1 NO_SUDO=0 bash scripts/csd_gpu_nvmevirt_regression_oneclick.sh`
+  - 约束：`CSD_TLWE_IN_FLASH=1` 需要 `CSD_USE_PRP=0`（一键脚本在未显式设置 `CSD_USE_PRP` 时会自动切到 `0`）。
+  - 判据：除末尾 `[PASS] nvmevirt regression OK` 外，还需在 `e2e.log` 看到 `[KEYSET_FLASH]` 与 `[DATA_FLASH]`（含 flash 读回校验）证明 keyset/TLWE/GLWE 均走 namespace LBA（FTL/模拟 NAND 路径）。
+
+## 0.2 no‑fallback 模式（入口与行为）
+- 入口：`CSD_NO_FALLBACK=1`（默认 0）；所有一键/回归脚本会打印 `no_fallback` 配置行。
+- 行为：禁止 IPC/NO_SUDO 回退、CPU override、BR no‑FFT（强制 `WOP_GPU_BIGLUT_BR_FORCE_FFT=1`）、softmax 自动容差、softmax 自动清理 split；触发直接退出（`[err][no-fallback] ...`）。
+- 行为补充（2026-02-01）：`CSD_NO_FALLBACK=1` 仍强制 FFT（禁止 `WOP_GPU_BIGLUT_BR_NOFFT`），但不再阻止 `WOPBS_FP_TOTAL_BITS=16`（16bit 主线继续推进）。
+- 后端：`../nvmevirt/tools/csd_sw_backend.py` 在 no‑fallback 下禁止变体/PrivKS fallback。
+- 直接拒绝运行（no‑fallback=1 时）：
+  - 任何 `NO_SUDO=1` 的一键/回归路径（含 user‑mode smoke）。
+  - `scripts/csd_gpu_nvmevirt_macro_deepnn_l2_oneclick.sh`（内部包含 NO_SUDO=1 profile/align）。
+  - `scripts/csd_gpu_nvmevirt_macro_deepnn_multivariant_oneclick.sh`（align 为 NO_SUDO=1）。
+  - `scripts/csd_gpu_nvmevirt_macro_deepnn_fullflow_oneclick.sh` 在 `RUN_MULTIVARIANT=1` 时。
+  - `scripts/csd_gpu_deepnn_concrete_align_oneclick.sh`（NO_SUDO=1 only）。
+  - 更新（2026-01-31）：nvmevirt loader 支持 `CSD_NVMEVIRT_PROFILE_NAME`/`CSD_NVMEVIRT_PROFILE_OVERRIDES` 透传到 `insmod nvmev.ko`（`profile_name/profile_overrides`），用于 M11 可校准 profile。
+
+## 0.3 待收敛（仅 OpenSSD 实物上板）
+- OpenSSD 非上板：ACK stub/doorbell 闭环、AXI QoS/Outstanding 配置寄存器、统一内核 throttle 调试信号、descriptor 字段扩展已在 RTL 落地并可仿真取证（`openssd_wop_wrapper.sv`/`openssd_wop_axi_lite_ctrl.sv`/`openssd_wop_pkg.sv`/`wop_pbs_kernel_unified.sv`）。VP/BE 逻辑在 nvmevirt/仿真侧闭环通过，真实 NTT/上板验证留到硬件阶段。
+- 流水线重叠与优化在 nvmevirt 侧已完成取证（回归矩阵 + deep‑nn L2 + he3db replay）；OpenSSD 上板阶段仅需补板级时间线/节拍数据。
+
+### 0.1 已取证（本轮）
+- 证据（2026-02-01）：16bit 固定点 exp/soft 失配根因是 CPU/GPU `WOPBS_FP_INT_BITS` 不一致（CPU 默认 12、GPU 默认 6）→ exp_minus bigLUT table 全量不一致；修复为 `sw/gpu_runtime_service/CMakeLists.txt` 在 `WOPBS_FP_TOTAL_BITS=16` 且未设置时强制 `WOPBS_FP_INT_BITS=6`。复跑 no‑fallback `scripts/csd_gpu_nvmevirt_oneclick.sh` 通过（`/tmp/csd_gpu_nvmevirt_oneclick_20260201_120356/`），softmax 已改为参考值量化对齐保持默认阈值（旧逻辑需 `SOFTMAX_EPS_ABS_2=1e-3`）。
+- 证据（2026-01-30）：no‑fallback 回归矩阵通过（`CSD_NO_FALLBACK=1 NO_SUDO=0 GPU_WOKS_NATIVE=1`）：`/tmp/csd_gpu_nvmevirt_regression_20260130_214544/`，`vp_exp_soft/run.log` 含 `[PASS] All cases OK`，`softmax/check.log` `fail=0`，`cb_step4only/run.log` 与 `kspbs_split/run.log` 通过，`metrics_summary.txt` 已生成。
+- 证据（2026-01-30）：no‑fallback 单独一键通过：softmax `/tmp/csd_gpu_nvmevirt_softmax_20260130_215517/`（`check.log` `fail=0`）、CB step4_only `/tmp/csd_gpu_nvmevirt_cb_step4only_20260130_215732/`（`e2e.log` 含 `GLWE matches golden`）、KSPBS split `/tmp/csd_gpu_nvmevirt_kspbs_split_20260130_215910/`（`backend.log` 含 `[KSPBS_SPLIT][PASS]`）。
+- 证据（2026-01-31）：no‑fallback softmax KSPBS split（N=16 全阶段）通过：`/tmp/csd_gpu_nvmevirt_softmax_20260131_104100/`（`check.log` `fail=0`，`e2e.log` 含 `no_fallback=1`，`backend.log` 含 `func_stage cfg: kspbs_split=1 all_stages=1`，`gpu_runtime_service.log` 含 `stage=1/2/3` 的 `[KSPBS_SPLIT]`）。
+- 复核（2026-01-31）：no‑fallback 结果已归档并作为后续验证基线（回归/一键按 `CSD_NO_FALLBACK=1` 执行）。
+- 证据（2026-01-31）：no‑fallback 回归复跑通过（`/tmp/csd_gpu_nvmevirt_regression_20260131_134826/` 末尾 `[PASS] nvmevirt regression OK`，`metrics_summary.txt` 落盘）。
+- 证据（2026-01-31）：no‑fallback softmax 复跑通过：`/tmp/csd_gpu_nvmevirt_softmax_20260131_221754/`（`fail=0`；如遇旧 dmesg 误判可设 `DMESG_STRICT=0`）。
+- 证据（2026-02-01）：no‑fallback 复跑通过：softmax `/tmp/csd_gpu_nvmevirt_softmax_20260201_144629/`（`fail=0`），回归 `/tmp/csd_gpu_nvmevirt_regression_20260201_145433/` 末尾 `[PASS] nvmevirt regression OK`。
+- 证据（2026-01-31）：no‑fallback CB step4_only `/tmp/csd_gpu_nvmevirt_cb_step4only_20260131_222031/`、CB step4_only+premod `/tmp/csd_gpu_nvmevirt_cb_step4only_premod_20260131_222133/` 均 `GLWE matches golden`。
+- 证据（2026-01-31）：no‑fallback KSPBS split `/tmp/csd_gpu_nvmevirt_kspbs_split_20260131_222232/`、per‑sample `/tmp/csd_gpu_nvmevirt_kspbs_split_per_sample_20260131_222307/` 均 PASS。
+- 证据（2026-01-31）：deep‑nn PBS hotspot（no‑fallback）通过：`/tmp/csd_gpu_nvmevirt_deepnn_pbs_hotspot_20260131_222405/`。
+- 证据（2026-01-31）：macro deep‑nn（no‑fallback）通过：`/tmp/csd_gpu_nvmevirt_macro_deepnn_20260131_222627/`（softmax offload `match=1`）。
+- 证据（2026-01-31）：fullflow macro deep‑nn（no‑fallback）通过：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260131_222901/`（M0/M2/M3 均落盘，sweep stats 生成）。
+- 证据（2026-01-31）：no‑fallback 复跑闭环通过：回归 `/tmp/csd_gpu_nvmevirt_regression_20260131_134826/` 末尾 `[PASS] nvmevirt regression OK`；softmax `/tmp/csd_gpu_nvmevirt_softmax_20260131_161306/` `fail=0`；CB step4_only `/tmp/csd_gpu_nvmevirt_cb_step4only_20260131_161527/` `GLWE matches golden`；KSPBS split `/tmp/csd_gpu_nvmevirt_kspbs_split_20260131_161627/` `[KSPBS_SPLIT][PASS]`。
+- 证据（2026-01-31）：M10 backend 常驻/预热闭环通过（`CSD_BACKEND_PREWARM=1 CSD_KEEP_SESSION=1 CSD_KEEP_BACKEND=1`）：回归 `/tmp/csd_gpu_nvmevirt_regression_20260131_113138/` 末尾 `[PASS] nvmevirt regression OK`，`metrics_summary.txt` 含 `reuse_backend=1`；`/tmp/csd_nvmevirt_session_nvme2n123_wop_gpu_runtime.sock/backend_service.log` 含 `cache hit: privks_step4`/`kspbs_split` 与 `engine=gpu cmd=...`。
+- 证据（2026-01-31）：M11 fio 校准完成（D7P5510 profile）：`/tmp/fio_d7p5510_20260131_113819.log`（4K randread qd1≈205MiB/s、qd32≈1512MiB/s；4K randwrite qd32≈1540MiB/s；128K seqread≈6963MiB/s、seqwrite≈2693MiB/s）。
+- 证据（2026-01-30）：deep‑nn PBS hotspot（profile poly2048，`WOP_GPU_WOKS_DEBUG=1 NO_SUDO=0`）nvmevirt e2e `GLWE matches golden`，`gpu_runtime_service.log` 含 `[WOKS_DEBUG] mismatch=0/2048`（`/tmp/csd_gpu_nvmevirt_deepnn_pbs_hotspot_20260130_213858/`）。
+- he3db trace replay（`--no-prp` 性能回放）：`/tmp/csd_he3db_replay_20260127_092755/`（`trace_4096/replay.log` `ops_per_s=5.637`，`trace_16384/replay.log` `ops_per_s=5.624`，`no_prp=True`）。
+- 纠正：上述 `gpu_executor_smoke` mismatch 已确认是 **CPU compare 未共享 keyset** 所致，非算法性偏差；已通过自动导出/导入 keyset 修复（见下条“纠正”记录）。
+- 证据（2026-01-31）：真实 GPU VP/BE Golden 已收敛（修复 TB RegFile 预加载 + BE 默认 pipeline）。
+  - VP：`quick_gpu_mode_test.sh VP`，TLWE 来自 `/tmp/vp_tlwe_input_new.bin`，TB 日志 `gpu_mode_test.log` 含 `[TB][REGF_INIT]` / `[TB][GPU_SERVICE][TLWE_HEAD]` 非 0；GPU service stdout 显示 `[TFHE_GPU_EXEC][GOLDEN] match`；性能摘要 `reports/gpu_perf_summary_vp_20260131_131250.md`。
+  - BE：`quick_gpu_mode_test.sh BE`（`GLWE_WORDS=2049`），GPU service stdout 显示 `[TFHE_GPU_EXEC][GOLDEN] match`（`[INFO] BE pipeline ... (default pipeline)`）；性能摘要 `reports/gpu_perf_summary_be_20260131_132656.md`。
+- 证据（2026-01-31）：no‑fallback BE split 回归失配修复（BE split 的 lvl0/premod payload 直通 WoKS）。修复：`sw/gpu_runtime_service/src/tfhe_gpu_executor.cpp` 在 `process_bit_extract()` 增加 `tlwe_words == n_lvl0+1` 快路径 → `run_circuit_bootstrap_pipeline()`；复跑 `/tmp/csd_gpu_nvmevirt_be_split_20260131_134728/` 与 `/tmp/csd_gpu_nvmevirt_regression_20260131_134826/be_split/` 均 `GLWE matches golden`。
+- **纠正（2026-01-30）**：上述 `gpu_executor_smoke` mismatch 实为 **CPU compare 未共享 keyset** 所致（未设置 `WOP_GPU_KEY_EXPORT/IMPORT` 时 `cpu_reference_runner` 会生成新 keyset）。修复：在 `sw/gpu_runtime_service/src/tfhe_gpu_executor.cpp` 增加 CPU 对比自动导出 keyset（生成 `/tmp/wop_keyset_cpu_compare_<pid>.bin` 并传给 cpu_reference_runner）。证据：`WOP_GPU_GOLDEN_COMPARE=1 TFHE_GPU_SPQLIOS_{FFT,IFFT}=1 sw/gpu_runtime_service/build-clean/gpu_executor_smoke` 出现 `GOLDEN match` 且日志含 `exported keyset to "/tmp/wop_keyset_cpu_compare_2898931.bin"`。
+- deep‑nn L2 一键（NO_SUDO=0）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260128_124125/`（`m5_m6_run/run.log` 含 `[CSD_DEEPNN][L2] fhe compare ok` 与 `device=cuda`；`backend_fhe.log` 含 `metrics cmd=49921 ... concrete_exec=gpu_service`；`dmesg_fhe.log` 含 `CSD: op=0xc0 mode=3 flags=0x24`）。
+- multivariant + keyset flash e2e（NO_SUDO=0，K=1 过滤）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_multivariant_20260128_134705/`（`run/run.log` 含 `softmax offload ok`；`run/backend.log` 含 `metrics cmd=4290 mode=3`；`run/dmesg_new.log` 含 `CSD: op=0xc0 mode=3`；`run/softmax_offload_e2e.log` 含 `csd_keyset_in_flash 1` 与 `keyset(loopdev)`/`[KEYSET_FLASH]`/`[DATA_FLASH]`）。
+- softmax nvmevirt e2e：`/tmp/csd_gpu_nvmevirt_softmax_20251229_104458/`（`fail=0`）。
+- softmax 用户态 smoke（NO_SUDO=1）：`/tmp/csd_gpu_nvmevirt_softmax_20251230_004528/`（`fail=0`）。
+- softmax nvmevirt e2e（修复空 payload gate 后）：`/tmp/csd_gpu_nvmevirt_softmax_20251230_091800/`（`fail=0`）。
+- softmax 分阶段耗时打点（`WOP_GPU_FUNC_STAGE_METRICS=1`）：`/tmp/csd_gpu_nvmevirt_softmax_stage_metrics_20251230_192346/`（当前 `scripts/csd_gpu_nvmevirt_softmax_oneclick.sh` 的 `NO_SUDO=1/0` 都会落到 `OUT_DIR/gpu_runtime_service.log`；历史目录里 `NO_SUDO=1` 可能在 `smoke.log`）。
+- softmax 分阶段耗时打点（NO_SUDO=0，nvmevirt e2e）：`/tmp/csd_gpu_nvmevirt_softmax_20251230_203134/`（脚本末尾会打印 `[metrics] ...`，日志含 `[TFHE_GPU_EXEC][FUNC_METRICS]`）。
+- softmax staged RPC 分阶段耗时打点（NO_SUDO=1，直连 socket IPC）：`/tmp/csd_gpu_func_stage_ipc_test_20251230_201513/`（`gpu_runtime_service.log` 含 `[TFHE_GPU_EXEC][FUNC_METRICS]`）。
+- KSPBS split backend smoke（lut_id=1..9 覆盖 + op=3(per-sample-lut)）：`/tmp/csd_gpu_kspbs_split_backend_smoke_20251230_095335/`（全 PASS）。
+- KSPBS split backend smoke（统一 socket IPC + tlwe_tail/per-sample-lut 覆盖）：`/tmp/csd_gpu_kspbs_split_backend_smoke_20251230_112615/`（全 PASS）。
+- KSPBS split backend smoke（batch + per-sample-lut 分组 split，对齐 GPU flags=3 golden）：`/tmp/csd_gpu_kspbs_split_backend_smoke_20251230_133317/`（全 PASS）。
+- KSPBS split backend smoke（v2 keyset：`KEYSET=tmp/wop_keyset_v2.bin`）：`/tmp/csd_gpu_kspbs_split_backend_smoke_20260109_085005/`（全 PASS）。
+- vp/exp/soft nvmevirt e2e（GPU_WOKS_NATIVE=1）：`/tmp/csd_gpu_nvmevirt_oneclick_20251229_110813/`（三案 `GLWE matches golden`）。
+- CB step4_only 分工 nvmevirt e2e：`/tmp/csd_gpu_nvmevirt_cb_step4only_20251229_155503/`（末尾 `[PASS] CB step4_only split e2e OK`）。
+- CB step4_only + premod（M5）用户态 smoke：`/tmp/csd_gpu_nvmevirt_cb_step4only_premod_20251229_164111/`（末尾 `[PASS] Smoke OK: step5 matches golden`）。
+- CB step4_only + premod（M5）nvmevirt e2e：`/tmp/csd_gpu_nvmevirt_cb_step4only_premod_20251229_164721/`（末尾 `[PASS] CB step4_only + premod split e2e OK`，并出现 `GLWE matches golden`）。
+- M6 Step5(PrivKS) 后端模块 smoke：`/tmp/csd_gpu_privks_step4_backend_smoke_20251229_173959/`（末尾 `[PASS] PrivKS step5 matches cpu_reference_runner`）。
+- 回归汇总 smoke（NO_SUDO=1）：`/tmp/csd_gpu_nvmevirt_regression_20251229_174258/`（末尾 `[PASS] nvmevirt regression OK`）。
+- 回归汇总 e2e（NO_SUDO=0）：`/tmp/csd_gpu_nvmevirt_regression_20251229_175657/`（末尾 `[PASS] nvmevirt regression OK`）。
+- 回归汇总 e2e（NO_SUDO=0，含 `softmax_div_split_n4` 取证步骤）：`/tmp/csd_gpu_nvmevirt_regression_20260101_185217/`（末尾 `[PASS] nvmevirt regression OK`，且 `metrics_summary.txt` 落盘）。
+- 回归汇总 e2e（NO_SUDO=0，M9 split 扩面：lut=1,2,7,10,11）：`/tmp/csd_gpu_nvmevirt_regression_20260102_094059/`（末尾 `[PASS] nvmevirt regression OK`，且 `softmax fail=0`；`softmax_div_split_n4/gpu_runtime_service.log` 含 `[KSPBS_SPLIT] stage=1 lut1/2/7/10/11`）。
+- 回归汇总 e2e（NO_SUDO=0，且 `CSD_FTL_EMU=1`）：`/tmp/csd_gpu_nvmevirt_regression_20260102_142536/`（末尾 `[PASS] nvmevirt regression OK`，并在 `metrics_summary.txt` 摘出 `[FTL_EMU][SUMMARY]` 取证行）。
+- FTL_EMU + ssdparams 映射 smoke（ENGINE=cpu）：`/tmp/csd_ftl_emu_backend_cpu_20260128.log` 含 `[FTL_EMU][TLWE]`/`[FTL_EMU][GLWE]`/`[FTL_EMU][SUMMARY]` 取证行。
+- N=4096 GPU executor smoke（deepnn4096 变体）：`/tmp/gpu_executor_smoke_4096_20260128c.log` 末尾 `[SMOKE] status_code=0 error_code=0`。
+- multivariant + keyset flash（K=1 过滤）nvmevirt e2e：`/tmp/csd_gpu_nvmevirt_macro_deepnn_multivariant_20260128_134705/`（`softmax_offload_e2e.log` 含 `keyset(loopdev)`；`dmesg_new.log` 含 `CSD: op=0xc0 mode=3`；`backend.log` 含 `metrics cmd=... mode=3 flags=0x10`；`run.log` 含 `softmax offload ok`）。
+- 回归汇总 e2e（GPU_WOKS_NATIVE=1 NO_SUDO=0，全 flash：keyset+TLWE+GLWE）：`/tmp/csd_gpu_nvmevirt_regression_20260103_155113/`（末尾 `[PASS] nvmevirt regression OK`，且 `metrics_summary.txt` 落盘）。
+- 回归汇总 e2e（GPU_WOKS_NATIVE=1 NO_SUDO=0，全 flash + VP split + BE split）：`/tmp/csd_gpu_nvmevirt_regression_20260103_224216/`（末尾 `[PASS] nvmevirt regression OK`；`metrics_summary.txt` 含 `be_split` 摘要）。
+- 回归汇总 e2e（GPU_WOKS_NATIVE=1 NO_SUDO=0，全 flash + keep backend）：`/tmp/csd_gpu_nvmevirt_regression_20260104_211109/`（末尾 `[PASS] nvmevirt regression OK`；`metrics_summary.txt` 含 `softmax_kspbs_split_agg kspbs_split_hits=532 ...`）。
+- 回归汇总 smoke（NO_SUDO=1，M9 split 日志含分段耗时字段）：`/tmp/csd_gpu_nvmevirt_regression_20260103_233535/`（末尾 `[PASS] nvmevirt regression OK`；`softmax_div_split_n4/` 的 `[KSPBS_SPLIT]` 行含 `ks_ns/gpu_bootstrap_ns/extract_ns/total_ns`）。
+- VP KeySwitch 下沉 smoke（GPU biglut-only + 后端 KeySwitch_lv10 + GPU WoKS）：`/tmp/csd_vp_ks_split_smoke_20260103_165514/`（`out.bin` 与 `golden.bin` bit-exact）。
+- BE KeySwitch 下沉 smoke（GPU bit_extract-only + 后端 KeySwitch_lv10(gpbs) + GPU WoKS）：`/tmp/csd_gpu_be_split_backend_smoke_20260103_205518/`（末尾 `[PASS] BE split smoke OK`）。
+- BE KeySwitch 下沉 smoke（workers=4 复跑）：`/tmp/csd_gpu_be_split_backend_smoke_20260103_212838/`（末尾 `[PASS] BE split smoke OK`）。
+- BE split oneclick（NO_SUDO=1）：`/tmp/csd_gpu_nvmevirt_be_split_20260103_212929/`（末尾 `[PASS] BE split smoke OK`）。
+- 回归汇总 smoke（NO_SUDO=1，后续复跑）：`/tmp/csd_gpu_nvmevirt_regression_20251229_211500/`（末尾 `[PASS] nvmevirt regression OK`）。
+- 回归汇总 smoke（NO_SUDO=1，已包含 kspbs_split_per_sample）：`/tmp/csd_gpu_nvmevirt_regression_20251230_140237/`（末尾 `[PASS] nvmevirt regression OK`）。
+- 回归汇总 e2e（GPU_WOKS_NATIVE=1 NO_SUDO=0）：`/tmp/csd_gpu_nvmevirt_regression_20260123_124433/`（`vp/exp/soft` 与 `be_split/cb_step4only/cb_step4only_premod` 均 `GLWE matches golden`；softmax `fail=0`；`metrics_summary.txt` 落盘）。
+- M9 DIV KSPBS split 回归（NO_SUDO=1，N=4）：`/tmp/csd_gpu_nvmevirt_regression_20251231_150115/`（`softmax/run.log` 含 `fail=0`；`softmax/gpu_runtime_service.log` 含 `[KSPBS_SPLIT] stage=1 lut=10/11`）。
+- M9 DIV KSPBS split（NO_SUDO=0，softmax N=4）：`/tmp/csd_gpu_nvmevirt_softmax_20260101_152549/`（`check.log` 含 `fail=0`；`gpu_runtime_service.log` 含 `[KSPBS_SPLIT] stage=1 lut10(lshift)/lut11(rshift)`；旧目录可能显示为 `lut=10/11`）。
+- M9 DIV KSPBS split 性能优化后（NO_SUDO=1，softmax N=4）：`/tmp/csd_gpu_nvmevirt_softmax_20260101_202352/`（`fail=0`；`gpu_runtime_service.log` 含 `[FUNC_METRICS] total_ns=27319684327` 与 `[KSPBS_SPLIT]`）。
+- M9 DIV KSPBS split 性能优化后（NO_SUDO=1，softmax N=16）：`/tmp/csd_gpu_nvmevirt_softmax_20260101_202516/`（`fail=0`；`gpu_runtime_service.log` 含 `[FUNC_METRICS] total_ns=106155256160` 与 `[KSPBS_SPLIT]`）。
+- M9 DIV KSPBS split 扩面（NO_SUDO=1，softmax N=4，lut=1,2,7,10,11）：`/tmp/csd_gpu_nvmevirt_softmax_20260101_203916/`（`fail=0`；`gpu_runtime_service.log` 含 `[KSPBS_SPLIT] stage=1 lut1(get_hi)/lut2(get_lo)/lut7(mux_ano_1)`）。
+- 回归汇总 smoke（NO_SUDO=1，且全局 `WOP_GPU_KSPBS_SPLIT=1 WOP_GPU_KSPBS_SPLIT_LUTS=10,11` 仍可通过）：`/tmp/csd_gpu_nvmevirt_regression_20260101_180729/`（`softmax/run.log` 与 `softmax_div_split_n4/run.log` 均 `fail=0`）。
+- deep‑nn multivariant macro（NO_SUDO=1）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_multivariant_20260113_162540/`（`run/run.log` 含 `[CSD_DEEPNN] softmax offload ok`；`run/deepnn_run_summary.txt` 含 `param_alignment_hint_variants fully_compatible=True`）。
+- deep‑nn macro（NO_SUDO=1，IPC）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_nosudo_20260116_180719/`（`run.log` 含 `[CSD_DEEPNN] softmax offload ok`；`deepnn_run_summary.txt` 含 `param_alignment_hint`）。
+- deep‑nn 16bit 输入量化（NO_SUDO=1，executor=wopbs）：`WOP_GPU_FP_QUANT_BITS=16 WOP_GPU_FP_QUANT_INT_BITS=6` 跑 Deep20CNN/Deep50CNN 20 sample 通过，`run.log` 含 `softmax offload ok ... match=1`：`/tmp/csd_gpu_nvmevirt_macro_deepnn_16bit_deep20_20260124_141125/`、`/tmp/csd_gpu_nvmevirt_macro_deepnn_16bit_deep50_20260124_141351/`。
+- 4096 路径 smoke（NO_SUDO=1）：`/tmp/gpu_executor_smoke_4096_20260128.log` 末尾 `[SMOKE] status_code=0 error_code=0`（build: `sw/gpu_runtime_service/build-deepnn4096`）。
+- deep‑nn PBS hotspot（NO_SUDO=1 IPC）历史记录：曾因 poly2048 mismatch/IPC 超时失败（见 `/tmp/csd_gpu_nvmevirt_deepnn_pbs_hotspot_ipc_20260124_224416/`、`/tmp/csd_gpu_nvmevirt_deepnn_pbs_hotspot_ipc_20260124_225242/`）。后续已在 NO_SUDO=0 nvmevirt e2e 下闭环通过（见 self.md 2026-01-31 取证），不再作为待办。
+- deep‑nn macro（NO_SUDO=0，softmax nvmevirt staged）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_20260116_181341/`（`run.log` 含 `[CSD_DEEPNN] softmax offload ok`；`dmesg_new.log` 含 `CSD: op=0xc0 mode=3 flags=0x10`；`backend.log` 含 `func_stage` 与 `metrics cmd=... flags=0x10`）。
+- deep‑nn L2 一键（NO_SUDO=0）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260116_181900/`（`m5_m6_run/run.log` 含 `[CSD_DEEPNN][L2] fhe compare ok`；`m5_m6_run/dmesg_fhe.log` 含 `CSD: op=0xc0 mode=3`；`m5_m6_run/backend_fhe.log` 含 `metrics cmd=25100` 与 `concrete variant auto-select: relax n_lvl0`；`m5_m6_run/deepnn_run_summary.txt` 含 `concrete_contract variant_ok False`；`m5_m6_run/softmax_offload_e2e.log` 报 `gpu_runtime_service glwe_bytes too large: got=128 expect<=0`）。
+- deep‑nn L2 一键（NO_SUDO=0，禁用复用）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260117_102809/`（`m5_m6_run/run.log` 含 `[CSD_DEEPNN][L2] fhe compare ok`；`m5_m6_run/dmesg_fhe.log` 含 `CSD: op=0xc0 mode=3`；`m5_m6_run/backend_fhe.log` 含 `metrics cmd=4478` 与 `concrete variant auto-select: relax n_lvl0`；`m5_m6_run/deepnn_run_summary.txt` 含 `concrete_contract variant_ok False`；`m5_m6_run/softmax_offload_e2e.log` 仅记录 `gpu_runtime_service` 被 kill）。
+- deep‑nn L2 一键（NO_SUDO=0，合同已转绿）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260117_180927/`（`m5_m6_run/run.log` 含 `[CSD_DEEPNN][L2] fhe compare ok`；`m5_m6_run/dmesg_fhe.log` 含 `CSD: op=0xc0 mode=3`；`m5_m6_run/backend_fhe.log` 含 `metrics cmd=4160` 与 `concrete variant auto-select: relax n_lvl0`；`m5_m6_run/deepnn_run_summary.txt` 含 `concrete_contract variant_ok True`；`m5_m6_run/softmax_offload_e2e.log` 的 `Killed` 为 `csd_e2e_smoke.sh` 清理段导致）。
+- 更新（2026-01-17）：合同逻辑改为 input/output LWE 匹配 `{n_lvl0, n_lvl1*(K+1), n_lvl2*(K+1)}`（避免 `input_lwe=2048` 误判必须 `n_lvl0>=2048`），并在合同里增加 `variant_n_lvl1`/`variant_allowed_lwe_dimensions`；已在 `/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260117_180927/m5_m6_run/deepnn_run_summary.txt` 确认 `variant_ok=True`。
+- 更新（2026-01-18）：`deepnn_run_summary.txt` 的 `concrete_contract` 表已打印 `variant_n_lvl1`/`variant_allowed_lwe_dimensions`，便于直接核对 LWE 映射。
+- 更新（2026-01-18）：`param_alignment_hint_variants` 的输入 LWE 覆盖逻辑改为匹配 `{n_lvl0, n_lvl1*(K+1), n_lvl2*(K+1)}`；`--variants-json tmp_assets/deepnn_variants_20260112/variants.json` 下 `input_lwe_dims_not_covered_by_variants []`。
+- 更新（2026-01-18）：多变体对齐脚本支持 `CSD_DEEPNN_CONCRETE_ALIGN_FORCE_MATRIX=1` 固定矩阵（n0=771/772/813、poly=1024/2048/4096、K=1/2），L2/multivariant 一键默认开启；证据：/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260128_124125/m4_align 构建 18/18 通过。
+- 更新（2026-01-18）：L2 一键加入 `deepnn_fhe_contract.json` 对齐校验（默认严格），并透传 `WOP_GPU_VARIANT_NAME/ID` 便于服务侧日志定位；证据：/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260128_124125/m5_m6_run/deepnn_fhe_contract.json 已生成。
+- 更新（2026-01-18）：新增 raw dump 对照脚本 `scripts/csd_gpu_nvmevirt_deepnn_raw_dump_check.sh`，fullflow 在 `RUN_DUMP_RAW=1` 时自动调用；已在 NO_SUDO=0 复跑验证通过。
+  - 证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260130_190210/driver.log` 含 `[ok] deep-nn raw dump check passed`。
+- 更新（2026-01-18）：`gpu_runtime_service` 导入 keyset 时打印 `n_lvl0/n_lvl1/n_lvl2/K` 与 `WOP_GPU_VARIANT_NAME/ID`，用于确认变体选择；证据：build-clean 编译通过（he3db replay/L2 复跑时已编译）。
+- 更新（2026-01-19）：deep‑nn FHE nvmevirt 主执行切到 gpu_runtime_service（FunctionEval op=0x09 + runner `tools/csd_concrete_fhe_runner.py`）；`CSD_DEEPNN_FHE_EXECUTOR=gpu_service` 默认启用，backend 记录 `concrete_exec=gpu_service`，gpu_runtime_service 打印 `[TFHE_GPU_EXEC][FUNC_CONCRETE]`。
+  - 证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260130_190210/m0_nvmevirt/run.log` 含 `fhe offload ok: backend=nvmevirt executor=gpu_service device=cuda`；`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260130_190210/m0_nvmevirt/backend.log` 含 `metrics cmd=... mode=3 flags=0x24`。
+- 更新（2026-01-19）：修复 Concrete op=0x3F 触发 nvmevirt `step5_only`（flags bit7）导致 mode=BE；改为 op=0x09（flags=0x24）并同步 deep‑nn/后端/文档。证据：`cmake --build sw/gpu_runtime_service/build-clean -j`；`python3 -m py_compile /home/pxr/workspace/nvmevirt/tools/csd_sw_backend.py /home/pxr/workspace/deep-nn/benchmarks/deep_learning.py`。
+  - 证据补齐（NO_SUDO=0 fullflow）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260130_190210/m0_nvmevirt/run.log` 含 `flags=0x24` 与 `fhe offload ok ... device=cuda`。
+- 更新（2026-01-19）：fullflow FHE nvmevirt 报 `concrete payload length mismatch`，gpu_runtime_service 日志显示 `concrete runner missing CSD_DEEPNN_SERVER_DIR (falling back to echo)`。
+  - 根因：`CSD_KEEP_SESSION=1` 时复用旧 gpu_runtime_service，旧进程未继承 `CSD_DEEPNN_*`/`WOP_GPU_CONCRETE_*` 环境，Concrete runner 无法运行。
+  - 修复：在 `../nvmevirt/tools/csd_e2e_smoke.sh` 中检测到 `CSD_DEEPNN_SERVER_DIR/EVAL_KEYS` 或 `WOP_GPU_CONCRETE_{RUNNER,PYTHON}` 时禁用 gpu_runtime_service 复用，强制重启以继承环境。
+  - 证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260119_130321/m0_nvmevirt/gpu_runtime_service.log`、`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260119_130321/m0_nvmevirt/backend.log`、`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260119_130321/driver.log`。风险：修复后需 NO_SUDO=0 复跑 fullflow 取证。
+- 证据（2026-01-19）：fullflow + raw dump 通过（Concrete executor=gpu_service）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260119_131600/`。
+  - M0：`m0_nvmevirt/run.log` 含 `fhe offload ok: backend=nvmevirt executor=gpu_service device=cuda` 与 `softmax offload ok ... mae=1.211e-05 ... match=1`；`m0_nvmevirt/dmesg_new.log` 含 `CSD: op=0xc0 mode=3 flags=0x10`；`m0_nvmevirt/backend.log` 含 `metrics cmd=4608 ... flags=0x10 func_split_total_ns=111331663608`；`m0_nvmevirt/gpu_runtime_service.log` 含 `[TFHE_GPU_EXEC][KEYSET] params: ... n_lvl0=500 n_lvl1=1024 n_lvl2=2048`。
+  - Raw dump：`driver.log` 含 `raw dump check passed`，产物 `m0_nvmevirt/concrete_raw_input_cmd8704_idx0.bin`/`concrete_raw_output_cmd8704_idx0.bin`。
+  - M2：`m2_pbs_hotspot/e2e.log` 含 `GLWE matches golden`，`m2_pbs_hotspot/dmesg_new.log` 含 `CSD: op=0xc0 mode=2`。
+  - M3：`m3_sweep/sweep_stats.txt` 记录 `fhe_execution_time_per_sample: n=5 mean=119.035 stdev=0.666 min=117.950 max=119.826`。
+- 证据（2026-01-23）：fullflow（contract strict）通过：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260123_165636/`。
+  - M0：`m0_nvmevirt/run.log` 含 `fhe offload ok ... executor=gpu_service` 与 `softmax offload ok ... mae=1.211e-05 ... match=1`；`m0_nvmevirt/backend.log` 含 `metrics cmd=4480 mode=3 flags=0x10`；`m0_nvmevirt/dmesg_new.log` 含 `CSD: op=0xc0 mode=3`；`driver.log` 含 `[contract] strict ok`。
+  - M2：`m2_pbs_hotspot/e2e.log` 含 `GLWE matches golden`，`m2_pbs_hotspot/backend.log` 含 `metrics cmd=4928 mode=2`。
+  - M3：`m3_sweep/sweep_stats.txt` 含 `fhe_execution_time_per_sample: n=5 mean=123.217 stdev=2.552 min=121.049 max=128.229`。
+- 更新（2026-01-19）：多变体启动 gpu_runtime_service 时透传 `WOP_GPU_VARIANT_NAME/ID`，并在设置这些 env 时禁用复用以保证服务侧日志一致（`../nvmevirt/tools/csd_e2e_smoke.sh`）。
+  - 证据：`bash -n /home/pxr/workspace/nvmevirt/tools/csd_e2e_smoke.sh`。
+  - 证据（2026-01-23）：multivariant fullflow 已验证 `gpu_runtime_service` 变体日志：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260123_165636/m0_nvmevirt/gpu_runtime_service_1.log` 含 `[TFHE_GPU_EXEC][KEYSET] variant name=softmax_default id=18` 与 `params: glwe_dimension=1 n_lvl0=500 n_lvl1=1024 n_lvl2=2048`。
+- 证据（2026-01-18）：fullflow + raw dump 通过：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260118_205944/`（`m0_nvmevirt/run.log` 含 `fhe offload ok: backend=nvmevirt device=cuda`；`m0_nvmevirt/dmesg_new.log` 含 `CSD: op=0xc0 mode=3`；`m0_nvmevirt/backend.log` 含 `metrics cmd=4416`；`driver.log` 含 `raw dump check passed`；`m2_pbs_hotspot/e2e.log` 含 `GLWE matches golden`；`m3_sweep/sweep_stats.txt` 记录 `fhe_execution_time_per_sample mean≈117.531s`）。
+- 2026-01-16：重编译 `sw/gpu_runtime_service/build-concrete_poly2048_k1_n0771_n22048` 以对齐 staged RPC；L2 需复跑验证（当前受 sudo ticket 影响未复跑）。
+- deep‑nn multivariant nvmevirt e2e（NO_SUDO=0，CSD_KEYSET_IN_FLASH=0）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_multivariant_20260113_190624/`（`run/run.log` 含 `[CSD_DEEPNN] softmax offload ok`；`run/dmesg_new.log` 含 `CSD: op=0xc0 mode=3`；`run/backend.log` 含 `metrics cmd=...`；`run/deepnn_run_summary.txt` 含 `nvmevirt_evidence`）。
+- 已验证（2026-01-30）：`../nvmevirt/tools/csd_e2e_smoke.sh` multivariant + keyset flash 兼容（loopdev 映射 + variants.json 重写）在 NO_SUDO=0 下闭环通过。
+  - 证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_multivariant_20260130_192024/run/softmax_offload_e2e.log` 含 `csd_variants_json_flash`，并出现 `CSD: op=0xc0` 与 `IO Command Vendor Specific is Success`；`backend.log`/`metrics cmd=` 可从同目录取证。
+- 已验证（2026-01-30）：`CSD_KEYSET_FLASH_VARIANTS` 过滤逻辑在 multivariant 一键 NO_SUDO=0 下可用（避免全量 keyset flash 溢出）。
+  - 证据：同上 `softmax_offload_e2e.log` 的 keyset flash + variants json 输出（`csd_variants_json_flash`）。
+- 更新：`scripts/csd_gpu_nvmevirt_macro_deepnn_oneclick.sh` 在 keyset flash + variants + func_variant_id 时自动导出 `CSD_KEYSET_FLASH_VARIANTS` 并打印 cfg，避免忘设导致刷全量 keyset 溢出（仍需设置 `CSD_FUNC_VARIANT_ID`）。
+- 已验证（2026-01-14）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_multivariant_20260114_105404/`（`run/softmax_offload_e2e.log` 含 `csd_keyset_flash_variants 1` 与 `keyset(loopdev)`；`run/backend.log` 含 `metrics cmd=4352`；`run/dmesg_new.log` 含 `CSD: op=0xc0 mode=3`）。
+- 已验证（2026-01-14）：deep‑nn 主 FHE 走 nvmevirt（Concrete runtime）通过：`/tmp/csd_gpu_nvmevirt_macro_deepnn_multivariant_20260114_124552/`（`run/run.log` 含 `fhe offload ok: backend=nvmevirt`；`/tmp/csd_sw_backend.log` 含 `metrics cmd=4352 mode=3 flags=0x04` 与 `concrete runtime loaded`）。风险：本次未落盘 `dmesg_new.log`，且该路径仍是 CPU Concrete runtime。
+- 更新：`scripts/csd_gpu_nvmevirt_macro_deepnn_oneclick.sh` 在 `CSD_DEEPNN_FHE_NVMEVIRT=1` 时自动落盘 `BACKEND_LOG`/`DMESG_OUT` 到 `OUT_DIR`，便于 FHE nvmevirt 证据收集（证据：/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260128_124125/m5_m6_run/backend_fhe.log + dmesg_fhe.log）。
+- 已验证（2026-01-14）：FHE nvmevirt 取证落盘成功：`/tmp/csd_gpu_nvmevirt_macro_deepnn_multivariant_20260114_132152/`（`run/run.log` 含 `fhe offload ok: backend=nvmevirt`；`run/backend.log` 含 `metrics cmd=8321 mode=3 flags=0x04`；`run/dmesg_new.log` 含 `CSD: op=0xc0 mode=3`）。风险：当前仍是 CPU Concrete runtime 执行。
+- 新增：`tools/csd_concrete_mlir_summary.py` 可从 `server.zip` 生成 `concrete_mlir_summary.json`（FHELinalg op 画像），宏脚本在 `CSD_DEEPNN_FHE_NVMEVIRT=1` 时自动落盘，作为 GPU offload 前置资料。
+- 更新：FHE nvmevirt 默认 `CSD_DEEPNN_FHE_DEVICE=cuda`（若未显式设置），backend 会读取 `configuration.json` 打印 `use_gpu`，并支持 `CSD_DEEPNN_REQUIRE_GPU=1` 强制 GPU；需复跑验证 GPU backend 可用性。
+- 已完成（2026-01-14）：安装 GPU 版 `concrete-python`（`pip install --extra-index-url https://pypi.zama.ai/gpu concrete-python==2.10.0`），`check_gpu_enabled/available` 为 True；nvmevirt FHE 已在后续 NO_SUDO=0 复跑闭环（见 2026-01-31 取证）。
+- 已验证（2026-01-14）：FHE nvmevirt GPU 路径通过：`/tmp/csd_gpu_nvmevirt_macro_deepnn_multivariant_20260114_152908/`（`run/backend.log` 含 `concrete config: use_gpu=True` 与 `metrics cmd=8610 mode=3`；`run/dmesg_new.log` 含 `CSD: op=0xc0 mode=3`；`run/run.log` 含 `fhe offload ok: backend=nvmevirt`）。
+- deep‑nn multivariant nvmevirt e2e（NO_SUDO=0，keyset flash + variants 过滤 id=1）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_multivariant_flash_fix3/`（`run/run.log` 含 `softmax offload ok`；`run/softmax_offload_e2e.log` 含 `KEYSET_FLASH` 与 `keyset(loopdev)`、`csd_variants_json_flash`；`run/backend.log` 含 `metrics cmd=37150`；`run/dmesg_new.log` 含 `CSD: op=0xc0 mode=3`）。
+- 更新（2026-01-15）：问题是 L2 缺少“IPC vs nvmevirt”一致性证据；修复是 deep‑nn 新增 L2 标记与对比（`CSD_DEEPNN_FHE_COMPARE_BACKENDS=1`）并提供一键 `scripts/csd_gpu_nvmevirt_macro_deepnn_l2_oneclick.sh`。证据已补齐（NO_SUDO=0）。
+  - 证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260130_095746/m5_m6_run/run.log` 含 `[CSD_DEEPNN][L2] fhe compare ok` 与 `fhe_execute_backend=nvmevirt`。
+- 更新（2026-01-15）：L2 一键首次跑失败，原因是 `variants.json` 含 K=2 触发 `glwe_dimension>1` guard（`/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260115_134437/driver.log`）；修复在 `scripts/csd_gpu_nvmevirt_macro_deepnn_l2_oneclick.sh` 自动设置 `CSD_DEEPNN_ALLOW_GLWE_GT1=1`（仅绕过 guard，不会强制选 K=2）。证据：/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260128_124125/m5_m6_run/driver.log 含 allow_glwe_gt1 1；风险是若 profile 只有 K=2 仍会不兼容。
+- 更新（2026-01-15）：L2 跑通后发现 `dmesg_new.log`/`backend.log` 容易被 softmax nvmevirt 覆写；修复为 deep‑nn 支持 `CSD_DEEPNN_FHE_SEPARATE_LOGS=1` 输出 `backend_fhe.log`/`dmesg_fhe.log`，L2 一键脚本默认启用。证据：/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260128_124125/m5_m6_run/ 产物含 backend_fhe.log/dmesg_fhe.log；风险是旧脚本仍只看 `dmesg_new.log`。
+- 已验证（2026-01-15）：L2 一键证据完备：`/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260115_225256/m5_m6_run/`（`run.log` 含 `[CSD_DEEPNN][L2] fhe compare ok` 与 `fhe_execute_backend=nvmevirt`；`backend_fhe.log` 含 `metrics cmd=... flags=0x04`；`dmesg_fhe.log` 含 `CSD: op=0xc0 mode=3 flags=0x04`；`deepnn_run_summary.txt` 含 `csd-fhe-compare-mae=0` 与 `csd-fhe-compare-argmax-match=1`）。风险：当前 FHE 仍走 Concrete runtime（非 GPU service 算子执行）。
+- 更新（2026-01-15）：增加 `CSD_DEEPNN_CONCRETE_META=1` 产出 `concrete_fhe_meta_cmd*.json`（记录 circuit/inputs/outputs 与选用变体），用于后续替换执行器时参数对齐；L2 一键默认启用并通过 `../nvmevirt/tools/csd_e2e_smoke.sh` 透传到 backend。证据：/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260128_124125/m5_m6_run/ 产物含 concrete_fhe_meta_cmd*.json。
+- 更新（2026-01-16）：Concrete 自动选变体改为同时满足 `n_lvl0>=max_input_lwe` 与 `allowed_lwe=n_lvl2*(K+1)>=max_output_lwe`，并按最小松弛量选择；可用 `CSD_DEEPNN_FUNC_VARIANT_AUTO=0` 关闭。证据：`python3 -m py_compile ../nvmevirt/tools/csd_sw_backend.py`；meta 示例 input LWE=2048、output LWE=4096（`/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260116_132422/m5_m6_run/concrete_fhe_meta_cmd4929.json`）。风险：`CSD_DEEPNN_FUNC_VARIANT_AUTO=1` 时会优先自动选变体，即使设置 `CSD_FUNC_VARIANT_ID`；要强制指定需显式关闭自动选变体。
+- 更新（2026-01-16）：修复 Concrete 元数据落盘失败（KeysetMeta 无法直接 JSON 序列化），改为 `asdict()` 转换；已在 L2 复跑产出 `concrete_fhe_meta_cmd*.json`。证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260116_132422/m5_m6_run/backend_fhe.log` 与 `concrete_fhe_meta_cmd4929.json`。
+- 更新（2026-01-16）：`tools/csd_deepnn_run_summary.py` 生成 `deepnn_fhe_contract.json`（从 `concrete_fhe_meta_cmd*.json` 汇总输入/输出 LWE 维度、压缩方式、最小 keyset 约束），用于执行器替换时对齐参数。证据：`/tmp/csd_deepnn_contract_smoke_20260116_160423/deepnn_fhe_contract.json`。
+- 更新（2026-01-16）：`deepnn_fhe_contract.json` 增加“变体推荐”（基于 variants.json 过滤满足 n_lvl0 与 allowed_lwe 约束的候选）。证据：`/tmp/csd_deepnn_contract_smoke_20260116_161457/deepnn_fhe_contract.json`。
+- 更新（2026-01-16）：合同输出增加 `assumptions`（输入 LWE→n_lvl0、输出 LWE→n_lvl2*(K+1) 的映射假设），避免误读为硬性约束。证据：`tools/csd_deepnn_run_summary.py` 的 `concrete_contract` 输出段。
+- 更新（2026-01-16）：L2 一键证据段新增合同摘要打印（`concrete_contract` 与 `contract_recommend_*`），便于同屏核对执行器参数约束。证据：`scripts/csd_gpu_nvmevirt_macro_deepnn_l2_oneclick.sh`。
+- 更新（2026-01-16）：nvmevirt backend 在生成 concrete meta 时同步计算合同并打印 `concrete contract ok/mismatch`，方便从 `backend_fhe.log` 直接定位参数不匹配。证据：`../nvmevirt/tools/csd_sw_backend.py`。
+
+## 1) 现状：nvmevirt + GPU e2e 的实际分工（不是细粒度）
+- **CSD/nvmevirt（内核侧）**：解析 0xC0、PRP→memmap staging、doorbell/status 桥接、延迟模型；不执行任何 TFHE 算子（`../nvmevirt/tools/csd_e2e_smoke.sh`）。
+- **Host 后端（python）**：收 descriptor、从 memmap/PRP 读输入，把“整段任务”交给引擎（CPU 或 GPU service），再把输出写回 memmap（`../nvmevirt/tools/csd_sw_backend.py`）。
+- **GPU runtime service（真正算子执行点）**：按 IPC `mode` 跑完整 pipeline（VP/BE/CB/FunctionEval），并返回结果。
+  - mode 定义：`sw/gpu_runtime_service/include/gpu_runtime/ipc.hpp`
+  - FunctionEval(mode=3) 调度/实现：`sw/gpu_runtime_service/src/tfhe_gpu_executor.cpp`
+
+## 2) 目标：对齐 StoryLine 的“细粒度分工”
+- 参考：`docs/storyline.md`（算子放置表）、`docs/wop_pbs_function_eval_plan.md`（算子拆分与接口）。
+- 目标形态：CSD 做低开销/带宽敏感但计算轻的环节（如 preprocess、SampleExtract、KeySwitch、pack）；GPU 聚焦 BR/FFT/外积等高开销核心。
+
+## 3) 一键入口（回归与取证）
+- VP/exp/soft：`scripts/csd_gpu_nvmevirt_oneclick.sh`
+  - nvmevirt e2e 滚屏默认落盘到 `OUT_DIR/{vp,exp,soft}_e2e.log`，控制台只保留关键证据行（避免刷屏）。
+- softmax：`scripts/csd_gpu_nvmevirt_softmax_oneclick.sh`
+- CB step4_only（GPU Step4 + 后端 Step5）：`scripts/csd_gpu_nvmevirt_cb_step4only_oneclick.sh`
+  - nvmevirt e2e 滚屏默认落盘到 `OUT_DIR/e2e.log`。
+- CB step4_only + premod（M5，Preprocess 下沉）：`scripts/csd_gpu_nvmevirt_cb_step4only_premod_oneclick.sh`
+  - nvmevirt e2e 滚屏默认落盘到 `OUT_DIR/e2e.log`。
+- 全量回归（推荐入口）：`scripts/csd_gpu_nvmevirt_regression_oneclick.sh`
+  - 默认控制台输出会做“去噪 + 对齐”（保留 `[cfg]`/`[x/y]`/`[PASS]`/`metrics` 等关键行，完整原始日志在各 step 的 `run.log`）；需要全量输出可设 `CSD_REGRESSION_VERBOSE=1`（仍会剥离控制字符并 trim，避免乱缩进）；`NO_SUDO=0` 时会把 metrics 摘要写到 `OUT_DIR/metrics_summary.txt`。
+  - M9 KSPBS split：回归会把 M9 收口为 `softmax_kspbs_split_n4/`（N=4，默认 `WOP_GPU_KSPBS_SPLIT_ALL_STAGES=1`），并对 `softmax/`（默认 N=16）自动 unset `WOP_GPU_KSPBS_SPLIT*` 避免 DIV(op=6) 超时；证据看 `softmax_kspbs_split_n4/gpu_runtime_service.log` 的 `[KSPBS_SPLIT]`（stage 不再只为 1）。
+  - OpenSSD/FTL 软件移植（无硬件）：`CSD_FTL_EMU=1` 启用 nvmevirt backend 的 ring(doorbell/ACK) + FTL staging 日志；证据看 `backend.log` 的 `[DESC_RING]`/`[FTL_EMU][SUMMARY]`（回归汇总也会把最后一条 `[FTL_EMU][SUMMARY]` 摘到 `metrics_summary.txt`）。
+- 旧产物补齐汇总（log-only）：`bash scripts/csd_gpu_nvmevirt_metrics_summary.sh <OUT_DIR> --write`（可从 `gpu_runtime_service.log` 聚合生成 `softmax_kspbs_split_agg kspbs_split_hits=...` 等行）。
+- KSPBS 微流程拆分（M8，nvmevirt 触发）：`scripts/csd_gpu_nvmevirt_kspbs_split_oneclick.sh`
+- KSPBS 微流程拆分（M8，per-sample LUT + batch）：`scripts/csd_gpu_nvmevirt_kspbs_split_per_sample_oneclick.sh`
+- KSPBS 微流程拆分 smoke（无 sudo 快速 sanity）：`scripts/csd_gpu_kspbs_split_backend_smoke.sh`
+- 取证落盘（NO_SUDO=0）：各 `OUT_DIR` 内会保存 `backend.log`/`gpu_runtime_service.log`/`dmesg_new.log`（VP 三案为 `vp_*/exp_*/soft_*` 前缀）；`backend.log` 含 `metrics ...` 行可直接 `rg -n "metrics cmd="`.
+- nvmevirt e2e 内核/后端主入口：`../nvmevirt/tools/csd_e2e_smoke.sh`、`../nvmevirt/tools/csd_sw_backend.py`
+
+## 4) 关键坑（常见翻车点）
+- **不要把 TLWE 写到 `memmap_start`**：前 1MB 属 NVMe BAR/doorbell/MSI‑X，写入会覆盖队列/doorbell 导致 0xC0 卡死；TLWE staging 必须在 `memmap_start+2MB`（storage window）。
+- **backend 写回报 `Operation not permitted`**：若 `../nvmevirt/tools/csd_sw_backend.py` 报 `/dev/mem mmap ... Operation not permitted`，通常是 `glwe_addr` 落在 System RAM（nvmevirt bounce 回退 `dma_alloc_coherent`）；应确保 bounce stripes 落在 memmap storage window（`../nvmevirt/csd_engine.c` 已将 stripe_base 放到 `storage_start+2MB`），使 `glwe_addr` 为 `0x2000...`。
+- **spqlios 表文件缺失**：默认用 `/tmp/spqlios_{fft,ifft}_table.n4096.bin`；/tmp 被清理会导致脚本启动即失败。现已在一键脚本内自动调用 `sw/gpu_runtime_service/build-clean/spqlios_table_exporter` 生成。
+- **mode=3 透传**：nvmevirt 内核若把 `mode>2` clamp 成 `mode=0`，FunctionEval/softmax 会跑错 pipeline；现已修复 nvmevirt（允许 `mode=3`，并清理 flags 的 mode bits）。
+- **nvme-cli 语义限制**：`nvme io-passthru` 很难表达“PRP1 输入 + PRP2 输出”的非标准语义；当前 e2e 以 doorbell + `/dev/mem` 数据面为主，必要时用 PRP staging。
+- **descriptor/status 布局**：按 RTL/TB 的 SV packed qwords 解析/回写；按 C struct 解析会把地址解成假值。
+- **FHE nvmevirt flags/字长上限**：`csd_vendor_test.sh` 的 cdw11 只保留 flags[7:2]，低两位会被掩掉；`TLWE_WORDS/GLWE_WORDS` 为 16-bit，超过 0xFFFF 会截断。deep‑nn FHE offload 已将 `FLAG_FUNC_CONCRETE` 升到 0x04，并将输出缓冲改为 `size_of_outputs+4096`（避免 16-bit 溢出）；nvmevirt 侧 `CSD_RESULT_LEN_MAX=65535` 允许更大 glwe_words，改后需重编译并 reload 模块。证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_20260113_114129/run.log` 含 `fhe offload ok: backend=nvmevirt`。
+- **线程/资产一致性**：生成 golden 的 threads/keyset 必须与服务侧一致；keyset 改了必须重生 TLWE/golden。
+- **sudo 提示不稳定**：有时不弹密码是因为脚本先探测 `sudo -n true`，ticket 有效就直接走无交互。
+- **dmesg 严格检查误报**：历史上 `../nvmevirt/tools/csd_e2e_smoke.sh` 用 substring 匹配 `Oops|timeout`，可能被无关内核日志里的 `tool_exit_timeout` 之类字符串误伤；现已收紧为 token 匹配，并在 dmesg delta 失效（ring buffer wrap）时降级为告警。另：PRP staging 的“必须看到 staged TLWE”也可能因 delta 截断/缺失 `NVMeVirt` 行而误报；现已优先用 `dmesg --since` 抓 delta，并在 delta 无 `NVMeVirt/CSD` 行时把该检查降级为告警。
+- **ENGINE=gpu 仍可能依赖 cpu_reference_runner（fallback/对照）**：Step5 默认走后端 numpy 模块，但失败会回退 `cpu_reference_runner --privks-step4`；nvmevirt e2e 在 GPU 分支显式传 `--cpu-runner`（优先 build-clean），避免误用旧 `build/` 二进制造成 300s timeout。
+- **KSPBS split 需用 `preKS_gpbs`**：GPU baseline 的 KSPBS KeySwitch 使用 `is_gpbs=true`；拆分实现若误用普通 `preKS` 会必然 mismatch（优先对照 `../nvmevirt/tools/csd_kspbs_split.py` 的 keyset 解析）。
+- **keyset loopdev size=0 误判**：当 `CSD_KEYSET_IN_FLASH=1` 时 keyset 会变成 `/dev/loop*`（block device），若工具用 `os.fstat(fd).st_size` 判定长度可能得到 0，导致 `kspbs_split`/`privks_step4` 报 `... exceeds keyset file size (size=0)`；现已在 nvmevirt 用 `tools/csd_file_utils.py:fd_size_bytes()` 修复（commit: `2d2717e`），失败现场可见：`/tmp/csd_gpu_nvmevirt_regression_20260102_184154/kspbs_split/backend.log`。
+- **KSPBS split 的 full 对照可关**：nvmevirt 后端默认会跑一次 `mode=4 flags=2` 做 bit‑exact 对照；需要降开销时可在后端进程里设置 `CSD_KSPBS_SPLIT_VALIDATE=0`。
+- **KSPBS per-sample 回归“假失败”（脚本误判）**：`scripts/csd_gpu_nvmevirt_kspbs_split_per_sample_oneclick.sh` 曾把 `rg/grep` 参数写成 `\"...\"`，导致 pattern/路径都带引号，从而误报 `backend.log not found`；现已修复（正常 quoting + 仅打印关键证据行）。
+- **softmax staged 不能被当成“空输入错误”**：staged 中间 op 按合同 `tlwe_bytes=0` 且 TLWE payload 为空；`gpu_runtime_service` 必须放行，否则会 echo 回退、输出全 0（已修复：`sw/gpu_runtime_service/src/tfhe_gpu_executor.cpp:1844`；需重编译 build-clean）。
+- **softmax 分阶段打点提取**：用 `rg -n "\\[TFHE_GPU_EXEC\\]\\[FUNC_METRICS\\]" "$OUT_DIR/gpu_runtime_service.log"`；不要写 `<OUT_DIR>`（shell 会当成重定向）。staged RPC 会在 `EXPORT` 时累计并打印该行（需重编译 build-clean）。
+- **softmax KSPBS 调用密度打点**：`WOP_GPU_KSPBS_CALL_METRICS=1` 时，`gpu_runtime_service.log` 会打印 `[TFHE_GPU_EXEC][KSPBS_CALLS] stage=... stride0=... stride1=...`（用于把瓶颈定位到 PBS primitive 的调用密度）。
+- **softmax KSPBS LUT 热点打点**：`WOP_GPU_KSPBS_LUT_METRICS=1`（需同时开 `WOP_GPU_KSPBS_CALL_METRICS=1`）时，`gpu_runtime_service.log` 会打印 `[TFHE_GPU_EXEC][KSPBS_LUT_SAMPLES] stage=... lut10(lshift)=...`（按 `lut_id` 统计 samples，输出 topN，并带 LUT 名称；用于决定 M9 优先拆哪些 LUT/流程）。
+- **全局开启 split 导致 softmax 超时**：当 shell 中全局设置 `WOP_GPU_KSPBS_SPLIT=1`（或 `WOP_GPU_KSPBS_SPLIT_LUTS=...`）时，`softmax` 默认 `N=16` 的 DIV(op=6) 可能超过 `GPU_TIMEOUT=120s`，后端报 `TimeoutError`；回归脚本默认对 `softmax/` unset split，并用 `softmax_kspbs_split_n4/`（N=4）专门取证（需要继承 split 可设 `CSD_REGRESSION_SOFTMAX_KEEP_SPLIT=1`）。备注：性能优化后 `NO_SUDO=1` 下 `N=16` split 已可压进 120s（见 `..._20260101_202516/`），但 nvmevirt e2e 仍可能卡边界。
+
+## 5) 文档级 GPU‑CSD e2e 推进计划（已与用户对齐）
+- M0（基线验收）：跑通 `NO_SUDO=0` 的 softmax e2e，并固化证据关键词与产物目录。
+- M1（文档总入口，已落地）：`docs/gpu_csd_e2e.md`（现状链路、目标分工、验收矩阵）。
+- M2（算子边界合同，已落地草案）：`docs/gpu_csd_operator_contract.md`（GPU 只做盲旋/FFT-heavy；Step5/SampleExtract/KeySwitch 迁回 CSD/后端侧）。
+- M3（渐进迁移）：先在 host backend 模拟 CSD 侧低开销算子，再逐步下沉到 RTL/FTL；每迁移一步都用同一套脚本回归。
+  - 进度：`flags[6]=0x40(step4_only)` 已在 `gpu_runtime_service` 生效（CB 模式跳过 privks），为“GPU 只做 Step4-heavy”铺路。
+  - 进度：nvmevirt 后端已支持 `step4_only` 时调用 `cpu_reference_runner --privks-step4`（模拟 CSD 侧 Step5）。
+- M4（分工验收）：新增 `scripts/csd_gpu_nvmevirt_cb_step4only_oneclick.sh`，验证“GPU Step4-only + 后端 Step5”闭环，作为后续 RTL 下沉的回归锚点。
+- M5（Preprocess 下沉）：新增 `flags[5]=0x20(premod_in)` 与 `scripts/csd_gpu_nvmevirt_cb_step4only_premod_oneclick.sh`，把 preModSwitch/normalize 挪到后端侧（GPU 只吃 premod(i32)）。
+- M6（Step5 下沉：软件模块）：nvmevirt 后端内置 Step5(PrivKS)（mmap keyset + numpy），减少对 `cpu_reference_runner` 的依赖；无 sudo 自检：`scripts/csd_gpu_privks_step4_backend_smoke.sh`。
+- M7（FunctionEval 分阶段接口）：softmax 默认走后端分阶段编排（`FLAGS=0x10`），先把“控制面拆分 + session 协议 + 取证打点”做出来；**阶段本身不代表轻算子**（MAX/SHIFT/SUM/DIV 在当前实现里仍会触发 PBS primitive），真实分工应按 PBS 微流程（Step4/Step5、SampleExtract/KeySwitch vs BR/FFT-heavy）推进。
+- M8（PBS primitive 微流程拆分）：以 KSPBS 为样例跑通“后端 KeySwitch+SampleExtract + GPU bootstrap-only”的 bit‑exact 对照，并复用 nvmevirt 2-bit mode 空间（`mode=3 + flags=0x08`）触发后端 split 微流程（GPU service 内部用 `mode=4` 执行），入口：`scripts/csd_gpu_nvmevirt_kspbs_split_oneclick.sh`。
+- M9（PBS split 取证扩面）：把 KSPBS split 接进 FunctionEval/softmax 的真实热点（如 DIV 阶段），并纳入回归做 N=4 快跑取证（默认 `softmax_kspbs_split_n4/`；日志含 `[KSPBS_SPLIT]` 与分段耗时）。
+- M10（稳态与冷启动抖动治理）：回归默认支持 `CSD_KEEP_SESSION=1`（复用 loopdev+gpu_runtime_service）与 `CSD_KEEP_BACKEND=1`（复用 `csd_sw_backend.py`），降低 macrobenchmark 前的 keyset 导入与 python mmap 抖动。
+- M11（macrobenchmark：Zama deep‑nn）：workload 已明确为 `zama-ai/concrete-ml` 的 `benchmarks/deep_learning.py`（MNIST + CNN），本机路径：`~/workspace/deep-nn`（git rev: `b1eda36`）。
+  - 方案与里程碑（正确性/性能）：`docs/gpu_csd_deepnn_macrobenchmark_plan.md`（M0: nvmevirt/0xC0 取证；M1: 图谱画像；M2: 真实热点算子接入；M3: 可回归评测矩阵）。
+  - 新增全流程一键：`scripts/csd_gpu_nvmevirt_macro_deepnn_fullflow_oneclick.sh`（M0 单次 nvmevirt + M2 hotspot + M3 sweep，需 `sudo -v`；默认 M0 走 FHE nvmevirt，可用 `RUN_FHE_NVMEVIRT=0` 跳过；`RUN_DUMP_RAW=1` 同步开 raw dump+uncompressed）。
+  - M1 图谱画像：默认 `CSD_DEEPNN_PROFILE=1` 输出 `OUT_DIR/deepnn_profile.json`（list，记录 PBS/KS/bitwidth/keys/IO bytes + per_parameter 计数）；摘要：`python3 tools/csd_deepnn_profile_summary.py "$OUT_DIR/deepnn_profile.json"`；证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_20260106_140335/`。
+  - M2 正确性门槛：默认启用 `CSD_DEEPNN_OFFLOAD_SOFTMAX_STRICT=1`（阈值 `CSD_DEEPNN_OFFLOAD_SOFTMAX_MAX_MAE=1e-3`），并在 hook 日志中打印 `argmax/ref_argmax/match`；证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_20260106_143412/`。
+  - 最新取证（NO_SUDO=1，v2 keyset）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_20260109_091044/`（`run.log` 含 `[CSD_DEEPNN] softmax offload ok ... match=1`；`deepnn_run_summary.txt` 含 `keyset_meta` 与 `param_alignment_hint`）。
+  - 最新取证（NO_SUDO=0，GPU 强制）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_20260114_165026/`（`run.log` 含 `fhe offload ok: backend=nvmevirt device=cuda`；`dmesg_new.log` 含 `CSD: op=0xc0 mode=3 flags=0x04`；`concrete_mlir_summary.json` 含 FHELinalg ops top list）。
+  - 最新取证（2026-01-30，L2 一键闭环）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260130_095746/`
+    - `driver.log` 末尾 `[ok] L2 oneclick done.`；`m4_align` 18/18 `PASS`。
+    - `m5_m6_run/run.log` 含 `[CSD_DEEPNN][L2] fhe compare ok: mae=0 argmax_match=1.000 backends=ipc,nvmevirt` 与 `softmax offload ok ... mae=1.211e-05 ... match=1`。
+- 最新取证（NO_SUDO=1，多样本 10/10）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_s10m10_20260114_204704/`（`run.log` 含 `FHE Accuracy=0.300000`、`Quantized Clear (FHE set) Accuracy=0.300000`、`Execution Time per sample for FHE=11.652727`）。
+- 最新取证（NO_SUDO=1，变体过滤 Deep50CNN 单样本）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_nosudo_deep50_20260126_101311/`（`run.log` 含 `softmax offload ok ... match=1`；`gpu_runtime_service_1.log` 含 `variant name=concrete_poly2048_k1_n0771_n22048 id=1`）。建议 NO_SUDO=1 时配合 `CSD_VARIANTS_ALLOW_IDS`/`CSD_VARIANTS_MAX_SERVICES=1` 限制并发服务数。
+- 最新取证（NO_SUDO=1，PBS hotspot Deep50 profile）：`/tmp/csd_gpu_nvmevirt_deepnn_pbs_hotspot_nosudo_deep50_20260126_102335/`（`ipc.log` 含 `GLWE matches golden`，`gpu_runtime_service.log` 含 `[TFHE_GPU_EXEC][CPU_WOKS] override active`）。建议 NO_SUDO=1 固定 `CSD_DEEPNN_PBS_HOTSPOT_FORCE_CPU_WOKS=1` + `CSD_DEEPNN_PBS_HOTSPOT_MAX_POLY=2048` + `CSD_DEEPNN_PBS_HOTSPOT_MAX_GLWE=1`。
+  - 更新（2026-01-30）：PBS hotspot GPU WoKS 已与 CPU bit‑exact 对齐（poly=2048/K=1/n0=771），可不启 `FORCE_CPU_WOKS`。
+    - 证据：`/tmp/csd_gpu_nvmevirt_pbs_hotspot_dbg_20260130_133800/` 下 `cpu_woks.bin` vs `gpu_woks.bin` mismatch=0/2049，`console.log` 含 `match=1`。
+    - 注意：`WOP_GPU_WOKS_DEBUG=1` 会触发 GPU 内部 CPU 参考，需显著上调 `GPU_TIMEOUT`（`/tmp/csd_gpu_nvmevirt_pbs_hotspot_dbg_20260130_133200/ipc.log` 超时）。
+    - 更新（2026-01-30）：NO_SUDO=0 + nvmevirt e2e 取证通过（poly=2048/K=1/n0=771）。
+      - 证据：`/tmp/csd_gpu_nvmevirt_pbs_hotspot_dbg_20260130_134500/`，`e2e.log` 含 `GLWE matches golden`，`dmesg_new.log` 含 `CSD: op=0xc0 mode=2`，`cpu_woks.bin` vs `gpu_woks.bin` mismatch=0/2049。
+  - 最新取证（NO_SUDO=0，多样本 10/10）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_s10m10_nvmevirt_20260114_213253/`（`run.log` 含 `fhe offload ok: backend=nvmevirt device=cuda`、`FHE Accuracy=0.300000`、`Execution Time per sample for FHE=22.071825`；`dmesg_new.log` 含 `CSD: op=0xc0 mode=3`）。
+  - 新增探针：`tools/csd_concrete_payload_probe.py` 可基于 `server.zip` + `deepnn_fhe_in*.bin` 分析 uncompressed Value.serialize 布局（用于后续 raw‑LWE 转换）。
+  - 压缩开关：Concrete‑ML 在编译时读取 `USE_INPUT_COMPRESSION/USE_KEY_COMPRESSION` 并覆盖 Configuration；宏脚本在 `CSD_DEEPNN_FHE_UNCOMPRESSED=1` 时默认关闭这两项并启用 `CSD_DEEPNN_FHE_KEEP_IO=1`（证据：/tmp/csd_gpu_nvmevirt_macro_deepnn_uncompressed_Deep20CNN_20260126_103235/ run.log 含 softmax offload ok）。。
+  - 新坑：uncompressed 输入 payload 超过 nvmevirt 16‑bit word 限制；新增 `CSD_DEEPNN_ALLOW_BIG_PAYLOAD=1` 时用 `TLWE_STAGE_BYTES` 全量落盘并由 backend 读取（`CSD_TLWE_STAGE_BYTES` 透传），descriptor 仍用 20500 words（证据：/tmp/csd_gpu_nvmevirt_macro_deepnn_uncompressed_Deep20CNN_20260126_103235/ run.log 含 CSD: op=0xc0 mode=3 flags=0x24 extra=787252）。。
+  - 2026‑01‑14：uncompressed + `CSD_DEEPNN_ALLOW_BIG_PAYLOAD=1` nvmevirt e2e 失败，backend 报 `Tried to transform transport value with incompatible raw info`（期望 shape=[1,1,8,8,2049]，实际 `integerPrecision=0`）；payload 在 deep‑nn venv 中 `Value.deserialize` + `server.run` 可直接通过，疑似 `/dev/mem` staging/读回损坏；证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_uncompressed_20260114_184707/backend.log`。
+  - 2026‑01‑14：已确认 `/dev/mem` staging 从 1MiB 边界开始与 `TLWE_FILE` 不一致；根因是 TLWE stage bytes > 1MiB 与 glwe bounce 基址（memmap_start+3MB）重叠，kernel 仍按 `tlwe_words*8` 估算；修复方向：mode=3+concrete 时用 cdw12 传 `tlwe_stage_bytes` 并把 bounce stripe base 挪到 TLWE 之后（`../nvmevirt/csd_engine.c`），`../nvmevirt/tools/csd_e2e_smoke.sh` 自动填 `EXTRA_CYCLES=$CSD_TLWE_STAGE_BYTES`。
+  - 2026‑01‑14：修复后 uncompressed nvmevirt e2e 通过；证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_uncompressed_20260114_195340/`（`run.log` 含 `fhe offload ok: backend=nvmevirt device=cuda`，`dmesg_new.log` 含 `override tlwe_bytes=1049396 via cdw12` 与 `CSD: op=0xc0 mode=3 flags=0x04`）。
+  - 2026‑01‑26：uncompressed + `CSD_DEEPNN_ALLOW_BIG_PAYLOAD=1` nvmevirt e2e 复跑通过（Deep20/Deep50）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_uncompressed_Deep20CNN_20260126_103235/`、`/tmp/csd_gpu_nvmevirt_macro_deepnn_uncompressed_Deep50CNN_20260126_103454/`（`run.log` 含 `fhe offload ok` 与 `softmax offload ok ... match=1`；`run.log`/`dmesg_new.log` 含 `CSD: op=0xc0 mode=3 flags=0x24 extra=787252` 与 `override tlwe_bytes=787252 via cdw12`；`backend.log` 含 `metrics cmd=4544/4545 mode=3 flags=0x10`）。风险：`csd_e2e_smoke.sh` 末尾出现 `Killed`，gpu_runtime_service 可能被系统杀死，需关注内存/并发。
+  - 2026‑01‑26：M0-only raw dump（`RUN_DUMP_RAW=1` + uncompressed + big payload）通过：`/tmp/csd_ff16_uc_Deep20CNN_20260126_110400/`、`/tmp/csd_ff16_uc_Deep50CNN_20260126_110620/`（`driver.log` 含 `raw dump check passed`；`m0_nvmevirt/run.log` 含 `fhe offload ok` 与 `CSD: op=0xc0 ... flags=0x24 extra=787252`；`m0_nvmevirt/dmesg_new.log` 含 `CSD: op=0xc0 mode=3`；`m0_nvmevirt/backend.log` 含 `metrics cmd=4402/4097 mode=3 flags=0x10`）。
+  - 2026‑01‑15：`NO_SUDO=1` + uncompressed + dumpraw；`/tmp/csd_gpu_nvmevirt_macro_deepnn_dumpraw_nosudo_20260115_093224/`（`run.log` 含 `fhe offload ok: backend=ipc device=cuda`；IPC 路径不产 `concrete_raw_*`，需 `NO_SUDO=0` nvmevirt e2e 复核）。
+  - 2026‑01‑15：`NO_SUDO=0` + dumpraw 取证：`/tmp/csd_gpu_nvmevirt_macro_deepnn_dumpraw_20260115_094415/`；`/tmp/csd_nvmevirt_session_nvme2n134_wop_gpu_runtime.sock/backend_service.log` 含 `concrete raw dump skipped: OUT_DIR missing`。已在 `../nvmevirt/tools/csd_e2e_smoke.sh` 补齐默认 `CSD_DEEPNN_CONCRETE_DUMP_RAW_DIR=$OUT_DIR`，已复跑确认落盘（/tmp/csd_ff16_uc_Deep20CNN_20260126_110400/ driver.log 含 raw dump check passed）。
+- 2026‑01‑15：后端回退：`../nvmevirt/tools/csd_sw_backend.py` 在未提供 dump dir 时回退到 `server.zip` 父目录；`NO_SUDO=1` 复跑 `/tmp/csd_gpu_nvmevirt_macro_deepnn_dumpraw_nosudo3_20260115_102837/` 仍为 IPC（不产 raw dump），已在 NO_SUDO=0 复跑取证。
+  - 证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260130_190210/driver.log` 含 `raw dump check passed`。
+  - 2026‑01‑15：fullflow 取证：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260115_115156/`（`m0_nvmevirt/run.log` 含 `softmax offload ok`；`m0_nvmevirt/dmesg_new.log` 含 `CSD: op=0xc0 mode=3 flags=0x10`；`m0_nvmevirt/backend.log` 含 `metrics cmd=4352`；`m3_sweep/sweep_stats.txt` 已生成）。
+  - 2026‑01‑15：fullflow（含 M2 hotspot）取证：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260115_121333/`（M0：`m0_nvmevirt/run.log` 含 `softmax offload ok`，`dmesg_new.log` 含 `CSD: op=0xc0 mode=3`，`backend.log` 含 `metrics cmd=4993`；M2：`m2_pbs_hotspot/e2e.log` 含 `GLWE matches golden`，`dmesg_new.log` 含 `CSD: op=0xc0 mode=2`，`backend.log` 含 `metrics cmd=4675`；M3：`m3_sweep/sweep_stats.txt` 已生成）。
+  - 2026‑01‑15：fullflow（默认 FHE nvmevirt）取证：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260115_124356/`（M0：`m0_nvmevirt/run.log` 含 `fhe offload ok: backend=nvmevirt device=cuda` 与 `softmax offload ok`；`m0_nvmevirt/dmesg_new.log` 含 `CSD: op=0xc0 mode=3`；`m0_nvmevirt/backend.log` 含 `metrics cmd=8192`；M2：`m2_pbs_hotspot/e2e.log` 含 `GLWE matches golden`，`m2_pbs_hotspot/dmesg_new.log` 含 `CSD: op=0xc0 mode=2`；M3：`m3_sweep/sweep_stats.txt` 已生成）。风险：未开启 `RUN_DUMP_RAW=1`，本次未落盘 `concrete_raw_*`。
+  - M3 回归：wrapper 自动生成 `OUT_DIR/deepnn_run_summary.txt`（progress.json + profile 摘要 + `keyset_meta` + `param_alignment_hint`）；多次跑方差：`REPEATS=5 NO_SUDO=1 bash scripts/csd_gpu_nvmevirt_macro_deepnn_sweep.sh` → `OUT_PARENT/sweep_summary.csv` + `OUT_PARENT/sweep_stats.txt`（已有 OUT_PARENT 可用 `python3 tools/csd_deepnn_sweep_summary.py --out-parent <OUT_PARENT>` 只做汇总）。
+- GPU 强制：`scripts/csd_gpu_nvmevirt_macro_deepnn_oneclick.sh` 在 `CSD_DEEPNN_FHE_NVMEVIRT=1` 时默认 `CSD_DEEPNN_REQUIRE_GPU=1`，deep‑nn 侧检查 `device=cuda` 已取证。
+  - 证据：`/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260130_190210/m0_nvmevirt/run.log` 含 `fhe offload ok: backend=nvmevirt executor=gpu_service device=cuda`；`/tmp/csd_gpu_nvmevirt_macro_deepnn_20260130_195115/run.log` 同样包含 `device=cuda`。
+- M3 nvmevirt e2e 方差（NO_SUDO=0, REPEATS=5）：`/tmp/csd_gpu_nvmevirt_macro_deepnn_sweep_20260106_170305/`（5 次均有 `CSD: op=0xc0 mode=3` 证据；offload_time 平均≈134.1s ±1.1s，exec_time 平均≈136.4s ±1.0s）。
+  - L1 取证（deep‑nn PBS 热点 e2e）：`/tmp/csd_gpu_nvmevirt_deepnn_pbs_hotspot_20260113_160615/`（`e2e.log` 含 `GLWE matches golden`；`dmesg_new.log` 含 `CSD: op=0xc0 mode=2`，参数族 poly=2048/K=1/n0=771）。
+  - 控制台输出对齐：`scripts/csd_gpu_nvmevirt_macro_deepnn_oneclick.sh` 默认 `CSD_DEEPNN_CONSOLE_PRETTY=1`，会剥离 ANSI/控制字符并过滤 tqdm 进度条（避免缩进乱飞），保留表格缩进，且把 `[CSD_DEEPNN]` 从进度条行尾拆成独立行；需要原始滚屏设 `CSD_DEEPNN_CONSOLE_PRETTY=0`（仍落盘 `OUT_DIR/run.log`）。
+  - 超时默认值：wrapper 默认 `GPU_TIMEOUT=240`（softmax offload 典型耗时 ~130s；启用 split/更大 N 时再上调）。
+  - 参数对齐现状：deep‑nn 编译期 PBS 参数与本项目 keyset/执行器不一致（不止一个维度），因此 deep‑nn 主 FHE 推理还没法“直接搬到我们的 keyset/执行器”跑，后续 M2/L2 必须先解决参数/密钥体系对齐（以 `deepnn_run_summary.txt` 的 `param_alignment_hint` 为准）。
+    - `polynomial_size=[1024,2048,4096]`（本项目 keyset 仅覆盖 `n_lvl1=1024 n_lvl2=2048`）
+    - `input_lwe_dimension=[771,772,813]`（本项目 keyset 固定 `n_lvl0=500`）
+    - `glwe_dimension=[1,2]`（本项目执行器默认 `glwe_dimension=1(K=1)`）
+  - M0 取证要点：`NO_SUDO=0` 时 `../nvmevirt/tools/csd_softmax_offload.py` 会自动走 nvmevirt/0xC0 e2e，并把证据落盘到本次 `OUT_DIR/backend.log` + `OUT_DIR/dmesg_new.log`（以及 `OUT_DIR/softmax_offload_e2e.log`）；长跑前先 `sudo -v`。
+  - M0 健壮性：`../nvmevirt/tools/csd_e2e_smoke.sh` 会在 reload nvmev.ko 后自动探测 NVMeVirt block device（model `CSL_Virt_MN_XX`）并更新 `DEV`（打印 `dev(resolved)`），避免默认 `/dev/nvme2n1` 因设备名漂移导致脚本早退。
+  - M0 正确性坑：FunctionEval softmax 的 `exp_minus` 依赖 spqlios FFT 表；若未设置 `TFHE_GPU_SPQLIOS_{FFT,IFFT}=1`（并提供 `TFHE_GPU_SPQLIOS_{FFT,IFFT}_TABLE`），可能出现 softmax 输出明显异常（如 pad=-8.5 的 exp 变成 ~1024）。`scripts/csd_gpu_nvmevirt_macro_deepnn_oneclick.sh` 已默认导出该 env。
+  - 坑：`benchmarks/pre_trained_models/*.pt` 可能是 git-lfs 指针文件；若报 `torch.load ... invalid load key, 'v'`，先 `git lfs pull` 或运行 `~/workspace/deep-nn/.venv/bin/python ~/workspace/deep-nn/benchmarks/deep_learning.py --train --epochs 1 --batch_size 32 --models ShallowNarrowCNN --datasets MNIST` 生成权重。
+  - 最小可跑（默认命令 + 自动拉起 `gpu_runtime_service`）：`NO_SUDO=1 bash scripts/csd_gpu_nvmevirt_macro_deepnn_oneclick.sh`
+  - 接入钩子：默认 `CSD_DEEPNN_OFFLOAD_SOFTMAX=1`，会触发一次 softmax offload（FunctionEval mode=3）。
+    - backend：`NO_SUDO=1` 走 IPC→`gpu_runtime_service`；`NO_SUDO=0` 走 nvmevirt/0xC0 e2e（证据见 `OUT_DIR/backend.log`/`OUT_DIR/dmesg_new.log`）。
+    - 性能试验（可选）：`CSD_DEEPNN_OFFLOAD_SOFTMAX_KSPBS_SPLIT=1`（启用 KSPBS split；默认 `WOP_GPU_KSPBS_SPLIT_LUTS=10,11`）。
+    - 实测（N=16，lut10/11）：split 反而变慢（`/tmp/csd_gpu_nvmevirt_macro_deepnn_20260106_193303/` vs `/tmp/csd_gpu_nvmevirt_macro_deepnn_20260106_152053/`，主要慢在 `op=6(DIV)`），macrobenchmark 默认不建议开启。
+    - 证据：`run.log` 含 `[CSD_DEEPNN] softmax offload ok`；`gpu_runtime_service.log` 含 `mode=3` 的 `[TFHE_GPU_EXEC][REQ]`。
+    - 产物目录：`/tmp/csd_gpu_nvmevirt_macro_deepnn_20260105_202825/`（含 `run.log` + `gpu_runtime_service.log`）。
+
+## deep‑nn 参数对齐（Concrete 分支入口，2026‑01‑06）
+- 分支：`deepnn-params-concrete`（对齐 deep‑nn/Concrete 编译期参数做 TFHE GPU baseline variant build+smoke），`deepnn-params-ours`（保留我方参数路线）。
+- 一键自检（NO_SUDO=1）：`NO_SUDO=1 GEN_KEYSET=0 bash scripts/csd_gpu_deepnn_concrete_align_oneclick.sh --out-dir /tmp/csd_gpu_nvmevirt_macro_deepnn_20260106_193303`
+- 自检证据：`/tmp/csd_gpu_deepnn_concrete_align_smoke_20260106_232956/`（2 个参数族 PASS；默认跳过 `polynomial_size=4096`）。
+- 4096 说明：profile 有 `polynomial_size=4096`；现已补齐 64KiB dynamic shared-mem 的 kernel 属性后可跑通 CB(mode=2) smoke，但仍默认关闭（设 `export CSD_DEEPNN_CONCRETE_ALIGN_ENABLE_4096=1` 开启；证据优先看 `OUT_PARENT/**/smoke.log`）。
+- 4096 自检证据（NO_SUDO=1）：`/tmp/csd_gpu_deepnn_concrete_align_smoke_4096_pass_20260107_004004/`（3 个参数族 build+`gpu_executor_smoke` 全部 PASS）。
+
+## WOPBS 16bit 补充（2026-01-24）
+- 物理 16bit 固定点已闭环：exp_minus bigLUT + spqlios FFT guard 稳定，FunctionEval smoke `max_abs_err≈0.001146`；softmax 校验改为参考值按 2^-10 **floor** 量化，默认阈值保持不变。
+- 量化开关：`WOP_GPU_FP_QUANT_BITS=16 WOP_GPU_FP_QUANT_INT_BITS=6`（等价 `WOP_GPU_FP_QUANT_FRAC_BITS=10`）。
+- 权重缺失（git‑lfs 不可用）时用训练补齐：`deep_learning.py --train --epochs 1` 先生成 `MNIST_Deep20CNN.pt`/`MNIST_Deep50CNN.pt` 再跑 FHE。
+- 2026-01-29：16bit exp_minus bigLUT 失配根因已定位为 **CB(lvl2) 未启用 spqlios FFT**；现已在 `gpu_runtime_service` 构造期自动设置 `TFHE_GPU_SPQLIOS_{FFT,IFFT}` 并加载 `/tmp/spqlios_{fft,ifft}_table.n4096.bin`，无需手工 env。FunctionEval smoke 收敛（max_abs_err≈0.001146）。
+- 2026-01-30：FunctionEval smoke 复核 PASS（max_abs_err=0.00114647），spqlios 默认启用后稳定。
+- 2026-01-30：bigLUT exp_minus VP dump 复核（/tmp/biglut_dbg_autospq_20260130_081454/）在未设置 TFHE_GPU_SPQLIOS_* env 下仍自动加载并对齐 CPU（rot_pre/br.d0 msg 同步）。
+- 2026-01-30：VP payload bytes mismatch 误报已修复（按实际 word_bytes 计算）；复跑 VP 日志不再出现该错误。
+- 2026-01-30：16bit exp_minus 低位 BR FFT 路径不稳定，默认改为 BR no‑FFT（可用 `WOP_GPU_BIGLUT_BR_FORCE_FFT=1` 强制 FFT）。
+  - 修复点：`/home/pxr/workspace/tfhe-gpu-baseline-wopbs/src/basic/big_lut.cu`（`WOPBS_FP_TOTAL_BITS==16` 时 `br_nofft_default=true`）。
+  - 证据：`/tmp/gpu_function_eval_smoke_wopbs16_low10_dbg_latest.log` 含 `[PASS] function-eval smoke OK`（max_abs_err=0.00114647）。
+- 更新（2026-01-30）：16bit BR FFT 复核在 spqlios 表已加载时稳定；默认策略改为 **仅在 spqlios FFT 表缺失时** fallback 到 BR no‑FFT。
+  - 修复点：`/home/pxr/workspace/tfhe-gpu-baseline-wopbs/src/basic/big_lut.cu`（`br_nofft_default = !tfhe_gpu_spqlios_fft_loaded()`）。
+  - 证据：`/tmp/gpu_function_eval_smoke_wopbs16_low10_dbg_default_fft_20260130.log`、`/tmp/gpu_function_eval_smoke_wopbs16_low10_fft_check_20260130.log`（PASS，LUT check 一致）。
+  - 复核：`/tmp/gpu_function_eval_smoke_build-clean_20260130.log`（build-clean PASS，max_abs_err=1.10313e-06）。
+- 更新（2026-01-31）：bigLUT BR FFT 增加 **按 N 的 spqlios 表就绪检测**（N=1024→n2048，N=2048→n4096）；`CSD_NO_FALLBACK=1` 或 `WOP_GPU_BIGLUT_REQUIRE_SPQLIOS=1` 下若缺表直接报错退出，避免静默误跑；可用 `WOP_GPU_BIGLUT_SPQLIOS_DEBUG=1` 打印表就绪状态。
+  - 修复点：`/home/pxr/workspace/tfhe-gpu-baseline-wopbs/src/twiddle_override.cu`、`/home/pxr/workspace/tfhe-gpu-baseline-wopbs/src/basic/big_lut.cu`、`/home/pxr/workspace/tfhe-gpu-baseline-wopbs/src/tfhe_functions.h`。
+  - 证据：`CSD_NO_FALLBACK=1 WOP_GPU_BIGLUT_SPQLIOS_DEBUG=1 build-wopbs16_low10_dbg/gpu_function_eval_smoke` PASS（`/tmp/gpu_function_eval_smoke_16bit_spql_20260131.log`，`max_abs_err=0.00114647`，多次 `[BIGLUT] spqlios_ready=1`）。
+- 回归（2026-01-30）：NO_SUDO=0 nvmevirt 全量回归 PASS。
+  - 证据：`/tmp/csd_gpu_nvmevirt_regression_20260130_141626/` 末尾 `[PASS] nvmevirt regression OK`，`metrics_summary.txt` 落盘。
+- 更新（2026-01-30）：no‑fallback 回归改为 **softmax 保持 split**（不再自动清除 split）。
+  - 位置：`scripts/csd_gpu_nvmevirt_regression_oneclick.sh` 在 `CSD_NO_FALLBACK=1` 时强制 `CSD_REGRESSION_SOFTMAX_KEEP_SPLIT=1`。
+  - 证据：`CSD_NO_FALLBACK=1 NO_SUDO=0 GPU_WOKS_NATIVE=1` 回归 PASS（`/tmp/csd_gpu_nvmevirt_regression_20260130_170810/` 末尾 `[PASS] nvmevirt regression OK`）。
+- 更新（2026-01-30）：no‑fallback 其它一键验证通过（NO_SUDO=0）。
+  - `scripts/csd_gpu_nvmevirt_oneclick.sh`：`/tmp/csd_gpu_nvmevirt_oneclick_20260130_172059/`（`[PASS] All cases OK`）。
+  - `scripts/csd_gpu_nvmevirt_softmax_oneclick.sh`：`/tmp/csd_gpu_nvmevirt_softmax_20260130_172347/`（`fail=0`）。
+  - `scripts/csd_gpu_nvmevirt_cb_step4only_oneclick.sh`：`/tmp/csd_gpu_nvmevirt_cb_step4only_20260130_172558/`（`[PASS] CB step4_only split e2e OK`）。
+  - `scripts/csd_gpu_nvmevirt_kspbs_split_oneclick.sh`：`/tmp/csd_gpu_nvmevirt_kspbs_split_20260130_172738/`（`[PASS] nvmevirt e2e KSPBS split OK`）。
+- 更新（2026-01-30）：no‑fallback 其余一键与 fullflow 验证通过（NO_SUDO=0）。
+  - `scripts/csd_gpu_nvmevirt_cb_step4only_premod_oneclick.sh`：`/tmp/csd_gpu_nvmevirt_cb_step4only_premod_20260130_174504/`（`[PASS] CB step4_only + premod split e2e OK`）。
+  - `scripts/csd_gpu_nvmevirt_kspbs_split_per_sample_oneclick.sh`：`/tmp/csd_gpu_nvmevirt_kspbs_split_per_sample_20260130_174643/`（`[PASS] nvmevirt e2e KSPBS split per-sample-lut OK`）。
+  - `scripts/csd_gpu_nvmevirt_deepnn_pbs_hotspot_oneclick.sh --profile /tmp/csd_gpu_nvmevirt_macro_deepnn_l2_20260130_095746/m5_m6_run/deepnn_profile.json`：
+    `/tmp/csd_gpu_nvmevirt_deepnn_pbs_hotspot_20260130_174748/`（`GLWE matches golden`）。
+  - `scripts/csd_gpu_nvmevirt_macro_deepnn_oneclick.sh`：
+    `/tmp/csd_gpu_nvmevirt_macro_deepnn_20260130_175040/`（`[ok] deep-nn macrobenchmark finished`，softmax offload `match=1`）。
+    - 注意：no‑fallback 下 `CSD_KEEP_SESSION=1/CSD_KEEP_BACKEND=1` 会被 `csd_e2e_smoke.sh` 拒绝（`softmax_offload_e2e.log` 报 `[err][no-fallback] CSD_KEEP_SESSION=1`）；需显式设 `CSD_KEEP_SESSION=0 CSD_KEEP_BACKEND=0`。
+  - `scripts/csd_gpu_nvmevirt_macro_deepnn_fullflow_oneclick.sh`：
+    `/tmp/csd_gpu_nvmevirt_macro_deepnn_fullflow_20260130_175334/`（`[ok] fullflow macro deep-nn done`，M0/M2/M3 均落盘，`sweep_stats.txt` 已生成）。
